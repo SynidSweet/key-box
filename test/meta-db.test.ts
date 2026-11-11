@@ -1,7 +1,7 @@
 // KBOX-5: the metadata database never holds a value, by construction; private.db is a separate file behind a separate port.
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { openMetaDatabase } from '../src/shell/db.ts';
@@ -89,4 +89,15 @@ test('KBOX-5 private.db is its own file and its rows never reach meta.db', async
   const reader = new DatabaseSync(join(dir, 'private.db'));
   t.after(() => reader.close());
   assert.equal((reader.prepare('SELECT count(*) AS n FROM push_subscriptions').get() as { n: number }).n, 1, 'the rows really are in private.db');
+});
+
+test('KBOX-5 no code outside private-db.ts and main-core.ts opens private.db or imports its adapter', () => {
+  const root = new URL('../src/', import.meta.url).pathname;
+  const files = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(dir, e.name)) : [join(dir, e.name)]));
+  const naming = files(root)
+    .filter((f) => /private[.-]db/.test(readFileSync(f, 'utf8')))
+    .map((f) => relative(root, f))
+    .sort();
+  assert.deepEqual(naming, ['main-core.ts', 'shell/private-db.ts']);
 });

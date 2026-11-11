@@ -1,4 +1,4 @@
-// KBOX-5, KBOX-30: meta.db, the metadata database. Values live only under the vault directory; no column here can hold one.
+// KBOX-5, KBOX-30: meta.db, the metadata database. Values live only in the key store; no column here can hold one.
 // This file is the one home of the schema.
 import { DatabaseSync } from 'node:sqlite';
 import type { Random } from '../ports/random.ts';
