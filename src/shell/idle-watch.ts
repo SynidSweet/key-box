@@ -10,6 +10,7 @@ export const WINDOW_MS = 7 * 24 * 3600_000;
 const LINE_PCT = 20;
 const MARGIN_PCT = 5;
 const RESERVE_TARGET = 0.3;
+const RESERVE_CHUNK = 1024 * 1024;
 
 export interface ProcSample {
   readonly at: number;
@@ -91,6 +92,8 @@ export interface IdleWatchDeps {
   /** The nominal link speed of `deploy/runtime.config.json`. */
   readonly linkMbps: number;
   readonly notifier: { notice(code: 'proc_unreadable'): void };
+  /** Allocates one chunk of the reserve, filled so its pages are touched. Default: `Buffer.alloc(bytes, 1)`. */
+  readonly allocate?: (bytes: number) => Buffer;
 }
 
 export interface IdleWatch {
@@ -105,7 +108,10 @@ type Read = { readonly ok: true; readonly sample: ProcSample; readonly totalKb: 
 
 export function createIdleWatch(deps: IdleWatchDeps): IdleWatch {
   let samples: ProcSample[] = [];
-  let reserve: Buffer = Buffer.alloc(0);
+  // The reserve is held in 1 MiB chunks: it grows by the chunks it lacks and shrinks by dropping chunks, so the memory
+  // already held is never allocated a second time (a whole new buffer each hour would double it until collected).
+  let reserve: Buffer[] = [];
+  const allocate = deps.allocate ?? ((bytes: number): Buffer => Buffer.alloc(bytes, 1));
   let warned = false;
   let reportedUnreadable = false;
 
@@ -132,8 +138,10 @@ export function createIdleWatch(deps: IdleWatchDeps): IdleWatch {
       // The reserve is part of what is used, so the gap to 30% is measured with it and only the gap is kept.
       const totalBytes = got.totalKb * 1024;
       const usedBytes = (s.memUsedPct / 100) * totalBytes;
-      const want = Math.max(0, Math.round(reserve.length + RESERVE_TARGET * totalBytes - usedBytes));
-      if (want !== reserve.length) reserve = Buffer.alloc(want, 1); // filled, so the pages are touched
+      const held = reserve.length * RESERVE_CHUNK;
+      const chunks = Math.max(0, Math.round((held + RESERVE_TARGET * totalBytes - usedBytes) / RESERVE_CHUNK));
+      if (chunks < reserve.length) reserve = reserve.slice(0, chunks);
+      while (reserve.length < chunks) reserve.push(allocate(RESERVE_CHUNK));
       samples = [...samples.filter((x) => x.at >= s.at - WINDOW_MS), s];
       const first = samples[0];
       if (first === undefined || s.at - first.at < WINDOW_MS) return;
@@ -141,9 +149,9 @@ export function createIdleWatch(deps: IdleWatchDeps): IdleWatch {
       if (near && !warned) deps.push.send({ title: 'The box looks idle to Oracle', kind: 'idle' });
       warned = near;
     },
-    reserveBytes: () => reserve.length,
+    reserveBytes: () => reserve.length * RESERVE_CHUNK,
     stop() {
-      reserve = Buffer.alloc(0);
+      reserve = [];
     },
   };
 }

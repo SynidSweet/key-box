@@ -36,7 +36,7 @@ test('KBOX-21 the figures: CPU as the 95th percentile of busy over total per int
   assert.equal(f.memPct, 40);
 });
 
-async function procWorld(t: Parameters<typeof tempDir>[0]) {
+async function procWorld(t: Parameters<typeof tempDir>[0], allocate?: (bytes: number) => Buffer) {
   const dir = await tempDir(t);
   const files = { stat: join(dir, 'stat'), meminfo: join(dir, 'meminfo'), netdev: join(dir, 'net_dev') };
   let busy = 0;
@@ -53,7 +53,7 @@ async function procWorld(t: Parameters<typeof tempDir>[0]) {
   const clock = new FakeClock(1_700_000_000_000);
   const push = new FakePush();
   const notices: string[] = [];
-  const watch = createIdleWatch({ files, clock, push, linkMbps: 1, notifier: { notice: (code) => void notices.push(code) } });
+  const watch = createIdleWatch({ files, clock, push, linkMbps: 1, notifier: { notice: (code) => void notices.push(code) }, ...(allocate === undefined ? {} : { allocate }) });
   return { files, step, clock, push, notices, watch };
 }
 
@@ -87,6 +87,28 @@ test('KBOX-21 the reserve keeps memory at or above 30% of MemTotal and is releas
   assert.equal(w.watch.reserveBytes(), 0);
 });
 
+
+test('KBOX-21 the reserve is never allocated again as a whole: it grows by the missing part only, a small move allocates nothing, and it shrinks without allocating', async (t) => {
+  const allocated: number[] = [];
+  const w = await procWorld(t, (bytes) => {
+    allocated.push(bytes);
+    return Buffer.alloc(bytes, 1);
+  });
+  w.step(5, 9216, 0); // 1 MiB used of 10 MiB: the reserve is 2 MiB
+  w.watch.sample();
+  assert.equal(w.watch.reserveBytes(), 2 * MIB);
+  w.step(5, 8192, 0); // 2 MiB used, the reserve included: 3 MiB are wanted, 1 MiB more
+  w.watch.sample();
+  assert.equal(w.watch.reserveBytes(), 3 * MIB);
+  assert.equal(allocated.reduce((a, b) => a + b, 0), 3 * MIB, 'only the missing 1 MiB was allocated on growing');
+  w.step(5, 7169, 0); // 1 KiB less used than the line: no allocation for a move that small
+  w.watch.sample();
+  assert.equal(allocated.reduce((a, b) => a + b, 0), 3 * MIB);
+  w.step(5, 5120, 0); // 5 MiB used: 1 MiB is wanted
+  w.watch.sample();
+  assert.equal(w.watch.reserveBytes(), 1 * MIB);
+  assert.equal(allocated.reduce((a, b) => a + b, 0), 3 * MIB, 'shrinking allocates nothing');
+});
 test('KBOX-21 a failing /proc read is reported once as a notice, not swallowed', async (t) => {
   const w = await procWorld(t);
   w.step(5, 9000, 0);
