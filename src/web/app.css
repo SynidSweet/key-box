@@ -4,6 +4,7 @@
 body { margin: 0; padding: 24px 16px 48px; background: var(--bg); color: var(--ink); font: 17px/1.5 system-ui, sans-serif; }
 main { max-width: 34rem; margin: 0 auto; }
 h1 { font-size: 1.5rem; margin: 0 0 1rem; }
+h2, p { overflow-wrap: anywhere; }
 p { margin: 0 0 1rem; }
 .soft { color: var(--soft); }
 .card { background: var(--card); border-radius: 14px; padding: 16px; margin: 0 0 16px; box-shadow: 0 1px 3px rgb(0 0 0 / 8%); }
