@@ -57,6 +57,13 @@ test('KBOX-45 keybox.service and keyrelay.service carry the hardening directives
   }
 });
 
+test('KBOX-3 keybox.service sets KB_LEND_SOCKET, or core opens no lend socket and every relay call answers 503; keyrelay.service names the same socket', () => {
+  const environment = (name: string): string[] => words(directives(read(name), 'Service').get('Environment'));
+  const lendSocket = (name: string): string[] => environment(name).filter((w) => w.startsWith('KB_LEND_SOCKET='));
+  assert.deepEqual(lendSocket('keybox.service'), ['KB_LEND_SOCKET=/run/keybox-lend/lend.sock']);
+  assert.deepEqual(lendSocket('keyrelay.service'), lendSocket('keybox.service'));
+});
+
 test('KBOX-45 no unit puts anyone in another\'s group: the only SupplementaryGroups of any deploy unit is the root kb-code unit\'s tty', () => {
   const units = readdirSync(deploy).filter((f) => f.endsWith('.service'));
   assert.ok(units.includes('keybox.service') && units.includes('keyrelay.service'));
