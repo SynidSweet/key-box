@@ -79,6 +79,26 @@ test('KBOX-44 runtime.lock pins each binary by sha256 with an official URL', () 
   for (const b of lock) assert.match(b.url, b.name === 'node' ? /^https:\/\/nodejs\.org\/dist\/v24\./ : /^https:\/\/github\.com\/caddyserver\/caddy\/releases\/download\//);
 });
 
+/** A `NAME=<hex>` line of the bootstrap's release env. */
+const envHash = (name: string): string | undefined => new RegExp(`^\\s*${name}=([0-9a-f]{64})$`, 'm').exec(cloudInit)?.[1];
+
+test('KBOX-44 the bootstrap checks the very binaries and archives runtime.lock pins, none of them a placeholder, each downloaded from the URL the lock names', () => {
+  const text = read('runtime.lock');
+  const lock = parseRuntimeLock(text);
+  assert.ok(lock, 'runtime.lock parses');
+  const zero = '0'.repeat(64);
+  for (const [name, env] of [['node', 'NODE'], ['caddy', 'CADDY']] as const) {
+    const pin = lock.find((b) => b.name === name);
+    assert.ok(pin !== undefined, name);
+    assert.notEqual(pin.sha256, zero, `${name}: a real binary hash`);
+    assert.equal(envHash(`${env}_SHA256`), pin.sha256, `${env}_SHA256 is the binary runtime.lock pins`);
+    const archive = new RegExp(`^# ${name} archive sha256 ([0-9a-f]{64}) \\(from https://\\S+\\)$`, 'm').exec(text)?.[1];
+    assert.ok(archive !== undefined && archive !== zero, `${name}: runtime.lock names its archive's sha256 and where it was read`);
+    assert.equal(envHash(`${env}_ARCHIVE_SHA256`), archive, `${env}_ARCHIVE_SHA256 is the archive runtime.lock names`);
+    assert.ok(cloudInit.includes(`"${pin.url}"`), `${name}: the bootstrap downloads the URL runtime.lock names`);
+  }
+});
+
 // --- KBOX-46 -----------------------------------------------------------------------------------------------------------
 
 test('KBOX-46 the relay unit denies link-local, private and loopback addresses and allows only the resolver stub', () => {
