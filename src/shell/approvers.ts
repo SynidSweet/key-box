@@ -89,6 +89,12 @@ function keysOf(r: ApproverRecord): ApproverKeys | undefined {
   return passkey.ok && device.ok ? { approverId: r.approverId, credentialId: fromB64u(r.credentialId), passkey: passkey.key, device: device.key } : undefined;
 }
 
+/** The fixed reason of a failed registration: the error's detail code, else its code; anything not ours is `internal`. */
+function failureReason(error: unknown): string {
+  if (!(error instanceof ApiError)) return 'internal';
+  return error.detail !== undefined && 'code' in error.detail ? error.detail.code : error.code;
+}
+
 export type ProofCheck = { readonly ok: true; readonly approverId: string; readonly proof: Omit<ApprovalProof, 'approval_id'> } | { readonly ok: false; readonly code: string };
 
 export interface ApproversDeps {
@@ -102,6 +108,9 @@ export interface ApproversDeps {
   readonly domain: string;
   readonly wordlist: readonly string[];
 }
+
+/** How a registration code's life ended, for the approval that opened it. */
+export type AddSettle = (result: 'done' | 'failed', reason: string) => void;
 
 export interface Registration {
   readonly approver: NewApprover;
@@ -127,10 +136,17 @@ export interface Approvers {
   setup(code: string, registration: Registration): Promise<string>;
   /** Recovery (KBOX-20): the new approver replaces every other, each told by push first, after root checked the code. */
   recover(code: string, registration: Registration): Promise<string>;
-  /** After an approved `approver_add`: a one-time registration code for the new device (KBOX-53). */
-  startAdd(approvalProof: ApprovalProof): string;
+  /**
+   * After an approved `approver_add`: a one-time registration code for the new device (KBOX-53). `settle` is called exactly
+   * once, when the code's life ends: `done` when the device registered; `failed` with a fixed reason when the registration
+   * was refused (`root_refused`, `proof_refused`, ...), the code ran out (`code_expired`), was replaced by a newer approved
+   * add (`superseded`) or the approvers changed under it (`cancelled`: a recovery, or the removal of any approver).
+   */
+  startAdd(approvalProof: ApprovalProof, settle: AddSettle): string;
   /** The new device's step: the registration code, its keys and their proof. */
-  finishAdd(code: string, registration: Registration): Promise<{ readonly approverId: string; readonly approvalId: string }>;
+  finishAdd(code: string, registration: Registration): Promise<{ readonly approverId: string }>;
+  /** Ends a registration code that has run out (the approvals sweep calls this). */
+  expire(): void;
   /** After an approved `approver_remove`: root first, then core's table. */
   remove(approverId: string, approvalProof: ApprovalProof): Promise<'done' | 'refused'>;
 }
@@ -141,7 +157,17 @@ export function createApprovers(deps: ApproversDeps): Approvers {
   /** Spent nonces, hex, with their issue time; dropped once too old to pass the age check anyway. */
   const spent = new Map<string, number>();
   const views = new Map<string, { readonly approverId: string; readonly until: number }>();
-  let pendingAdd: { readonly hash: string; readonly until: number; readonly proof: ApprovalProof } | undefined;
+  let pendingAdd: { readonly hash: string; readonly until: number; readonly proof: ApprovalProof; readonly settle: AddSettle } | undefined;
+
+  /** Ends the waiting registration code, if any, and tells its approval how. */
+  const endAdd = (result: 'done' | 'failed', reason: string): void => {
+    const ended = pendingAdd;
+    pendingAdd = undefined;
+    ended?.settle(result, reason);
+  };
+  const expire = (): void => {
+    if (pendingAdd !== undefined && deps.clock.now() > pendingAdd.until) endAdd('failed', 'code_expired');
+  };
 
   const records = (): readonly ApproverRecord[] => deps.store.listApprovers();
   const prune = (now: number): void => {
@@ -270,6 +296,7 @@ export function createApprovers(deps: ApproversDeps): Approvers {
       const others = records().filter((r) => r.approverId !== record.approverId);
       deps.push.send({ title: 'Recovery: every other approver of the key box is being removed', kind: 'recovery' });
       deps.store.replaceApprovers([record]);
+      endAdd('failed', 'cancelled');
       subscribe(reg);
       for (const r of others) deps.audit.append({ action: 'approver.removed', subject: r.approverId, at: deps.clock.now(), detail: { via: 'recovery' } });
       deps.audit.append({ action: 'recovery.used', subject: record.approverId, at: deps.clock.now() });
@@ -277,22 +304,32 @@ export function createApprovers(deps: ApproversDeps): Approvers {
       return record.approverId;
     },
 
-    startAdd(approvalProof) {
+    startAdd(approvalProof, settle) {
+      endAdd('failed', 'superseded');
       const code = codeFromBytes(deps.random.bytes(CODE_BYTES), deps.wordlist);
-      pendingAdd = { hash: codeHash(code), until: deps.clock.now() + REGISTRATION_CODE_TTL_MS, proof: approvalProof };
+      pendingAdd = { hash: codeHash(code), until: deps.clock.now() + REGISTRATION_CODE_TTL_MS, proof: approvalProof, settle };
       return code;
     },
 
+    expire,
+
     async finishAdd(code, reg) {
+      expire();
       const pending = pendingAdd;
-      if (pending === undefined || deps.clock.now() > pending.until || !codeMatches(code, pending.hash, deps.wordlist)) throw new ApiError('forbidden', 'code_refused');
+      if (pending === undefined || !codeMatches(code, pending.hash, deps.wordlist)) throw new ApiError('forbidden', 'code_refused');
       pendingAdd = undefined;
-      const record = admit(reg);
-      await askRoot({ kind: 'trust', change: 'approver_add', approval: pending.proof, approver: trusted(record) });
-      deps.store.putApprover(record);
-      subscribe(reg);
-      deps.audit.append({ action: 'approver.registered', subject: record.approverId, at: deps.clock.now(), detail: { via: 'approver_add' } });
-      return { approverId: record.approverId, approvalId: pending.proof.approval_id };
+      try {
+        const record = admit(reg);
+        await askRoot({ kind: 'trust', change: 'approver_add', approval: pending.proof, approver: trusted(record) });
+        deps.store.putApprover(record);
+        subscribe(reg);
+        deps.audit.append({ action: 'approver.registered', subject: record.approverId, at: deps.clock.now(), detail: { via: 'approver_add' } });
+        pending.settle('done', 'ok');
+        return { approverId: record.approverId };
+      } catch (error) {
+        pending.settle('failed', failureReason(error));
+        throw error;
+      }
     },
 
     async remove(approverId, approvalProof) {
@@ -304,6 +341,7 @@ export function createApprovers(deps: ApproversDeps): Approvers {
         throw error;
       }
       deps.store.removeApprover(approverId);
+      if (pendingAdd?.proof.approver_id === approverId) endAdd('failed', 'cancelled');
       deps.audit.append({ action: 'approver.removed', subject: approverId, at: deps.clock.now(), detail: { via: 'approver_remove' } });
       return 'done';
     },

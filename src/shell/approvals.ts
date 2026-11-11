@@ -136,6 +136,7 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
     deps.audit.append({ action, subject, at: deps.clock.now(), detail, ...(actor === undefined ? {} : { actor }) });
 
   const sweep = (): void => {
+    deps.approvers.expire();
     const now = deps.clock.now();
     const stale = db.prepare("SELECT approval_id FROM approvals WHERE status = 'pending' AND expires_at <= ?").all(now) as unknown as { approval_id: string }[];
     if (stale.length === 0) return;
@@ -267,7 +268,7 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
 
     const stored: StoredApproval = { approvalId, revision: held.revision, action, requester: requesterOf(held), proof: PROOF_KEPT.includes(action.kind) ? kept : undefined };
     if (action.kind === 'approver_add') {
-      const registrationCode = deps.approvers.startAdd(kept);
+      const registrationCode = deps.approvers.startAdd(kept, (result, reason) => executed(approvalId, result, result === 'done' ? 'ok' : reason));
       return { decision: 'approved', execution: { result: 'waiting' }, registrationCode };
     }
     const executor = deps.executors[action.kind];

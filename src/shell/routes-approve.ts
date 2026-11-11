@@ -230,7 +230,6 @@ export function approveRoutes(deps: ApproveRouteDeps): Route[] {
       parse: parseRegistration,
       handle: async ({ body }) => {
         const added = await approvers.finishAdd(body.code, body.registration);
-        approvals.executed(added.approvalId, 'done', 'ok');
         return { status: 201, json: { approver_id: added.approverId } };
       },
     }),

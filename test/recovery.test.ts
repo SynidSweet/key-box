@@ -9,7 +9,9 @@ import { directives, words } from './kit/index.ts';
 import { codeHash, parseWordlist } from '../src/pure/codes.ts';
 import { createCodeRoot } from '../src/shell/console.ts';
 import { softApprover } from './kit/approver.ts';
-import { RP, approveWorld, challenges, registerAt, wire } from './support/approve-world.ts';
+import type { SoftApprover } from './kit/approver.ts';
+import { RP, approveWorld, challenges, newApproverBody, registerAt, wire } from './support/approve-world.ts';
+import type { World } from './support/approve-world.ts';
 
 const WORDLIST = parseWordlist(readFileSync(new URL('../src/data/wordlist.txt', import.meta.url), 'utf8'));
 const MINUTE = 60_000;
@@ -262,4 +264,111 @@ test('KBOX-20 a refused approver_add registration leaves core\'s table unchanged
   assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 403);
   assert.deepEqual(w.core.approvers.ids(), [w.ownerId]);
   assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 403, 'the code is spent by the attempt root refused');
+});
+
+// --- the approver_add registration code: it ends with the approval, one way or another (KBOX-53, KBOX-20) -------------------
+
+/** Proposes approver_add from the owner's view session, approves it as `by`, and returns the approval id and its registration code. */
+async function approvedAdd(w: World, by: SoftApprover = w.owner): Promise<{ readonly id: string; readonly code: string }> {
+  const opened = await w.call('/app/propose-approver-add', { method: 'POST', cookie: await w.view(by) });
+  const id = (opened.json() as { approval_id: string }).approval_id;
+  const item = (await w.queue(by)).find((q) => q.approval_id === id);
+  assert.ok(item);
+  const approved = await w.decide(id, 'approve', w.proofFor(item, by));
+  assert.equal(approved.status, 200, approved.body);
+  return { id, code: (approved.json() as { registration_code: string }).registration_code };
+}
+
+/** What the audit says each approver_add approval ended as: `[approval id, result, reason]` for every `approval.executed` row. */
+const outcomes = (w: World): [string, unknown, unknown][] =>
+  w.parts.audit.read(0).entries.filter((e) => e.action === 'approval.executed').map((e) => [e.ref, e.detail['result'], e.detail['reason_code']]);
+
+const addCalls = (w: World): number => w.trust.calls.filter((c) => c.change === 'approver_add').length;
+
+test('KBOX-53 an approver_add whose registration root refuses ends as failed with root_refused, and one that registers ends as done', async (t) => {
+  const w = await approveWorld(t);
+  const refused = await approvedAdd(w);
+  w.trust.refuseNext('io_error');
+  assert.equal((await registerAt(w, '/recover/register', refused.code, softApprover())).status, 403);
+  assert.deepEqual(outcomes(w), [[refused.id, 'failed', 'root_refused']]);
+  const good = await approvedAdd(w);
+  assert.equal((await registerAt(w, '/recover/register', good.code, softApprover())).status, 201);
+  assert.deepEqual(outcomes(w).at(-1), [good.id, 'done', 'ok']);
+});
+
+test('KBOX-53 an approver_add registration refused for its own keys (not the code) ends the approval as failed too', async (t) => {
+  const w = await approveWorld(t);
+  const add = await approvedAdd(w);
+  const stranger = softApprover();
+  const n = await w.nonce('register');
+  const body = { code: add.code, approver: { ...newApproverBody(stranger) }, proof: wire(n, softApprover().prove(challenges.register(n), RP)), phrase: 'blue kettle' };
+  assert.equal((await w.call('/recover/register', { json: body })).status, 403, 'the proof is not by the keys sent');
+  assert.deepEqual(outcomes(w), [[add.id, 'failed', 'proof_refused']]);
+});
+
+test('KBOX-53 a registration code that the owner never uses ends the approval as failed at 10 minutes, seen by the next sweep and by a late attempt', async (t) => {
+  const w = await approveWorld(t);
+  const add = await approvedAdd(w);
+  w.clock.advance(10 * MINUTE);
+  await w.queue();
+  assert.deepEqual(outcomes(w), [], 'still open at 10 minutes');
+  w.clock.advance(1);
+  await w.queue();
+  assert.deepEqual(outcomes(w), [[add.id, 'failed', 'code_expired']]);
+  assert.equal((await registerAt(w, '/recover/register', add.code, softApprover())).status, 403);
+  assert.equal(addCalls(w), 0, 'root is never asked about an expired code');
+  const late = await approvedAdd(w);
+  w.clock.advance(10 * MINUTE + 1);
+  assert.equal((await registerAt(w, '/recover/register', late.code, softApprover())).status, 403, 'a late attempt is refused');
+  assert.deepEqual(outcomes(w).at(-1), [late.id, 'failed', 'code_expired']);
+});
+
+test('KBOX-53 a second approved approver_add replaces the first: the first code is dead and its approval ends as failed', async (t) => {
+  const w = await approveWorld(t);
+  const first = await approvedAdd(w);
+  const second = await approvedAdd(w);
+  assert.deepEqual(outcomes(w), [[first.id, 'failed', 'superseded']]);
+  assert.equal((await registerAt(w, '/recover/register', first.code, softApprover())).status, 403);
+  assert.equal((await registerAt(w, '/recover/register', second.code, softApprover())).status, 201);
+});
+
+test('KBOX-53 removing the approver who approved an approver_add cancels the registration code: root is not asked and no device is added', async (t) => {
+  const w = await approveWorld(t);
+  const second = await w.addApprover();
+  const add = await approvedAdd(w);
+  const calls = addCalls(w);
+  const removal = w.propose({ kind: 'approver_remove', approver_id: w.ownerId }, 'box');
+  const item = (await w.queue(second.approver)).find((q) => q.approval_id === removal.approval_id);
+  assert.ok(item);
+  assert.equal((await w.decide(item.approval_id, 'approve', w.proofFor(item, second.approver))).status, 200);
+  assert.deepEqual(w.core.approvers.ids(), [second.approverId]);
+  assert.equal((await registerAt(w, '/recover/register', add.code, softApprover())).status, 403);
+  assert.equal(addCalls(w), calls, 'root was not asked');
+  assert.deepEqual(w.core.approvers.ids(), [second.approverId], 'no device was added');
+  assert.deepEqual(outcomes(w).filter(([id]) => id === add.id), [[add.id, 'failed', 'cancelled']]);
+});
+
+test('KBOX-53 a recovery cancels the registration code of an approver_add the old approvers approved: the code registers nothing', async (t) => {
+  const w = await approveWorld(t);
+  const add = await approvedAdd(w);
+  const calls = addCalls(w);
+  const newcomer = softApprover();
+  assert.equal((await registerAt(w, '/recover', w.recoveryCode(), newcomer)).status, 201);
+  assert.equal((await registerAt(w, '/recover/register', add.code, softApprover())).status, 403);
+  assert.equal(addCalls(w), calls, 'root was not asked');
+  assert.equal(w.core.approvers.ids().length, 1, 'only the recovered approver is registered');
+  assert.deepEqual(outcomes(w), [[add.id, 'failed', 'cancelled']]);
+});
+
+test('KBOX-53 removing some other approver leaves the registration code alone: the proof that opened it is still good', async (t) => {
+  const w = await approveWorld(t);
+  const second = await w.addApprover();
+  const add = await approvedAdd(w);
+  const removal = w.propose({ kind: 'approver_remove', approver_id: second.approverId }, 'box');
+  const item = (await w.queue()).find((q) => q.approval_id === removal.approval_id);
+  assert.ok(item);
+  assert.equal((await w.decide(item.approval_id, 'approve', w.proofFor(item))).status, 200);
+  assert.deepEqual(w.core.approvers.ids(), [w.ownerId]);
+  assert.equal((await registerAt(w, '/recover/register', add.code, softApprover())).status, 201);
+  assert.deepEqual(outcomes(w).filter(([id]) => id === add.id), [[add.id, 'done', 'ok']]);
 });
