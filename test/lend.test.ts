@@ -6,11 +6,13 @@ import { chmodSync, statSync } from 'node:fs';
 import { connect } from 'node:net';
 import { test } from 'node:test';
 import { FRAME_JSON } from '../src/pure/lend-protocol.ts';
+import { relayErrorBody } from '../src/pure/relay-errors.ts';
 import { hashToken } from '../src/pure/tokens.ts';
 import { FrameDecoder, LendUnavailable, createLendClient, encodeFrame } from '../src/shell/lend-socket.ts';
 import { bytesOf, canary, waitUntil } from './kit/index.ts';
 import { lendWorld } from './support/lend-world.ts';
 import type { LendWorld } from './support/lend-world.ts';
+import { relayWorld } from './support/relay-world.ts';
 
 const NETWORK = '203.0.113.0/24';
 const textValue = (bytes: Uint8Array): Uint8Array => Buffer.from(Buffer.from(bytes).toString('hex'));
@@ -211,4 +213,14 @@ test('KBOX-50 a relay audit row is written closed (rule id, status, bytes, sourc
   );
   await waitUntil(() => w.core.events.after(0).some((e) => e.kind === 'box.notice'), 'the withheld notice');
   assert.deepEqual(w.core.events.after(0).filter((e) => e.kind === 'box.notice').map((e) => e.data), [{ code: 'credential_withheld', text: 'credential withheld' }]);
+});
+
+test('KBOX-3 the relay with core down answers 503 unavailable and journals fixed codes only, never the value', async (t) => {
+  const w = await relayWorld(t);
+  await w.lend.server.stop();
+  const reply = await w.call('/r/adminkey1/v1/models');
+  assert.deepEqual([reply.status, reply.body.toString()], [503, relayErrorBody('unavailable')]);
+  assert.equal(w.upstream.requests.length, 0);
+  assert.deepEqual([...w.journal], ['lend_unavailable', 'audit_unavailable']);
+  w.canary.assertAbsent({ 'relay journal': w.journal.join('\n'), reply: reply.body });
 });

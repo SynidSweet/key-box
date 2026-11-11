@@ -2,11 +2,14 @@
 // with many cases; the deny harness that sends every mustDeny sample through the running relay is in the second half.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { AllowRule, RelayProfile } from '../src/ports/relay-profile.ts';
-import { compileProfile, refuseWidening } from '../src/pure/profile.ts';
+import type { TestContext } from 'node:test';
+import type { AllowRule, DenyRule, RelayProfile } from '../src/ports/relay-profile.ts';
+import { checkRegistry, compileProfile, refuseWidening } from '../src/pure/profile.ts';
 import type { ProfileEngine } from '../src/pure/profile.ts';
 import { parseRelayTarget } from '../src/pure/target-parse.ts';
-import { IAM_HOST, PATH_HOST, STORAGE_HOST, hostProfile, pathProfile } from './fixtures/profiles.ts';
+import { IAM_HOST, PATH_HOST, STORAGE_HOST, hostProfile, leakyProfile, pathProfile } from './fixtures/profiles.ts';
+import { TEST_REGISTRY } from './support/lend-world.ts';
+import { relayWorld } from './support/relay-world.ts';
 
 const engineOf = (profile: RelayProfile): ProfileEngine => {
   const compiled = compileProfile(profile);
@@ -110,4 +113,76 @@ test('KBOX-25 widening refusal: a proposed rule that matches a mustDeny sample i
   assert.deepEqual(refuseWidening(engine, [fine], []), { ok: true });
   const sameAsDenied: AllowRule = { id: 'token', method: 'POST', host: PATH_HOST, pathTemplate: '/v1/auth/token', query: {} };
   assert.deepEqual(refuseWidening(engine, [sameAsDenied], []), { ok: false, code: 'allow_matches_must_deny', rule: 'token' });
+});
+
+// ---------------------------------------------------------------- the deny harness, through the running relay
+
+const KEYREF_OF: Readonly<Record<string, string>> = { pathplat: 'adminkey1', hostplat: 'hostkey001' };
+
+/** The relay target of a sample: its raw path (never URL-normalised), under the key, with the host first on a host-in-path profile. */
+function relayTargetOf(profile: RelayProfile, url: string): string {
+  const rest = url.slice('https://'.length);
+  const slash = rest.indexOf('/');
+  const host = rest.slice(0, slash);
+  const path = rest.slice(slash);
+  const keyref = KEYREF_OF[profile.platform] ?? '';
+  return profile.origin.kind === 'fixed' ? `/r/${keyref}${path}` : `/r/${keyref}/${host}${path}`;
+}
+
+/**
+ * KBOX-25: sends every sample of `samples` (by default the profile's own mustDeny) through a relay running `profile`, and
+ * returns each sample that got anything but 400 or 403, or reached upstream.
+ */
+async function leaks(t: TestContext, profile: RelayProfile, samples: readonly DenyRule[] = profile.mustDeny): Promise<string[]> {
+  const registry = TEST_REGISTRY.map((e) => (e.id === profile.platform ? { id: e.id, relay: profile } : e));
+  const w = await relayWorld(t, { registry });
+  const through: string[] = [];
+  for (const rule of samples) {
+    for (const sample of rule.samples) {
+      const before = w.upstream.requests.length;
+      const reply = await w.call(relayTargetOf(profile, sample.url), { method: sample.method });
+      if ((reply.status !== 400 && reply.status !== 403) || w.upstream.requests.length !== before) through.push(`${rule.id} ${sample.method} ${sample.url} -> ${reply.status}`);
+    }
+  }
+  return through;
+}
+
+const BROAD_TEMPLATES = ['/{rest:**}', '/v1/{rest:**}', '/v1/organization/{rest:**}', '/v1/organization/projects/{rest:**}', '/v1/auth/{rest:**}', '/v1/models/{rest:**}', '/v1/items/{rest:**}', '/v1/projects/{rest:**}', '/storage/v1/{rest:**}', '/storage/v1/b/{rest:**}', '/v1/{a:[A-Za-z0-9_.-]{1,128}}', '/v1/{a:[A-Za-z0-9_.-]{1,128}}/{b:[A-Za-z0-9_.-]{1,128}}'];
+const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
+
+/** The profile with every broad rule added that the widening check still accepts: as wide as the registry permits. */
+function widened(profile: RelayProfile): RelayProfile {
+  const engine = engineOf(profile);
+  const hosts = profile.origin.kind === 'fixed' ? [profile.origin.host] : profile.origin.hosts;
+  const added: AllowRule[] = [];
+  for (const host of hosts) {
+    for (const method of METHODS) {
+      for (const [i, pathTemplate] of BROAD_TEMPLATES.entries()) {
+        const rule: AllowRule = { id: `wide-${host}-${method}-${i}`.replace(/[^a-z0-9-]/gi, '-').toLowerCase(), method, host, pathTemplate, query: {} };
+        if (refuseWidening(engine, [rule], [rule.id]).ok) added.push(rule);
+      }
+    }
+  }
+  const wide = { ...profile, allow: [...profile.allow, ...added], tailRules: [...profile.tailRules, ...added.map((r) => r.id)] };
+  assert.equal(checkRegistry([{ id: wide.platform, relay: wide }]).ok, true, 'the widened profile passes the registry check');
+  assert.ok(added.length > 0, 'the widening added rules');
+  return wide;
+}
+
+test('KBOX-25 pathplat denies by name admin-key-create, project-key-create, service-account-create and login-token: every sample is 400 or 403 with no upstream call, default and widened', async (t) => {
+  assert.deepEqual(pathProfile.mustDeny.map((d) => d.id), ['admin-key-create', 'project-key-create', 'service-account-create', 'login-token']);
+  assert.deepEqual(await leaks(t, pathProfile), []);
+  assert.deepEqual(await leaks(t, widened(pathProfile)), []);
+});
+
+test('KBOX-25 hostplat denies by name account-key-create, access-token, id-token and hmac-key-create: every sample is 400 or 403 with no upstream call, default and widened', async (t) => {
+  assert.deepEqual(hostProfile.mustDeny.map((d) => d.id), ['account-key-create', 'access-token', 'id-token', 'hmac-key-create']);
+  assert.deepEqual(await leaks(t, hostProfile), []);
+  assert.deepEqual(await leaks(t, widened(hostProfile)), []);
+});
+
+test('KBOX-25 positive control: the harness reports the samples a leaky profile lets through', async (t) => {
+  const forgetful: RelayProfile = { ...leakyProfile, platform: 'pathplat', mustDeny: pathProfile.mustDeny.filter((d) => d.id === 'login-token') };
+  const through = await leaks(t, forgetful, pathProfile.mustDeny);
+  assert.deepEqual([...new Set(through.map((s) => s.split(' ')[0]))], ['admin-key-create', 'project-key-create', 'service-account-create']);
 });
