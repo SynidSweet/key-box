@@ -2,7 +2,7 @@
 // directory and opens one `install_update` approval {install: H, commit: C, base: H0}. On approval it checks that `current`
 // is still H0 and writes `<H>.request` for kb-install with the proof the phone sent; core itself writes nothing under
 // /opt/keybox. `settle` reads root's answer and emits `update.state`.
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { EventLog } from '../ports/events.ts';
 import type { Action } from '../pure/actions.ts';
@@ -14,10 +14,12 @@ import { parseTar } from '../pure/tar.ts';
 import type { Requester } from '../pure/slots.ts';
 import type { Approvals, Executor, Proposed } from './approvals.ts';
 import type { Route } from './http.ts';
-import { writeRootRequest } from './trust-installer.ts';
+import { markSettled, writeRootRequest } from './trust-installer.ts';
 
 export const TAR_TYPE = 'application/x-tar';
 /** The tar body: 20 MiB of file bytes plus a header and padding per entry and the end blocks. */
+/** What core stages for an install: the tree `<H>` and the new binaries `<H>.bin`. */
+const STAGED = /^([0-9a-f]{64})(?:\.bin)?$/;
 const TAR_BODY_LIMIT = RELEASE_LIMITS.totalBytes + (RELEASE_LIMITS.entries + 3) * 1024;
 
 export interface UpdaterDeps {
@@ -28,7 +30,7 @@ export interface UpdaterDeps {
   /** `/opt/keybox/current`. */
   readonly currentLink: string;
   readonly propose: (input: { readonly action: Action; readonly requester: Requester }) => Proposed;
-  readonly approvals: () => Pick<Approvals, 'waiting' | 'executed'>;
+  readonly approvals: () => Pick<Approvals, 'pending' | 'waiting' | 'executed'>;
   readonly events: Pick<EventLog, 'append'>;
 }
 
@@ -103,6 +105,18 @@ export function createUpdater(deps: UpdaterDeps): Updater {
     return Promise.resolve({ result: 'waiting' });
   };
 
+  /** Removes every staged tree and `<H>.bin` no install proposal still needs: one is pending (the slot holds one) or
+   * approved and waiting for root. Settled, denied, expired and replaced proposals leave nothing behind. */
+  const prune = (): void => {
+    if (!existsSync(deps.stagingDir)) return;
+    const approvals = deps.approvals();
+    const needed = new Set([...approvals.pending('install_update'), ...approvals.waiting('install_update')].flatMap((a) => (a.action.kind === 'install_update' ? [a.action.install] : [])));
+    for (const name of readdirSync(deps.stagingDir)) {
+      const h = STAGED.exec(name)?.[1];
+      if (h !== undefined && !needed.has(h)) rmSync(join(deps.stagingDir, name), { recursive: true, force: true });
+    }
+  };
+
   const settle = (): void => {
     const approvals = deps.approvals();
     for (const w of approvals.waiting('install_update')) {
@@ -116,7 +130,9 @@ export function createUpdater(deps: UpdaterDeps): Updater {
         approvals.executed(w.approvalId, result === 'installed' ? 'done' : 'failed', result === 'installed' ? 'ok' : 'rolled_back');
       } else if (result === 'failed:interrupted') approvals.executed(w.approvalId, 'failed', 'interrupted');
       else approvals.executed(w.approvalId, 'failed', result?.startsWith('refused:') === true ? result.slice('refused:'.length) : 'bad_result');
+      markSettled(deps.stagingDir, w.action.install);
     }
+    prune();
   };
 
   return { routes: [intakeRoute], executor, release, running, settle };

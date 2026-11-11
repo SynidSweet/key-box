@@ -7,7 +7,8 @@
 //   trust: changes /etc/keybox/trust.json only on a proof by an approver in it (approver_add, approver_remove; each approval
 //     works once) or on a setup or recovery code root itself checks. An install approval works once too.
 // Nothing here reads core's approver table, and nothing is written outside releases/, current, trust.json and the results
-// directory; in staging it only removes.
+// directory; in staging it only removes. A `<name>.settled` marker core leaves once it has read an answer makes the next
+// run remove that `<name>.result`.
 import { closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeSync, fchmodSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { Clock } from '../ports/clock.ts';
@@ -103,7 +104,8 @@ interface Copy {
 const keyBytes = (b64: string): Uint8Array => Uint8Array.from(Buffer.from(b64, 'base64url'));
 
 const REQUEST_SUFFIX = Buffer.from('.request');
-const isRequestName = (name: Buffer): boolean => name.length > REQUEST_SUFFIX.length && name.subarray(name.length - REQUEST_SUFFIX.length).equals(REQUEST_SUFFIX);
+const SETTLED_SUFFIX = Buffer.from('.settled');
+const endsWith = (name: Buffer, suffix: Buffer): boolean => name.length > suffix.length && name.subarray(name.length - suffix.length).equals(suffix);
 
 export async function runInstaller(deps: InstallerDeps): Promise<readonly { readonly name: string; readonly result: RootResult }[]> {
   const { paths } = deps;
@@ -443,7 +445,13 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
   const stagingFd = openDirectory(paths.staging);
   const answered: { name: string; result: RootResult }[] = [];
   try {
-    for (const name of listAt(stagingFd).filter(isRequestName)) {
+    // First the answers core has read (`<name>.settled`): the result and the marker go, before any new answer is written.
+    for (const name of listAt(stagingFd).filter((n) => endsWith(n, SETTLED_SUFFIX))) {
+      const base = name.subarray(0, name.length - SETTLED_SUFFIX.length).toString('utf8');
+      if (REQUEST_NAME.test(base)) rmSync(join(paths.results, `${base}.result`), { force: true });
+      removeAt(stagingFd, name);
+    }
+    for (const name of listAt(stagingFd).filter((n) => endsWith(n, REQUEST_SUFFIX))) {
       const base = name.subarray(0, name.length - REQUEST_SUFFIX.length).toString('utf8');
       const result = await handle(stagingFd, name);
       if (REQUEST_NAME.test(base)) {

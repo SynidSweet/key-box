@@ -351,3 +351,50 @@ test('KBOX-6 a trust request carries the deadline after which root refuses it, a
   assert.deepEqual(await port.apply({ kind: 'trust', change: 'approver_add', approval: iw.proof(addActionOf(added)), approver: added }), { result: 'applied' });
   assert.equal(request?.deadline, start + 2_000);
 });
+
+// --- pruning: nothing core staged or root answered outlives its approval ------------------------------------------------
+
+const stagingNames = (iw: { readonly paths: { readonly staging: string } }): string[] => readdirSync(iw.paths.staging).sort();
+
+test('KBOX-6 once an install is settled core removes staging/<H> and <H>.bin, and root then removes <H>.result at its next run', async (t) => {
+  const { iw, w, post, updater } = await updateWorld(t);
+  const { approval_id } = (await post(tarOf(BUNDLE))).json() as { approval_id: string };
+  mkdirSync(join(iw.paths.staging, `${BUNDLE_H}.bin`));
+  writeFileSync(join(iw.paths.staging, `${BUNDLE_H}.bin`, 'node'), 'a binary');
+  const item = (await w.queue()).find((q) => q.approval_id === approval_id);
+  assert.ok(item);
+  await w.decide(approval_id, 'approve', w.proofFor(item));
+  updater.settle();
+  assert.ok(stagingNames(iw).includes(BUNDLE_H), 'kept while root has not answered');
+  await iw.run();
+  assert.equal(iw.result(BUNDLE_H), 'installed');
+  updater.settle();
+  assert.deepEqual(stagingNames(iw).filter((n) => n.startsWith(BUNDLE_H)), [`${BUNDLE_H}.settled`]);
+  await iw.run();
+  assert.equal(iw.result(BUNDLE_H), undefined, 'root removed the answer core has read');
+  assert.deepEqual(stagingNames(iw), []);
+});
+
+test('KBOX-6 a denied install proposal leaves nothing staged once settle runs, while a pending one keeps its tree', async (t) => {
+  const { iw, w, post, updater } = await updateWorld(t);
+  const { approval_id } = (await post(tarOf(BUNDLE))).json() as { approval_id: string };
+  updater.settle();
+  assert.deepEqual(stagingNames(iw), [BUNDLE_H], 'pending: kept');
+  const item = (await w.queue()).find((q) => q.approval_id === approval_id);
+  assert.ok(item);
+  assert.equal((await w.decide(approval_id, 'deny', w.proofFor(item, undefined, undefined, 'deny'))).status, 200);
+  updater.settle();
+  assert.deepEqual(stagingNames(iw), []);
+});
+
+test('KBOX-6 a trust answer core has read is removed by root at its next run', async (t) => {
+  const iw = await installWorld(t);
+  const clock = new FakeClock(1_700_000_000_000);
+  const port = createTrustInstaller({ stagingDir: iw.paths.staging, resultsDir: iw.paths.results, random: seededRandom(7), clock, wait: () => iw.run() });
+  const added = iw.trusted('ap-second-0002', softApprover());
+  assert.deepEqual(await port.apply({ kind: 'trust', change: 'approver_add', approval: iw.proof(addActionOf(added)), approver: added }), { result: 'applied' });
+  assert.ok(readdirSync(iw.paths.results).some((f) => f.startsWith('trust-')));
+  await iw.run();
+  assert.deepEqual(readdirSync(iw.paths.results).filter((f) => f.startsWith('trust-') && f !== 'trust-spent'), []);
+  assert.deepEqual(stagingNames(iw), []);
+});

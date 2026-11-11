@@ -86,6 +86,8 @@ export interface Approvals {
   storedProof(approvalId: string): ApprovalProof | undefined;
   /** Approved actions of one kind whose execution has no result yet (an install root has not answered), oldest first. */
   waiting(kind: ActionKind): readonly { readonly approvalId: string; readonly action: Action; readonly decidedAt: number }[];
+  /** Proposals of one kind that wait for the owner. */
+  pending(kind: ActionKind): readonly { readonly approvalId: string; readonly action: Action }[];
   /** Marks a waiting execution (approver_add) finished. */
   executed(approvalId: string, result: 'done' | 'failed', reason: string): void;
   /** Expires every pending proposal older than 14 days. */
@@ -303,6 +305,11 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
     waiting(kind) {
       const rows = db.prepare(`SELECT ${COLUMNS}, decided_at FROM approvals WHERE kind = ? AND status = 'approved' AND result IS NULL ORDER BY decided_at, approval_id`).all(kind) as unknown as (Row & { decided_at: number })[];
       return rows.map((r) => ({ approvalId: r.approval_id, action: actionOf(r), decidedAt: r.decided_at }));
+    },
+    pending(kind) {
+      return pendingRows()
+        .filter((r) => r.kind === kind)
+        .map((r) => ({ approvalId: r.approval_id, action: actionOf(r) }));
     },
     storedProof(approvalId) {
       const r = row(approvalId);

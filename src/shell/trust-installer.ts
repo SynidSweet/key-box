@@ -1,7 +1,7 @@
 // KBOX-6, KBOX-49, KBOX-20: the real TrustPort. Core cannot change /etc/keybox/trust.json: it writes a trust request into
 // staging (temp file, then rename to `<name>.request`, which starts kb-install through its path unit) and waits for root's
 // answer in the root-owned results directory. Root checks the proof or the code itself; core's table follows only `applied`.
-import { closeSync, constants, existsSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, constants, existsSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Clock } from '../ports/clock.ts';
 import type { Random } from '../ports/random.ts';
@@ -42,6 +42,11 @@ export function writeRootRequest(stagingDir: string, name: string, request: obje
   renameSync(temp, join(stagingDir, `${name}.request`));
 }
 
+/** Tells root that core has read `<name>.result`: kb-install removes the result and this marker at its next run. */
+export function markSettled(stagingDir: string, name: string): void {
+  writeFileSync(join(stagingDir, `${name}.settled`), '', { mode: 0o640 });
+}
+
 export function createTrustInstaller(deps: TrustInstallerDeps): TrustPort {
   return {
     async apply(request: TrustRequest): Promise<TrustResult> {
@@ -55,6 +60,7 @@ export function createTrustInstaller(deps: TrustInstallerDeps): TrustPort {
       for (;;) {
         if (existsSync(resultFile)) {
           const result = parseRootResult(readFileSync(resultFile, 'utf8'));
+          markSettled(deps.stagingDir, name);
           if (result === 'applied') return { result: 'applied' };
           return { result: 'refused', code: result?.startsWith('refused:') === true ? result.slice('refused:'.length) : 'bad_result' };
         }
