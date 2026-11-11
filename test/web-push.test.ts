@@ -14,6 +14,7 @@ import { createHttpPushTransport } from '../src/shell/push-transport.ts';
 import { createPush } from '../src/shell/push.ts';
 import { openPrivateDatabase } from '../src/shell/private-db.ts';
 import { FakeAudit } from './fakes/audit.ts';
+import { approveWorld } from './support/approve-world.ts';
 import { TimedClock, canary, fakePlatform, seedFor, seededRandom, settle, tempDir, waitUntil } from './kit/index.ts';
 import type { SeededRandom, Surface } from './kit/index.ts';
 
@@ -515,4 +516,51 @@ test('KBOX-22 the applicationServerKey the phone subscribes with is the public h
   assert.equal(toB64u(key), before, 'the k= of the VAPID header is the key handed to the phone');
   assert.equal(verifyEs256(jwt, key), true);
   assert.equal(w.push.applicationServerKey(), before);
+});
+
+// --- KBOX-22: no URL to the box in any response member, event, push payload or approvals entry -------------------------
+
+/** Every string member that is a URL, by its JSON path. A sentence that mentions a link is not a URL-valued member. */
+function urlMembers(value: unknown, path: string, out: string[]): string[] {
+  if (typeof value === 'string') {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(value) && URL.canParse(value) && /^(https?|wss?|ftp):/i.test(value)) out.push(path);
+    else if (/^\/\/|^keys\./.test(value)) out.push(path);
+  } else if (Array.isArray(value)) value.forEach((v, i) => urlMembers(v, `${path}[${i}]`, out));
+  else if (typeof value === 'object' && value !== null) for (const [k, v] of Object.entries(value)) urlMembers(v, `${path}.${k}`, out);
+  return out;
+}
+
+test('KBOX-22 a closed-schema walk of every approval-flow response, event, push payload and meta approvals entry finds a URL-valued member only at box.oidc_issuer', async (t) => {
+  const w = await approveWorld(t);
+  w.parts.db.prepare('UPDATE box_info SET oidc_issuer = ?').run('https://keys.box.example/oidc');
+  const control = w.token('ctl-1', 'control');
+  const bodies: [string, unknown][] = [];
+  const record = async (name: string, reply: Promise<{ status: number; json(): unknown }>): Promise<unknown> => {
+    const r = await reply;
+    const body = r.json();
+    bodies.push([name, body]);
+    return body;
+  };
+  const reason = { agent: 'claude', text: 'see https://evil.example/x' };
+  await record('proposal', w.call('/api/proposals', { token: control, json: { action: { kind: 'grant', keyref: 'openai/admin', machine: 'ws-1' }, reason } }));
+  await record('enrol', w.call('/api/enrol', { json: { token_sha256: 'ab'.repeat(32), label: 'laptop', scope: 'relay' } }));
+  await record('enrol status', w.call(`/api/enrol/${'ab'.repeat(32)}`));
+  await record('nonce', w.call('/app/nonce?purpose=view'));
+  await record('push key', w.call('/app/push-key'));
+  const cookie = await w.view();
+  const queue = (await record('queue', w.call('/app/queue', { cookie }))) as { approvals: { approval_id: string; nonce_b64: string; digest_b64: string; kind: string }[] };
+  const item = (await w.queue()).find((q) => q.kind === 'grant');
+  assert.ok(item);
+  await record('approve', w.call(`/app/approve/${item.approval_id}`, { json: { proof: w.proofFor(item) } }));
+  await record('propose add', w.call('/app/propose-approver-add', { method: 'POST', cookie }));
+  await record('meta', w.call('/api/meta', { token: control }));
+  await record('events', w.call('/api/events?since=0', { token: control }));
+  assert.ok(queue.approvals.length > 0);
+
+  const found: string[] = [];
+  for (const [name, body] of bodies) urlMembers(body, name, found);
+  for (const [i, m] of w.push.sent.entries()) urlMembers(m, `push[${i}]`, found);
+  for (const [i, e] of w.parts.events.after(0).entries()) urlMembers(e, `event[${i}]`, found);
+  assert.deepEqual(found, ['meta.box.oidc_issuer']);
+  assert.ok(bodies.some(([, b]) => JSON.stringify(b).includes('evil.example')), 'control: the reason text with its link is in the queue, as a sentence');
 });

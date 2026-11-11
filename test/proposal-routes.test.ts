@@ -3,10 +3,12 @@
 // destination approval writes key.changed and shows in GET /api/meta.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { softApprover } from './kit/approver.ts';
 import { seededRandom } from './kit/index.ts';
-import { approveWorld, registerAt } from './support/approve-world.ts';
+import { RP, approveWorld, challenges, registerAt, wire } from './support/approve-world.ts';
 import type { World } from './support/approve-world.ts';
 import { parseAction } from '../src/pure/actions.ts';
 
@@ -158,7 +160,6 @@ test('KBOX-53 removing the last approver is rejected (422)', async (t) => {
 test('KBOX-53 the three enrol cases: control in its window (201 with the share key), control without one (403), relay (202, one proposal per source address)', async (t) => {
   const w = await approveWorld(t);
   const n = await w.nonce('op');
-  const { challenges, wire, RP } = await import('./support/approve-world.ts');
   const op = { kind: 'enrol_window_open', label: 'mc' } as const;
   assert.equal((await w.call('/app/op', { json: { op, proof: wire(n, w.owner.prove(challenges.op(op, n), RP)) } })).status, 200);
   const active = await w.call('/api/enrol', { json: { token_sha256: sha(freshToken()), label: 'mc', scope: 'control' } });
@@ -305,4 +306,14 @@ test('KBOX-19 an executed grant and an executed destination approval each write 
   assert.ok(key);
   assert.deepEqual(key.grants.map((g) => g.machine), ['ws-1']);
   assert.ok(key.destinations.some((d) => d.target === 'projects/p/secrets/s'));
+});
+
+test('KBOX-53 the approver-add registration code is shown to the approving phone only: absent from the databases, WAL, journal, audit and events', async (t) => {
+  const w = await approveWorld(t);
+  const code = await approvedAddCode(w);
+  assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 201);
+  const surfaces: [string, string][] = readdirSync(w.stateDir).map((f) => [f, readFileSync(join(w.stateDir, f)).toString('latin1')]);
+  surfaces.push(['journal', w.journal.join('\n')], ['audit', JSON.stringify(w.parts.audit.read(0).entries)], ['events', JSON.stringify(w.parts.events.after(0))], ['push', JSON.stringify(w.push.sent)]);
+  const head = code.split(' ').slice(0, 3).join(' ');
+  for (const [name, body] of surfaces) assert.equal(body.includes(code) || body.includes(head), false, `code in ${name}`);
 });
