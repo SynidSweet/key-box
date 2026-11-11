@@ -1,6 +1,7 @@
 // KBOX-31: events are append-only rows in meta.db, and a long poll holds a request for 25 seconds.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { request } from 'node:http';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { DatabaseSync } from 'node:sqlite';
@@ -9,7 +10,8 @@ import { EVENT_KINDS, EVENT_SCHEMAS } from '../src/pure/schemas.ts';
 import type { EventRow } from '../src/ports/events.ts';
 import { openMetaDatabase } from '../src/shell/db.ts';
 import { createEventHub, createEventLog, createEventPoller } from '../src/shell/events.ts';
-import { FakeClock, canary, checkProperty, seedFor, seededRandom, settle, tempDir } from './kit/index.ts';
+import { FakeClock, canary, checkProperty, seedFor, seededRandom, settle, startCore, tempDir, waitUntil } from './kit/index.ts';
+import type { RunningCore } from './kit/index.ts';
 
 const seed = seedFor(process.env);
 
@@ -199,4 +201,149 @@ test('KBOX-2 property: random byte strings offered as any text member of any eve
   assert.throws(() => loose.call(log, 'key.changed', { keyref: Buffer.from(c.bytes).toString('latin1') }), WriteRefused);
   assert.equal(log.head(), 0);
   c.assertAbsent({ database: readFileSync(path), wal: readFileSync(`${path}-wal`) });
+});
+
+// --- over HTTP: GET /api/events -----------------------------------------------------------------------------------------
+
+
+type Batch = { events: { seq: number; kind: string; data: Record<string, unknown> }[]; cursor: number };
+
+async function primedBox(t: import('node:test').TestContext): Promise<{ box: RunningCore; token: string }> {
+  const box = await startCore(t);
+  const token = box.enrol('ctl-1', 'control');
+  assert.equal((await box.call('/api/meta', { token })).status, 200, 'the first call from a network writes token.new_network; do it now');
+  return { box, token };
+}
+
+test('KBOX-31 over HTTP the long poll returns on the first event', async (t) => {
+  const { box, token } = await primedBox(t);
+  const head = box.events.head();
+  const pending = box.call(`/api/events?since=${head}`, { token });
+  await waitUntil(() => box.clock.pendingTimers === 1, 'the poll to be held');
+  box.events.append('share.version', { version: 2 });
+  const reply = await pending;
+  assert.equal(reply.status, 200);
+  assert.deepEqual(reply.json(), { events: [{ seq: head + 1, at: 1_000_000, kind: 'share.version', data: { version: 2 } }], cursor: head + 1 });
+  assert.equal(box.clock.pendingTimers, 0);
+});
+
+test('KBOX-31 over HTTP the long poll answers an empty batch with the same cursor at 25 s of fake time, not before', async (t) => {
+  const { box, token } = await primedBox(t);
+  const head = box.events.head();
+  let answered = false;
+  const pending = box.call(`/api/events?since=${head}`, { token }).then((r) => {
+    answered = true;
+    return r;
+  });
+  await waitUntil(() => box.clock.pendingTimers === 1, 'the poll to be held');
+  box.clock.advance(24_999);
+  await settle();
+  assert.equal(answered, false);
+  box.clock.advance(1);
+  const reply = await pending;
+  assert.equal(reply.status, 200);
+  assert.deepEqual(reply.json(), { events: [], cursor: head });
+});
+
+test('KBOX-31 over HTTP two concurrent pollers both see every event', async (t) => {
+  const { box, token } = await primedBox(t);
+  const head = box.events.head();
+  const follow = async (): Promise<number[]> => {
+    const seen: number[] = [];
+    let cursor = head;
+    while (seen.length < 3) {
+      const batch = (await box.call(`/api/events?since=${cursor}`, { token })).json() as Batch;
+      seen.push(...batch.events.map((e) => e.seq));
+      cursor = batch.cursor;
+    }
+    return seen;
+  };
+  const both = Promise.all([follow(), follow()]);
+  for (let i = 1; i <= 3; i += 1) {
+    await waitUntil(() => box.clock.pendingTimers === 2, 'both polls to be held');
+    box.events.append('key.changed', { keyref: `k/${i}` });
+    await waitUntil(() => box.clock.pendingTimers < 2, 'a poll to answer');
+  }
+  assert.deepEqual(await both, [[head + 1, head + 2, head + 3], [head + 1, head + 2, head + 3]]);
+});
+
+test('KBOX-31 since equal to the head holds, older answers at once, greater than the head is bad_request, missing means the head', async (t) => {
+  const { box, token } = await primedBox(t);
+  box.events.append('key.changed', { keyref: 'k/1' });
+  box.events.append('key.changed', { keyref: 'k/2' });
+  const head = box.events.head();
+  const older = (await box.call(`/api/events?since=${head - 1}`, { token })).json() as Batch;
+  assert.deepEqual(older.events.map((e) => e.seq), [head]);
+  const zero = (await box.call('/api/events?since=0', { token })).json() as Batch;
+  assert.equal(zero.events.length, head);
+  const beyond = await box.call(`/api/events?since=${head + 1}`, { token });
+  assert.equal(beyond.status, 400);
+  assert.deepEqual(beyond.json(), { error: { code: 'bad_request', message: 'The request could not be understood.' } });
+  assert.equal((await box.call(`/api/events?since=${head + 1}&epoch=${box.meta.epoch()}`, { token })).status, 400);
+
+  let equalAnswered = false;
+  let missingAnswered = false;
+  const equal = box.call(`/api/events?since=${head}`, { token }).then((r) => ((equalAnswered = true), r));
+  const missing = box.call('/api/events', { token }).then((r) => ((missingAnswered = true), r));
+  await waitUntil(() => box.clock.pendingTimers === 2, 'both polls to be held');
+  await settle();
+  assert.deepEqual([equalAnswered, missingAnswered], [false, false]);
+  box.events.append('key.changed', { keyref: 'k/3' });
+  assert.deepEqual(((await equal).json() as Batch).events.map((e) => e.seq), [head + 1]);
+  assert.deepEqual(((await missing).json() as Batch).events.map((e) => e.seq), [head + 1], 'no replay of the older events');
+});
+
+test('KBOX-31 a stale epoch is 409 conflict with detail epoch_changed, and a fresh snapshot of the rebuilt box shows the new epoch', async (t) => {
+  const { box, token } = await primedBox(t);
+  const oldEpoch = box.meta.epoch();
+  const oldEvents = (await box.call(`/api/events?since=0&epoch=${oldEpoch}`, { token })).json() as Batch;
+  assert.ok(oldEvents.cursor > 0);
+
+  const rebuilt = await startCore(t, { seed: 99 });
+  const token2 = rebuilt.enrol('ctl-1', 'control');
+  const stale = await rebuilt.call(`/api/events?since=${oldEvents.cursor}&epoch=${oldEpoch}`, { token: token2 });
+  assert.equal(stale.status, 409);
+  assert.deepEqual(stale.json(), { error: { code: 'conflict', message: 'That conflicts with the current state.', detail: { code: 'epoch_changed' } } });
+  assert.equal((await rebuilt.call(`/api/events?since=0&epoch=${oldEpoch}`, { token: token2 })).status, 409, 'a stale epoch wins over any since');
+
+  const snapshot = (await rebuilt.call('/api/meta', { token: token2 })).json() as { cursor: number; box: { epoch: string } };
+  assert.notEqual(snapshot.box.epoch, oldEpoch);
+  assert.equal(snapshot.box.epoch, rebuilt.meta.epoch());
+  const again = rebuilt.call(`/api/events?since=${snapshot.cursor}&epoch=${snapshot.box.epoch}`, { token: token2 });
+  await waitUntil(() => rebuilt.clock.pendingTimers === 1, 'the poll from the new cursor and epoch to be held');
+  rebuilt.clock.advance(25_000);
+  assert.deepEqual((await again).json(), { events: [], cursor: snapshot.cursor }, 'polling again from the new cursor and epoch works');
+  assert.equal((await rebuilt.call('/api/events?since=0&epoch=zzzzzzzz', { token: token2 })).status, 400);
+});
+
+test('KBOX-31 a poll interrupted by a server stop answers unavailable, never an empty batch', async (t) => {
+  const { box, token } = await primedBox(t);
+  const pending = box.call(`/api/events?since=${box.events.head()}`, { token });
+  await waitUntil(() => box.clock.pendingTimers === 1, 'the poll to be held');
+  await box.stop();
+  const reply = await pending;
+  assert.equal(reply.status, 503);
+  assert.deepEqual(reply.json(), { error: { code: 'unavailable', message: 'A part of the box is not available.' } });
+});
+
+test('KBOX-31 a client that hangs up leaves no held poll and no timer behind', async (t) => {
+  const { box, token } = await primedBox(t);
+  const call = request({ socketPath: box.socket, path: `/api/events?since=${box.events.head()}`, headers: { authorization: `Bearer ${token}`, 'x-kb-client-ip': '203.0.113.9' } });
+  call.on('error', () => undefined);
+  call.end();
+  await waitUntil(() => box.clock.pendingTimers === 1, 'the poll to be held');
+  call.destroy();
+  await waitUntil(() => box.clock.pendingTimers === 0, 'the abandoned poll to be released');
+});
+
+test('KBOX-2 an event carries names only: the canary a client sent is in no event and no events response', async (t) => {
+  const { box, token } = await primedBox(t);
+  const c = canary(32);
+  const raw = Buffer.from(c.bytes).toString('base64url');
+  await box.call(`/api/events?since=0&epoch=${raw}`, { token });
+  await box.call(`/api/events?since=${raw}`, { token });
+  await box.call('/api/meta', { token: `kbt_${raw}`.slice(0, 47), ip: '198.51.100.7' });
+  await box.call('/api/meta', { token, ip: '198.51.100.7', headers: { 'x-forwarded-for': raw, origin: raw } });
+  const all = (await box.call('/api/events?since=0', { token })).body;
+  c.assertAbsent({ response: all, events: JSON.stringify(box.events.after(0)) });
 });
