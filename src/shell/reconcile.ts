@@ -53,7 +53,7 @@ export function createReconciler(deps: ReconcileDeps): Reconciler {
         continue;
       }
       if (orchestrator.isLeased(run.keyref)) continue;
-      const dead = await revokeAndConfirm({ kit, platform, id: key.platformKeyId, at: key.location ?? {}, value: undefined, master: deps.master(platform) });
+      const dead = await revokeAndConfirm({ kit, platform, id: key.platformKeyId, at: key.location ?? {}, value: undefined, master: deps.master(platform, store.key(run.keyref)?.projects) });
       if (!dead) continue;
       deps.audit.append({ action: 'rotation.orphan_revoked', subject: run.keyref, at: deps.clock.now(), detail: { run_id: run.runId } });
       if (run.state === 'issuing') orchestrator.retake(run.runId);
@@ -74,7 +74,7 @@ export function createReconciler(deps: ReconcileDeps): Reconciler {
     // No lister: the platform has nothing to list, so no orphan can be found by listing and there is nothing to wait for.
     if (lister === undefined) return true;
     try {
-      return intentAbsent(await lister.listAt(info.location, deps.master(head.platform)), info.location, run.intentName);
+      return intentAbsent(await lister.listAt(info.location, deps.master(head.platform, head.projects)), info.location, run.intentName);
     } catch {
       deps.audit.append({ action: 'rotation.drive_failed', subject: run.runId, at: deps.clock.now(), detail: { run_id: run.runId, code: 'list_failed' } });
       return false;

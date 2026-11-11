@@ -9,6 +9,7 @@ import type { KeyClass, KeyLocation, Lent, PlatformKeyId, Scope } from '../../sr
 import type { Vault } from '../../src/ports/vault.ts';
 import type { EventLog } from '../../src/ports/events.ts';
 import type { EventData, EventKind } from '../../src/pure/schemas.ts';
+import { ApiError } from '../../src/pure/errors.ts';
 import { createOrchestrator } from '../../src/shell/orchestrator.ts';
 import type { NewKey, Orchestrator } from '../../src/shell/orchestrator.ts';
 import type { Point } from '../../src/shell/rotation-ports.ts';
@@ -39,6 +40,8 @@ export interface Faults {
   vaultPut: boolean;
   /** The master key cannot be lent (the vault refuses it). */
   master: boolean;
+  /** The platform has two master keys that could serve the key and none is its project's: the source refuses to choose (review N5). */
+  masterAmbiguous: boolean;
   /** The lister answers a listing of this location whatever it was asked for (a lister that omits the key's region). */
   listerAt: KeyLocation | undefined;
   /** The lister's listing says it is not complete (one page of several). */
@@ -109,7 +112,7 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
   const push = new FakePush();
   const platform = new FakePlatformWorld(random);
   const trace: string[] = [];
-  const faults: Faults = { issue: false, verifyAt: undefined, revoke404: false, vaultPut: false, master: false, listerAt: undefined, listingIncomplete: false, setThenThrow: false };
+  const faults: Faults = { issue: false, verifyAt: undefined, revoke404: false, vaultPut: false, master: false, masterAmbiguous: false, listerAt: undefined, listingIncomplete: false, setThenThrow: false };
   const regionOf = new Map<PlatformKeyId, string>();
   const destination = new RecordingDestination(trace);
   const recording = { a: destination, redeployer: new RecordingRedeployer(trace, destination) };
@@ -234,6 +237,7 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
         destination: () => ({ destination: recording.a, redeployer: recording.redeployer }),
         master: () => {
           if (faults.master) throw new Error('vault: the master key is unreadable');
+          if (faults.masterAmbiguous) throw new ApiError('conflict', 'master_ambiguous');
           return platform.master();
         },
         clock,

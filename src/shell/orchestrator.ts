@@ -102,7 +102,11 @@ interface Fresh {
 /** The process stopped at a checkpoint (a test's crash): the drive ends there and recovery is the next start's. */
 class Stopped extends Error {}
 
-const codeOf = (error: unknown): string => (error instanceof ApiError ? error.code : 'internal');
+/** The names-only reason of a throw: an ApiError's detail code when it has one (`master_ambiguous`), else its code; anything else `internal`. */
+const codeOf = (error: unknown): string => {
+  if (!(error instanceof ApiError)) return 'internal';
+  return error.detail !== undefined && 'code' in error.detail ? error.detail.code : error.code;
+};
 const underscored = (kind: string): string => kind.replace(/[^a-z0-9]+/g, '_');
 const hex = (b: Uint8Array): string => Buffer.from(b).toString('hex');
 
@@ -289,6 +293,17 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     return lent.ok ? lent.value : undefined;
   };
 
+  /** The master for the key's platform: its own project's preferred (review N5). Throws when there is none or the source cannot choose. */
+  const masterOf = (head: KeyHead): Lent => deps.master(head.platform, head.projects);
+  /** The master as a result, before a platform call: a run that cannot have one fails naming why (`master_ambiguous`, `no_master`). */
+  const masterFor = (head: KeyHead): { readonly ok: true; readonly value: Lent } | { readonly ok: false; readonly code: string } => {
+    try {
+      return { ok: true, value: masterOf(head) };
+    } catch (error: unknown) {
+      return { ok: false, code: error instanceof ApiError ? codeOf(error) : 'no_master' };
+    }
+  };
+
   // --- steps 3 and 4: create and store ----------------------------------------------------------------------------------------
 
   /** An `issuing` run whose new generation was never stored: a key its platform made, if any, is an orphan for reconcile. */
@@ -300,12 +315,14 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     if (issuer === undefined || info === undefined) return fail(run, 'issuing', 'no_issuer');
     // Stored before the process stopped: the platform key is this generation's, so the run goes on and nothing is issued twice.
     if (!storedNothing(run)) return advance(run, 'issuing');
+    const master = masterFor(head);
+    if (!master.ok) return fail(run, 'issuing', master.code);
     const made: { issued?: IssuedKey } = {};
     const created = await attempt(
       run,
       'issuing',
       async () => {
-        made.issued = await issuer.issue({ scope: { items: info.scopeItems } }, run.intentName, deps.master(head.platform));
+        made.issued = await issuer.issue({ scope: { items: info.scopeItems } }, run.intentName, master.value);
       },
       'issue_failed',
     );
@@ -361,8 +378,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     }
     const value = lendOrUndefined(run.keyref, run.genNew);
     if (value === undefined) return fail(run, 'issuing', 'store_failed');
+    const master = masterFor(head);
+    if (!master.ok) return fail(run, 'issuing', master.code);
     store.intendPush(run.runId, PLATFORM_SET, head.platform);
-    const taken = await attempt(run, 'issuing', () => set(value, info.location, deps.master(head.platform)), 'set_failed');
+    const taken = await attempt(run, 'issuing', () => set(value, info.location, master.value), 'set_failed');
     if (!taken.ok) return fail(run, 'issuing', 'set_failed');
     await point('taken');
     store.putReceipt(run.runId, PLATFORM_SET, head.platform, { pushed: true });
@@ -396,7 +415,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   const kitFor = (row: DestinationRow): DestinationKit | undefined => deps.destination(row.kind);
 
   async function pushAll(run: RunRow, head: KeyHead): Promise<Next> {
-    const master = deps.master(head.platform);
+    const master = masterOf(head);
     const value = lendOrUndefined(run.keyref, run.genNew);
     if (value === undefined) return fail(run, 'pushing', 'push_failed');
     const rows = store.destinationsOf(run.keyref);
@@ -440,7 +459,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   }
 
   async function redeployAll(run: RunRow, head: KeyHead): Promise<Next> {
-    const master = deps.master(head.platform);
+    const master = masterOf(head);
     for (const row of store.destinationsOf(run.keyref)) {
       const kit = row.kind === WORKSTATION ? undefined : kitFor(row);
       if (kit?.redeployer === undefined || !kit.destination.properties().needsRedeploy) continue;
@@ -489,7 +508,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   async function revokeOld(run: RunRow, head: KeyHead, kit: PlatformKit): Promise<Next> {
     if (run.genOld > 0) {
       const old = store.gen(run.keyref, run.genOld);
-      const dead = await revokeAndConfirm({ kit, platform: head.platform, id: old?.platformKeyId ?? null, at: old?.location ?? {}, value: lendOrUndefined(run.keyref, run.genOld), master: deps.master(head.platform) });
+      const dead = await revokeAndConfirm({ kit, platform: head.platform, id: old?.platformKeyId ?? null, at: old?.location ?? {}, value: lendOrUndefined(run.keyref, run.genOld), master: masterOf(head) });
       if (!dead) return retryRevoke(run);
       store.setGenStatus(run.keyref, run.genOld, 'retired');
       deps.vault.retire(run.keyref, run.genOld);
@@ -607,7 +626,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   }
 
   async function rollBack(run: RunRow, head: KeyHead, kit: PlatformKit, fresh?: Fresh): Promise<Next> {
-    const master = deps.master(head.platform);
+    const master = masterOf(head);
     const old = run.genOld > 0 ? lendOrUndefined(run.keyref, run.genOld) : undefined;
     let held = 0;
     // Every receipt, `maybe` included: a push that threw or never answered may have changed the destination.

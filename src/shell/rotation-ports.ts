@@ -55,6 +55,9 @@ export interface PlatformSource {
   platform(id: PlatformId): PlatformKit | undefined;
   /** The adapters of a destination kind as the metadata names it (`vercel_env`, ...), or undefined. */
   destination(kind: string): DestinationKit | undefined;
-  /** The platform's master key, lent. */
-  master(platform: PlatformId): Lent;
+  /**
+   * The platform's master key, lent: of the master keys whose current generation can be lent, the one of the key's own project (`projects`
+   * of the key it serves; none given, no project is preferred). Throws `conflict` (`master_ambiguous`) when two still qualify (review N5).
+   */
+  master(platform: PlatformId, projects?: readonly string[]): Lent;
 }

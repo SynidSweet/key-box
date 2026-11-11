@@ -949,3 +949,22 @@ test('KBOX-51 stopping the orchestrator cancels the timer of a run waiting out i
   assert.equal(genOf(w, keyref, 1)?.status, 'grace', 'the stopped orchestrator revoked nothing');
   assert.equal(w.clock.pendingTimers, 0, 'and set no new timer');
 });
+
+// --- a master the box cannot choose is refused, once per run (review N5) ---------------------------------------------------------
+
+test('KBOX-17 KBOX-51 a run whose platform master is ambiguous files exactly one card naming master_ambiguous, keeps the old key, and retries without another card', async (t) => {
+  const { w, keyref, oldValue, oldId } = await seeded(t);
+  w.faults.masterAmbiguous = true;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.clock.advance(3 * HOUR);
+  await w.orch.idle();
+  const failed = w.events('rotation.failed');
+  assert.deepEqual(failed.map((e) => [e.data['step'], e.data['reason_code'], e.data['old_key_works']]), [['issuing', 'master_ambiguous', true]], 'one card, retries included');
+  w.faults.masterAmbiguous = false;
+  await w.settle(HOUR);
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+  assert.deepEqual(heldBy(w), [oldValue, oldValue]);
+  assert.deepEqual(await w.live(), [oldId], 'nothing was issued without a master');
+  assert.equal(w.events('rotation.failed').length, 1);
+});
