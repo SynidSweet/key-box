@@ -986,3 +986,41 @@ test('KBOX-17 KBOX-51 an overlap:false key with no current generation (its paste
   assert.equal(w.store.runs().length, runs, 'no run was opened');
   assert.deepEqual(w.trace, [], 'the platform was not asked to take a value');
 });
+
+// --- old_key_works states the fact at notice time (review N7, spec rotation.failed) -----------------------------------------------
+
+const cards = (w: RotationWorld): unknown[][] => w.events('rotation.failed').map((e) => [e.data['step'], e.data['reason_code'], e.data['old_key_works']]);
+
+test('KBOX-17 overlap:false: while the platform does not take the old value back, every card says old_key_works false; once it does, the run ends with the old key working', async (t) => {
+  const { w, keyref, oldValue } = await seeded(t, { overlap: false, klass: 'admin' });
+  w.checkpoints.hook = (point) => {
+    if (point === 'issuing') w.platform.setReachable(false);
+    return Promise.resolve();
+  };
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.checkpoints.hook = undefined;
+  assert.deepEqual(cards(w), [
+    ['verifying', 'verify_unreachable', false],
+    ['rollback_platform_set', 'repush_refused', false],
+  ]);
+  assert.equal(w.push.sent.some((p) => /old key still works/i.test(p.title)), false, 'no push claims the old key works');
+  w.platform.setReachable(true);
+  w.clock.advance(MINUTE);
+  await w.orch.idle();
+  assert.equal(await platformTakes(w, oldValue), 'ok');
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+  assert.equal(cards(w).length, 2, 'the retry files no further card');
+});
+
+test('KBOX-17 overlap:false: a destination that refuses the re-push after the platform took the old value back gets its card with old_key_works true', async (t) => {
+  const { w, keyref } = await seeded(t, { overlap: false });
+  w.destinations.a.refuse('app-b');
+  w.destinations.a.refuseAfter('app-a', 1);
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  assert.deepEqual(cards(w), [
+    ['pushing', 'push_failed', false],
+    ['rollback_vercel_env', 'repush_refused', true],
+  ], 'the first card went out before the platform took the old value back; the second after');
+});

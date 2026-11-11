@@ -564,22 +564,34 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
   /**
    * KBOX-17's one notice per failed run: a `rotation.failed` event (mission control raises the desk card) for every class, and a Web Push
-   * for admin and master keys. A create run has no old generation, so its event says `old_key_works: false` and its push claims no old key.
+   * for admin and master keys. `old_key_works` is the fact when the notice goes out (spec `rotation.failed`): false for a create run, which has
+   * no old generation, and for an overlap:false run whose platform may hold only the new value, since the set back has not been done yet.
    */
   function noticeFailed(run: RunRow, head: KeyHead | undefined, step: string, code: string): void {
     const pushed = head !== undefined && head.class !== 'ordinary';
-    const oldKeyWorks = run.genOld > 0;
+    const oldKeyWorks = run.genOld > 0 && !platformMayHoldNew(run);
     deps.events.append('rotation.failed', { run_id: run.runId, keyref: run.keyref, step, reason_code: code, old_key_works: oldKeyWorks });
-    if (pushed) deps.push.send({ title: oldKeyWorks ? `The key change of ${run.keyref} failed; the old key still works` : `Adding the key ${run.keyref} failed`, kind: 'rotation_failed' });
+    if (pushed) deps.push.send({ title: failedTitle(run, oldKeyWorks), kind: 'rotation_failed' });
   }
 
-  /** The second notice KBOX-17 allows, named for the one destination that would not take the rollback. */
-  function noticeHeld(run: RunRow, head: KeyHead, receipt: Receipt): void {
-    const oldKeyWorks = run.genOld > 0;
-    const code = oldKeyWorks ? 'repush_refused' : 'remove_refused';
+  const failedTitle = (run: RunRow, oldKeyWorks: boolean): string => {
+    if (run.genOld === 0) return `Adding the key ${run.keyref} failed`;
+    return oldKeyWorks ? `The key change of ${run.keyref} failed; the old key still works` : `The key change of ${run.keyref} failed; the old key is being put back`;
+  };
+
+  /** An overlap:false platform was asked to take the new value in this run (the set's intent, not refused): until it is set back, it may hold only the new one. */
+  const platformMayHoldNew = (run: RunRow): boolean => store.receipts(run.runId).some((r) => r.kind === PLATFORM_SET && r.pushed !== 'refused');
+
+  /**
+   * The second notice KBOX-17 allows, named for the one destination that would not take the rollback. `oldKeyWorks` is the fact now: false
+   * while an overlap:false platform has not taken the old value back (review N7).
+   */
+  function noticeHeld(run: RunRow, head: KeyHead, receipt: Receipt, oldKeyWorks: boolean): void {
+    const created = run.genOld === 0;
+    const code = created ? 'remove_refused' : 'repush_refused';
     deps.events.append('rotation.failed', { run_id: run.runId, keyref: run.keyref, step: `rollback_${underscored(receipt.kind)}`, reason_code: code, old_key_works: oldKeyWorks });
     if (head.class !== 'ordinary') {
-      deps.push.send({ title: oldKeyWorks ? `The old key of ${run.keyref} could not be put back in ${receipt.target}` : `The new key of ${run.keyref} could not be removed from ${receipt.target}`, kind: 'rotation_failed' });
+      deps.push.send({ title: created ? `The new key of ${run.keyref} could not be removed from ${receipt.target}` : `The old key of ${run.keyref} could not be put back in ${receipt.target}`, kind: 'rotation_failed' });
     }
     store.putReceipt(run.runId, receipt.kind, receipt.target, { rollbackNotified: true });
   }
@@ -629,11 +641,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     const master = masterOf(head);
     const old = run.genOld > 0 ? lendOrUndefined(run.keyref, run.genOld) : undefined;
     let held = 0;
-    // Every receipt, `maybe` included: a push that threw or never answered may have changed the destination.
-    for (const receipt of store.receipts(run.runId)) {
-      if (await undo(run, head, receipt, old, master)) continue;
+    // Every receipt, `maybe` included: a push that threw or never answered may have changed the destination. An overlap:false platform takes
+    // the old value back first: until it has, the old key works nowhere, and every card of this pass says so (review N7).
+    const receipts = store.receipts(run.runId);
+    let oldKeyWorks = run.genOld > 0;
+    for (const receipt of [...receipts.filter((r) => r.kind === PLATFORM_SET), ...receipts.filter((r) => r.kind !== PLATFORM_SET)]) {
+      const undone = await undo(run, head, receipt, old, master);
+      if (receipt.kind === PLATFORM_SET && !undone) oldKeyWorks = false;
+      if (undone) continue;
       held += 1;
-      if (!receipt.rollbackNotified) noticeHeld(run, head, receipt);
+      if (!receipt.rollbackNotified) noticeHeld(run, head, receipt, oldKeyWorks);
     }
     if (held > 0) {
       const attempts = run.attempts + 1;
