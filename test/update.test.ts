@@ -2,9 +2,19 @@
 // install_update executor and the trust requests core sends to root. kb-install itself is tested in install-helper.test.ts.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { test } from 'node:test';
+import type { TestContext } from 'node:test';
 import { parseTar } from '../src/pure/tar.ts';
 import { releaseHash, releaseText } from '../src/pure/release-hash.ts';
+import { createTrustInstaller } from '../src/shell/trust-installer.ts';
+import { createUpdater } from '../src/shell/updater.ts';
+import { softApprover } from './kit/approver.ts';
+import { FakeClock, drive, seededRandom } from './kit/index.ts';
+import { approveWorld } from './support/approve-world.ts';
+import type { World } from './support/approve-world.ts';
+import { CADDY_BIN, NODE_BIN, installWorld, lockFor } from './support/install-world.ts';
 import { gitGlobalHeader, tarOf } from './support/tar.ts';
 import type { TarEntrySpec } from './support/tar.ts';
 
@@ -124,4 +134,123 @@ test('KBOX-6 a file with group or other execute bits only is 0644 in the hash te
   const parsed = parseTar(tarOf([{ name: 'g', body: 'x', mode: 0o654 }, { name: 'o', body: 'x', mode: 0o645 }, { name: 'u', body: 'x', mode: 0o744 }]));
   assert.ok(parsed.ok);
   assert.deepEqual(parsed.entries.map((e) => (e.kind === 'file' ? e.executable : 'dir')), [false, false, true]);
+});
+
+// --- core: POST /api/updates, the executor, the trust port ------------------------------------------------------------
+
+async function updateWorld(t: TestContext) {
+  const iw = await installWorld(t);
+  let world: World | undefined;
+  const must = (): World => {
+    if (world === undefined) throw new Error('the approve world is not up yet');
+    return world;
+  };
+  const updater = createUpdater({
+    stagingDir: iw.paths.staging,
+    resultsDir: iw.paths.results,
+    currentLink: iw.paths.current,
+    propose: (input) => must().core.approvals.propose(input),
+    approvals: () => must().core.approvals,
+    events: { append: (kind, data) => must().parts.events.append(kind, data) },
+  });
+  world = await approveWorld(t, { routes: updater.routes, executors: { install_update: updater.executor } });
+  const w = world;
+  iw.writeTrust([{ id: w.ownerId, a: w.owner }]);
+  const control = w.token('ctl-1', 'control');
+  const driver = drive(join(w.stateDir, '..', 'http.sock'));
+  const post = (tar: Uint8Array, query = `?commit=${C}`, type = 'application/x-tar', token = control) =>
+    driver.request({ method: 'POST', path: `/api/updates${query}`, headers: { 'x-kb-client-ip': '203.0.113.9', authorization: `Bearer ${token}`, 'content-type': type }, body: tar });
+  const events = (kind: string) => w.parts.events.after(0).filter((e) => e.kind === kind).map((e) => e.data);
+  return { iw, w, updater, post, events };
+}
+
+const BUNDLE: readonly TarEntrySpec[] = [
+  gitGlobalHeader(C),
+  { name: 'runtime.lock', body: lockFor(NODE_BIN, CADDY_BIN) },
+  { name: 'src/', type: '5' },
+  { name: 'src/main-core.ts', body: 'new core\n' },
+  { name: 'run.sh', body: '#!/bin/sh\n', mode: 0o775 },
+];
+// Bytewise, "run.sh" sorts before "runtime.lock" ('.' is 0x2e, 't' is 0x74).
+const BUNDLE_H = sha(`0755 ${sha('#!/bin/sh\n')} run.sh\n0644 ${sha(lockFor(NODE_BIN, CADDY_BIN))} runtime.lock\n0644 ${sha('new core\n')} src/main-core.ts\n`);
+
+test('KBOX-6 POST /api/updates answers 201 with the hash it computed and the running base, stages the tree, and the page carries the fixed sentence byte for byte', async (t) => {
+  const { iw, w, post } = await updateWorld(t);
+  const reply = await post(tarOf(BUNDLE));
+  assert.equal(reply.status, 201, reply.body);
+  const body = reply.json() as { approval_id: string; hash: string; base: string };
+  assert.deepEqual({ hash: body.hash, base: body.base }, { hash: BUNDLE_H, base: iw.h0 });
+  assert.equal(readFileSync(join(iw.paths.staging, BUNDLE_H, 'src/main-core.ts'), 'utf8'), 'new core\n');
+  const item = (await w.queue()).find((q) => q.approval_id === body.approval_id);
+  assert.ok(item);
+  assert.ok(item.lines.includes('Agents wrote this version and only agents checked it. Any change can take every key, and this page cannot tell whether it is safe.'));
+  assert.ok(item.lines.includes(`Install key box version ${BUNDLE_H.slice(0, 12)} (commit ${C.slice(0, 12)}) over version ${iw.h0.slice(0, 12)}`));
+});
+
+test('KBOX-6 the intake refuses a truncated tar with a fixed code, another media type, a bad commit and a relay token', async (t) => {
+  const { w, post } = await updateWorld(t);
+  const cut = await post(tarOf(BUNDLE).subarray(0, 700));
+  assert.equal(cut.status, 400);
+  assert.equal((cut.json() as { error: { detail?: { code: string } } }).error.detail?.code, 'truncated');
+  assert.equal((await post(tarOf(BUNDLE), `?commit=${C}`, 'application/json')).status, 415);
+  assert.equal((await post(tarOf(BUNDLE), '?commit=xyz')).status, 400);
+  assert.equal((await post(tarOf(BUNDLE), `?commit=${C}&extra=1`)).status, 400);
+  assert.equal((await post(tarOf(BUNDLE), `?commit=${C}`, 'application/x-tar', w.token('m1', 'relay'))).status, 403);
+});
+
+test('KBOX-6 on approval core writes <H>.request with the kept proof; root installs it; settle emits update.state installed', async (t) => {
+  const { iw, w, post, updater, events } = await updateWorld(t);
+  const { approval_id } = (await post(tarOf(BUNDLE))).json() as { approval_id: string };
+  const item = (await w.queue()).find((q) => q.approval_id === approval_id);
+  assert.ok(item);
+  assert.equal((await w.decide(approval_id, 'approve', w.proofFor(item))).status, 200);
+  const request = JSON.parse(readFileSync(join(iw.paths.staging, `${BUNDLE_H}.request`), 'utf8')) as { install: string; base: string; approval: { approval_id: string } };
+  assert.deepEqual([request.install, request.base, request.approval.approval_id], [BUNDLE_H, iw.h0, approval_id]);
+  assert.deepEqual(events('update.state'), [{ approval_id, state: 'pending' }]);
+  await iw.run();
+  assert.equal(iw.result(BUNDLE_H), 'installed', 'root verified the proof the phone made, against its own copy');
+  updater.settle();
+  assert.deepEqual(events('update.state').at(-1), { approval_id, state: 'installed' });
+  assert.equal(updater.release(), BUNDLE_H);
+});
+
+test('KBOX-6 an approval after current moved off H0 writes no request: a new proposal is needed', async (t) => {
+  const { iw, w, post, events } = await updateWorld(t);
+  const { approval_id } = (await post(tarOf(BUNDLE))).json() as { approval_id: string };
+  const moved = join(iw.paths.releases, 'f'.repeat(64));
+  mkdirSync(moved);
+  rmSync(iw.paths.current);
+  symlinkSync(moved, iw.paths.current);
+  const item = (await w.queue()).find((q) => q.approval_id === approval_id);
+  assert.ok(item);
+  const decided = await w.decide(approval_id, 'approve', w.proofFor(item));
+  assert.equal((decided.json() as { result: string }).result, 'failed');
+  assert.deepEqual(events('approval.executed').at(-1), { approval_id, result: 'failed', reason_code: 'base_moved' });
+  assert.equal(existsSync(join(iw.paths.staging, `${BUNDLE_H}.request`)), false);
+});
+
+test('KBOX-6 settle ignores a result older than the approval (an earlier try of the same H)', async (t) => {
+  const { iw, w, post, updater, events } = await updateWorld(t);
+  const { approval_id } = (await post(tarOf(BUNDLE))).json() as { approval_id: string };
+  const item = (await w.queue()).find((q) => q.approval_id === approval_id);
+  assert.ok(item);
+  await w.decide(approval_id, 'approve', w.proofFor(item));
+  writeFileSync(join(iw.paths.results, `${BUNDLE_H}.result`), 'rolled_back');
+  utimesSync(join(iw.paths.results, `${BUNDLE_H}.result`), new Date(0), new Date(0));
+  updater.settle();
+  assert.deepEqual(events('update.state'), [{ approval_id, state: 'pending' }]);
+});
+
+test('KBOX-6 the real TrustPort writes a trust request root answers: applied changes trust.json, a refusal comes back with its code, no answer is timeout', async (t) => {
+  const iw = await installWorld(t);
+  const clock = new FakeClock(1_700_000_000_000);
+  const port = createTrustInstaller({ stagingDir: iw.paths.staging, resultsDir: iw.paths.results, random: seededRandom(3), clock, wait: () => iw.run() });
+  const added = iw.trusted('ap-second-0002', softApprover());
+  assert.deepEqual(await port.apply({ kind: 'trust', change: 'approver_add', approval: iw.proof({ kind: 'approver_add' }), approver: added }), { result: 'applied' });
+  assert.deepEqual(iw.trust()?.approvers.map((a) => a.id), [iw.ownerId, 'ap-second-0002']);
+  const stranger = softApprover();
+  const refused = await port.apply({ kind: 'trust', change: 'approver_remove', approval: iw.proof({ kind: 'approver_remove', approver_id: iw.ownerId }, { approver: stranger }), approver_id: iw.ownerId });
+  assert.deepEqual(refused, { result: 'refused', code: 'bad_proof' });
+  const silent = createTrustInstaller({ stagingDir: iw.paths.staging, resultsDir: iw.paths.results, random: seededRandom(4), clock, wait: (ms) => Promise.resolve(clock.advance(ms)), timeoutMs: 2_000 });
+  assert.deepEqual(await silent.apply({ kind: 'trust', change: 'approver_add', approval: iw.proof({ kind: 'approver_add' }), approver: iw.trusted('ap-third-00003', softApprover()) }), { result: 'refused', code: 'timeout' });
 });

@@ -43,7 +43,8 @@ export const REQUEST_LIMIT = 64 * 1024;
 
 const B64U = /^[A-Za-z0-9_-]{1,4096}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
-const CODE_TEXT = /^[a-z]+( [a-z]+){11}$/;
+/** The code as the owner typed it; root normalises and checks it (codes.ts). */
+const CODE_TEXT = /^[A-Za-z \t]{1,256}$/;
 const APPROVAL_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 const PROOF = {

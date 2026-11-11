@@ -85,6 +85,8 @@ export interface Approvals {
   enrolStatus(tokenSha256: string): 'pending' | 'approved' | 'denied' | 'expired' | undefined;
   /** The proof kept with an approved install_update, approver_add or approver_remove. */
   storedProof(approvalId: string): ApprovalProof | undefined;
+  /** Approved actions of one kind whose execution has no result yet (an install root has not answered), oldest first. */
+  waiting(kind: ActionKind): readonly { readonly approvalId: string; readonly action: Action; readonly decidedAt: number }[];
   /** Marks a waiting execution (approver_add) finished. */
   executed(approvalId: string, result: 'done' | 'failed', reason: string): void;
   /** Expires every pending proposal older than 14 days. */
@@ -295,6 +297,10 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
       if (found === undefined) return undefined;
       // An approved enrol whose machine could not be added (its label was taken meanwhile) did not enrol anything.
       return found.status === 'pending' ? 'pending' : found.status === 'expired' ? 'expired' : 'denied';
+    },
+    waiting(kind) {
+      const rows = db.prepare(`SELECT ${COLUMNS}, decided_at FROM approvals WHERE kind = ? AND status = 'approved' AND result IS NULL ORDER BY decided_at, approval_id`).all(kind) as unknown as (Row & { decided_at: number })[];
+      return rows.map((r) => ({ approvalId: r.approval_id, action: actionOf(r), decidedAt: r.decided_at }));
     },
     storedProof(approvalId) {
       const r = row(approvalId);
