@@ -162,3 +162,56 @@ test('KBOX-52 a denied or expired approval puts the key back to works at the nex
   await ordinary.rotation.orchestrator.idle();
   assert.equal(ordinary.parts.events.after(0).filter((e) => e.kind === 'rotation.failed').length, 2, 'tried again after a day');
 });
+
+test('KBOX-52 after a failed run the next run starts no sooner than 24 hours after the failure itself, not 24 hours after the run opened', async (t) => {
+  let stopAt: string | undefined;
+  const w = await routesWorld(t, {
+    checkpoint: (point) => {
+      if (point !== stopAt) return;
+      stopAt = undefined;
+      throw new Error('the process stopped here');
+    },
+  });
+  await w.api('/api/keys', { json: { platform: 'fake', name: 'OPENAI_KEY', projects: ['shop'], scope: { items: ['read'] }, destinations: [{ kind: 'vercel_env', target: 'app-a' }], rotate_every_days: 1 } });
+  stopAt = 'verifying';
+  w.clock.advance(DAY);
+  w.rotation.tick();
+  await w.rotation.orchestrator.idle();
+  assert.equal(w.rotation.store.activeRunOf(KEYREF)?.state, 'pushing', 'the run stopped after its verify step');
+  w.clock.advance(20 * HOUR);
+  w.destination.applyThenThrow('app-a');
+  await w.rotation.orchestrator.resume();
+  const failed = (): number => w.parts.events.after(0).filter((e) => e.kind === 'rotation.failed').length;
+  assert.equal(failed(), 1, 'the run failed 20 hours after it opened');
+  assert.equal(w.rotation.store.activeRunOf(KEYREF), undefined);
+  const runs = (): number => w.rotation.store.runs().length;
+  const before = runs();
+  w.clock.advance(24 * HOUR - 1);
+  w.rotation.tick();
+  await w.rotation.orchestrator.idle();
+  assert.equal(runs(), before, 'one millisecond short of 24 hours after the failure: nothing starts');
+  w.clock.advance(1);
+  w.rotation.tick();
+  await w.rotation.orchestrator.idle();
+  assert.equal(runs(), before + 1, '24 hours after the failure the key goes again');
+});
+
+test('KBOX-34 KBOX-52 an ordinary key on a paste-source platform is never run as an api run: a due tick opens nothing and files no failure, and a rotation request is rejected', async (t) => {
+  const w = await routesWorld(t);
+  const keyref = `${PASTE_PLATFORM}/shop/PLAIN_KEY`;
+  const value = pasteValue('4'.repeat(32));
+  w.accepted.add(value);
+  const made = await w.rotation.orchestrator.create(
+    { keyref, platform: PASTE_PLATFORM, name: 'PLAIN_KEY', projects: ['shop'], scopeItems: ['read'], class: 'ordinary', destinations: [], rotateEveryDays: 1, graceHours: 1, location: {}, markAdmin: false },
+    Uint8Array.from(Buffer.from(value)),
+  );
+  assert.equal(made.status, 'works');
+  w.clock.advance(2 * DAY);
+  w.rotation.tick();
+  await w.rotation.orchestrator.idle();
+  assert.deepEqual(w.rotation.store.runs().map((r) => r.origin), ['create'], 'the tick started no run');
+  assert.equal(w.parts.events.after(0).filter((e) => e.kind === 'rotation.failed').length, 0);
+  const asked = await w.api('/api/rotations', { json: { keyref } });
+  assert.deepEqual([asked.status, (asked.json() as { error?: { detail?: { code?: string } } }).error?.detail?.code], [422, 'no_issuer']);
+  assert.deepEqual(w.rotation.store.runs().map((r) => r.origin), ['create']);
+});

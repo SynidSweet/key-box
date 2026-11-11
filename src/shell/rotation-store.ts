@@ -42,7 +42,9 @@ const SCHEMA = `
     failed_step TEXT,
     reason_code TEXT,
     failed_notified INTEGER NOT NULL DEFAULT 0,
-    still_on_notified INTEGER NOT NULL DEFAULT 0
+    still_on_notified INTEGER NOT NULL DEFAULT 0,
+    failed_at INTEGER,
+    CHECK (state <> 'failed' OR failed_at IS NOT NULL)
   ) STRICT;
   CREATE UNIQUE INDEX IF NOT EXISTS rotation_one_active_run_per_key ON rotation_runs (keyref) WHERE state NOT IN ('done', 'failed', 'abandoned');
   CREATE TABLE IF NOT EXISTS rotation_gens (
@@ -94,6 +96,8 @@ export interface RunRow {
   readonly reasonCode: string | null;
   readonly failedNotified: boolean;
   readonly stillOnNotified: boolean;
+  /** When the fault happened (KBOX-52 counts the 24 hours from here); set on every failed run. */
+  readonly failedAt: number | null;
 }
 
 export interface GenRow {
@@ -203,6 +207,7 @@ export interface RunPatch {
   readonly reasonCode?: string;
   readonly failedNotified?: true;
   readonly stillOnNotified?: true;
+  readonly failedAt?: number;
 }
 
 interface RunStored {
@@ -220,6 +225,7 @@ interface RunStored {
   readonly reason_code: string | null;
   readonly failed_notified: number;
   readonly still_on_notified: number;
+  readonly failed_at: number | null;
 }
 
 const toRun = (r: RunStored): RunRow => ({
@@ -237,6 +243,7 @@ const toRun = (r: RunStored): RunRow => ({
   reasonCode: r.reason_code,
   failedNotified: r.failed_notified === 1,
   stillOnNotified: r.still_on_notified === 1,
+  failedAt: r.failed_at,
 });
 
 interface GenStored {
@@ -348,7 +355,7 @@ export function createRotationStore(db: DatabaseSync, clock: Clock, hub: EventSi
         const before = runStored(runId);
         if (before === undefined) throw new ApiError('not_found');
         db.prepare(
-          `UPDATE rotation_runs SET state = ?, revoke_at = ?, attempts = ?, failed_step = ?, reason_code = ?, failed_notified = ?, still_on_notified = ? WHERE run_id = ?`,
+          `UPDATE rotation_runs SET state = ?, revoke_at = ?, attempts = ?, failed_step = ?, reason_code = ?, failed_notified = ?, still_on_notified = ?, failed_at = ? WHERE run_id = ?`,
         ).run(
           patch.state ?? before.state,
           patch.revokeAt ?? before.revoke_at,
@@ -357,6 +364,7 @@ export function createRotationStore(db: DatabaseSync, clock: Clock, hub: EventSi
           patch.reasonCode ?? before.reason_code,
           patch.failedNotified === true ? 1 : before.failed_notified,
           patch.stillOnNotified === true ? 1 : before.still_on_notified,
+          before.failed_at ?? patch.failedAt ?? null,
           runId,
         );
         const after = runStored(runId);

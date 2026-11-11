@@ -17,6 +17,11 @@ export interface PlatformKit {
   readonly keyPageUrl?: string;
 }
 
+/** A platform whose keys are made on the phone (KBOX-12, KBOX-34): the box cannot issue one, so it never runs an api run for it. */
+export function isPasteSource(source: Pick<PlatformSource, 'platform'>, platform: PlatformId): boolean {
+  return source.platform(platform)?.issuer?.capabilities().create === 'paste';
+}
+
 type SetValue = NonNullable<Issuer['set']>;
 
 /**

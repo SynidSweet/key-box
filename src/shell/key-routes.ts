@@ -16,6 +16,7 @@ import type { RotateKey } from './new-key.ts';
 import type { Orchestrator } from './orchestrator.ts';
 import type { Paste } from './paste.ts';
 import { isRecord, only } from './routes-approve.ts';
+import { isPasteSource } from './rotation-ports.ts';
 import type { PlatformSource } from './rotation-ports.ts';
 import type { DestinationRow, RotationStore } from './rotation-store.ts';
 import type { Vault } from '../ports/vault.ts';
@@ -134,7 +135,7 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
         if (store.activeRunOf(body.keyref) !== undefined) throw new ApiError('conflict', 'run_exists');
         if (head.class === 'ordinary') return { status: 201, json: { run_id: deps.orchestrator.start({ keyref: body.keyref, origin: 'agent' }).runId } };
         const action: RotateKey = { kind: 'rotate_key', keyref: body.keyref };
-        if (deps.source.platform(head.platform)?.issuer?.capabilities().create === 'paste') {
+        if (isPasteSource(deps.source, head.platform)) {
           store.setStatus(body.keyref, 'awaiting_paste');
           return { status: 202, json: { paste_task_id: deps.paste.open({ action, requester: { kind: 'token', label: actor } }).paste_id } };
         }

@@ -24,6 +24,7 @@ import { createReconciler } from './reconcile.ts';
 import type { Reconciler } from './reconcile.ts';
 import { createRotationStore } from './rotation-store.ts';
 import type { RotationStore } from './rotation-store.ts';
+import { isPasteSource as pasteSource } from './rotation-ports.ts';
 import type { PlatformSource, Point } from './rotation-ports.ts';
 
 const HOUR_MS = 3600_000;
@@ -71,7 +72,7 @@ export function openRotation(deps: RotationDeps): Rotation {
     ...deliveryRoutes(delivery),
     ...pasteRoutes(paste),
   ];
-  const isPasteSource = (platform: string): boolean => deps.source.platform(platform)?.issuer?.capabilities().create === 'paste';
+  const isPasteSource = (platform: string): boolean => pasteSource(deps.source, platform);
 
   const executors: Rotation['executors'] = {
     add_key: async (a) => {
@@ -126,7 +127,10 @@ export function openRotation(deps: RotationDeps): Rotation {
       if (at === undefined || at > now || pending || store.activeRunOf(key.keyref) !== undefined) continue;
       if (!store.gens(key.keyref).some((g) => g.status === 'current')) continue;
       const last = store.runs().filter((r) => r.keyref === key.keyref).at(-1);
-      if (last?.state === 'failed' && now - last.openedAt < AFTER_FAILURE_MS) continue;
+      // KBOX-52: no sooner than 24 hours after the failure itself (the schema refuses a failed run without its failure time).
+      if (last?.state === 'failed' && now - (last.failedAt ?? last.openedAt) < AFTER_FAILURE_MS) continue;
+      // KBOX-34: an ordinary key on a paste-source platform has no issuer; the box holds no such key and never runs it as an api run.
+      if (key.class === 'ordinary' && isPasteSource(key.platform)) continue;
       if (key.class === 'ordinary') orchestrator.start({ keyref: key.keyref, origin: 'schedule' });
       else openRequest(key.keyref, key.platform);
     }

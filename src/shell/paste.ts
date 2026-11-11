@@ -243,19 +243,20 @@ export function createPaste(deps: PasteDeps): Paste {
       const action = actionOf(r);
       const platform = action.kind === 'add_key' ? action.platform : (deps.meta.snapshot().keys.find((k) => k.keyref === action.keyref)?.platform ?? '');
       await checkValue(platform, value);
-      // The paste with its assertion is the approval of this one action (decided here): it is recorded like any approval.
-      settle(id, 'done');
-      deps.events.append('approval.decided', { approval_id: id, decision: 'approved' });
-      deps.audit.append({ action: 'approval.decided', subject: id, at: now(), actor: verdict.approverId, detail: { decision: 'approved' } });
       const bytes = Uint8Array.from(Buffer.from(value, 'utf8'));
       try {
         const keyref = await execute(action, bytes);
+        // The paste with its assertion is the approval of this one action (decided here): it is recorded like any approval, and settled
+        // only once the action executed, so a failed execution never spends it.
+        settle(id, 'done');
+        deps.events.append('approval.decided', { approval_id: id, decision: 'approved' });
+        deps.audit.append({ action: 'approval.decided', subject: id, at: now(), actor: verdict.approverId, detail: { decision: 'approved' } });
         deps.events.append('approval.executed', { approval_id: id, result: 'done', reason_code: 'ok' });
         deps.audit.append({ action: 'approval.executed', subject: id, at: now(), detail: { result: 'done', reason_code: 'ok' } });
         return { keyref };
       } catch (error) {
-        const code = error instanceof ApiError && error.detail !== undefined && 'code' in error.detail ? error.detail.code : 'failed';
-        deps.events.append('approval.executed', { approval_id: id, result: 'failed', reason_code: code });
+        // The task stays pending for a retry (a fresh page gives a fresh nonce); the attempt is audited by its names-only reason.
+        const code = error instanceof ApiError ? (error.detail !== undefined && 'code' in error.detail ? error.detail.code : error.code) : 'failed';
         deps.audit.append({ action: 'approval.executed', subject: id, at: now(), detail: { result: 'failed', reason_code: code } });
         throw error;
       } finally {

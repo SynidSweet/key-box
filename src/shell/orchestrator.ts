@@ -17,7 +17,7 @@ import { admitDestination, mintValue } from '../pure/class.ts';
 import { intentName, nextStep, retryDelayMs } from '../pure/rotation-machine.ts';
 import type { Step } from '../pure/rotation-machine.ts';
 import { revokeAndConfirm } from './revoke-confirm.ts';
-import { setterOf } from './rotation-ports.ts';
+import { isPasteSource, setterOf } from './rotation-ports.ts';
 import type { DestinationKit, PlatformKit, PlatformSource, Point } from './rotation-ports.ts';
 import type { DestinationRow, KeyHead, Receipt, RotationStore, RunOrigin, RunRow } from './rotation-store.ts';
 
@@ -63,7 +63,10 @@ export interface OrchestratorDeps extends PlatformSource {
 }
 
 export interface Orchestrator {
-  /** Opens a run for the key (`not_found` for no such key, `conflict` for a run already open) and works on it in the background. */
+  /**
+   * Opens a run for the key and works on it in the background: `not_found` for no such key, `conflict` for a run already open, `rejected`
+   * (`no_issuer`) for a run without a value on a paste-source platform (KBOX-34).
+   */
   start(input: StartInput): RunRow;
   /** Writes a key's rows and runs its first generation to the end. Answers the status the key ended in. */
   create(key: NewKey, value?: Uint8Array): Promise<{ readonly status: 'works' | 'failed' }>;
@@ -507,7 +510,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
    */
   function markFailed(run: RunRow, head: KeyHead | undefined, stepName: string, code: string): RunRow {
     const step = underscored(stepName);
-    const failed = store.update(run.runId, { state: 'rolling_back', failedStep: step, reasonCode: code, failedNotified: true });
+    const failed = store.update(run.runId, { state: 'rolling_back', failedStep: step, reasonCode: code, failedNotified: true, failedAt: now() });
     if (!run.failedNotified) noticeFailed(run, head, step, code);
     if (head !== undefined) store.setStatus(run.keyref, 'failed');
     return failed;
@@ -618,6 +621,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   function start(input: StartInput): RunRow {
     const head = store.key(input.keyref);
     if (head === undefined || store.keyInfo(input.keyref) === undefined) throw new ApiError('not_found');
+    // KBOX-34: a paste-source platform cannot issue; its keys change only by a paste (a value), never by an api run.
+    if (input.value === undefined && isPasteSource(deps, head.platform)) throw new ApiError('rejected', 'no_issuer');
     const genOld = store.gens(input.keyref).find((g) => g.status === 'current')?.gen ?? 0;
     const genNew = store.topGen(input.keyref) + 1;
     const runId = `run_${hex(deps.random.bytes(8))}`;
@@ -628,7 +633,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         deps.vault.put(input.keyref, genNew, input.value);
         store.putGen({ keyref: input.keyref, gen: genNew, status: 'pending', platformKeyId: null, location: store.keyInfo(input.keyref)?.location ?? {} });
       } catch {
-        store.update(runId, { state: 'failed', failedStep: 'issuing', reasonCode: 'store_failed' });
+        store.update(runId, { state: 'failed', failedStep: 'issuing', reasonCode: 'store_failed', failedAt: now() });
         deps.audit.append({ action: 'rotation.step_failed', subject: input.keyref, at: now(), detail: { run_id: runId, step: 'issuing', code: 'store_failed' } });
         throw new ApiError('unavailable');
       }

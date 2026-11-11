@@ -12,7 +12,7 @@ import type { Route } from '../../src/shell/http.ts';
 import { pasteRoutes } from '../../src/shell/paste.ts';
 import { openRotation } from '../../src/shell/rotation.ts';
 import type { Rotation } from '../../src/shell/rotation.ts';
-import type { PlatformSource } from '../../src/shell/rotation-ports.ts';
+import type { PlatformSource, Point } from '../../src/shell/rotation-ports.ts';
 import { FakePlatformWorld } from '../fakes/platform.ts';
 import { RecordingDestination, RecordingRedeployer } from '../fakes/recording-destination.ts';
 import { bytesOf, drive, seededRandom } from '../kit/index.ts';
@@ -60,7 +60,12 @@ export interface RoutesWorld extends World {
   pasteProof(view: PasteView, forId?: string): WireProof;
 }
 
-export async function routesWorld(t: TestContext): Promise<RoutesWorld> {
+export interface RoutesWorldOptions {
+  /** Where the process may be stopped (`Point`): a checkpoint that throws stands for the process dying there. */
+  readonly checkpoint?: (point: Point) => void | Promise<void>;
+}
+
+export async function routesWorld(t: TestContext, options: RoutesWorldOptions = {}): Promise<RoutesWorld> {
   const random = seededRandom(11);
   const placeholder = {} as never;
   const shape = [...keyRoutes(placeholder), ...deliveryRoutes(placeholder), ...pasteRoutes(placeholder)];
@@ -105,7 +110,18 @@ export async function routesWorld(t: TestContext): Promise<RoutesWorld> {
     destination: (kind) => (kind === 'vercel_env' ? { destination, redeployer } : undefined),
     master: () => platform.master(),
   };
-  const rotation = openRotation({ parts: w.parts, approvals: w.core.approvals, approvers: w.core.approvers, push: w.push, clock: w.clock, scheduler: w.clock, random, audit: w.parts.audit, source });
+  const rotation = openRotation({
+    parts: w.parts,
+    approvals: w.core.approvals,
+    approvers: w.core.approvers,
+    push: w.push,
+    clock: w.clock,
+    scheduler: w.clock,
+    random,
+    audit: w.parts.audit,
+    source,
+    ...(options.checkpoint === undefined ? {} : { checkpoint: options.checkpoint }),
+  });
   routes = rotation.routes;
   const control = w.token('mission-control', 'control');
   // approveWorld listens on `http.sock` beside its state directory and offers no raw-body call, so this talks to the same socket.

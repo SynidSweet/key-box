@@ -240,3 +240,36 @@ test('KBOX-12 the paste page keeps the field when the box refuses, and empties i
   assert.ok(sendCall >= 0 && (assigns[0]?.[0] ?? -1) > sendCall, 'only after the call that the box answered');
   assert.match(assigns[0]?.[1] ?? '', /=\s*''/);
 });
+
+test('KBOX-12 a paste whose execution fails (a run is already open for the key) keeps the task for a retry, stores and logs no value; the retry after that run ends rotates the key', async (t) => {
+  const w = await routesWorld(t);
+  const first = pasteValue('1'.repeat(32));
+  const beside = pasteValue('2'.repeat(32));
+  const third = pasteValue('3'.repeat(32));
+  w.accepted.add(first);
+  const addId = await openTask(w);
+  const a = await render(w, addId);
+  assert.equal((await submit(w, addId, a.cookie, first, w.pasteProof(a.view))).status, 201);
+  const rotId = ((await w.api('/api/rotations', { json: { keyref: KEYREF } })).json() as { paste_task_id: string }).paste_task_id;
+  w.accepted.add(beside);
+  w.rotation.orchestrator.start({ keyref: KEYREF, origin: 'owner', value: Uint8Array.from(Buffer.from(beside)) });
+  await w.rotation.orchestrator.idle();
+  assert.equal(w.rotation.store.activeRunOf(KEYREF)?.state, 'grace', 'a run is open for the key');
+  w.accepted.add(third);
+  const r = await render(w, rotId, a.cookie);
+  const refused = await submit(w, rotId, a.cookie, third, w.pasteProof(r.view));
+  assert.equal(refused.status, 409);
+  assert.equal((await w.call(`/p/${rotId}`, { cookie: a.cookie })).status, 200, 'the task is still pending: the approval was not spent');
+  assert.equal(w.rotation.store.topGen(KEYREF), 2, 'no generation was stored for the refused paste');
+  const surfaces = JSON.stringify([w.parts.events.after(0), w.parts.audit.read(0).entries, refused.body]);
+  assert.equal(surfaces.includes(third) || surfaces.includes('3'.repeat(32)), false, 'the value is in no event, audit row or response');
+  w.accepted.delete(first);
+  w.clock.advance(60 * 60_000);
+  await w.rotation.orchestrator.idle();
+  assert.equal(w.rotation.store.activeRunOf(KEYREF), undefined, 'the run beside it ended');
+  const again = await render(w, rotId);
+  assert.equal((await submit(w, rotId, again.cookie, third, w.pasteProof(again.view))).status, 201);
+  await w.rotation.orchestrator.idle();
+  assert.equal(Buffer.from(await bytesOf(w.parts.vault.lend(KEYREF, 3))).toString('utf8'), third);
+  assert.equal((await w.call(`/p/${rotId}`, { cookie: again.cookie })).status, 404, 'settled once it executed');
+});
