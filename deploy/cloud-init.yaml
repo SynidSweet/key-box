@@ -1,0 +1,55 @@
+#cloud-config
+# KBOX-48: the key box bootstrap. Opened on the phone from the README at a tagged release and pasted as the instance's user
+# data. It names release 1 (commit C, content hash H) and the pinned Node and Caddy builds, checks every one, installs the
+# units and kb-install, removes every way in, and writes the one-time setup code to the console only. Nothing here is secret.
+ssh_pwauth: false
+disable_root: true
+apt:
+  primary:
+    # An https mirror for the region is UNVERIFIED and probed on the instance; there is no http exemption (KBOX-46).
+    - arches: [arm64]
+      uri: https://ports.ubuntu.com/ubuntu-ports
+package_update: true
+package_upgrade: true
+packages: [unattended-upgrades]
+write_files:
+  - path: /root/keybox-release.env
+    permissions: '0600'
+    content: |
+      KB_REPO=OWNER/key-box
+      KB_DOMAIN=CHANGE-ME.dedyn.io
+      KB_COMMIT=0000000000000000000000000000000000000000
+      KB_RELEASE=0000000000000000000000000000000000000000000000000000000000000000
+      NODE_ARCHIVE_SHA256=0000000000000000000000000000000000000000000000000000000000000000
+      NODE_SHA256=0000000000000000000000000000000000000000000000000000000000000000
+      CADDY_ARCHIVE_SHA256=0000000000000000000000000000000000000000000000000000000000000000
+      CADDY_SHA256=0000000000000000000000000000000000000000000000000000000000000000
+runcmd:
+  - apt-get purge -y openssh-server openssh-client
+  - systemctl mask --now ssh.service ssh.socket
+  - rm -f /home/ubuntu/.ssh/authorized_keys /root/.ssh/authorized_keys
+  # Disable the OCI Run Command plugin; keep Compute Instance Monitoring on. The exact command is UNVERIFIED (KBOX-1).
+  - oci-cloud-agent-plugin disable "Compute Instance Run Command"
+  - |
+    set -eu
+    . /root/keybox-release.env
+    cd /root && umask 022
+    curl --proto '=https' -fsSLo src.tar.gz "https://codeload.github.com/${KB_REPO}/tar.gz/${KB_COMMIT}"
+    curl --proto '=https' -fsSLo node.tar.gz "https://nodejs.org/dist/v24.11.1/node-v24.11.1-linux-arm64.tar.gz"
+    curl --proto '=https' -fsSLo caddy.tar.gz "https://github.com/caddyserver/caddy/releases/download/v2.10.2/caddy_2.10.2_linux_arm64.tar.gz"
+    printf '%s  node.tar.gz\n%s  caddy.tar.gz\n' "$NODE_ARCHIVE_SHA256" "$CADDY_ARCHIVE_SHA256" | sha256sum -c
+    mkdir src && tar xzf src.tar.gz -C src --strip-components=1 --no-same-owner
+    # H as the box computes it (KBOX-6): one line per file, sorted bytewise, "<mode> <sha256> <path>".
+    H=$(cd src && find . -type f | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do m=0644; case $(stat -c %a "$f") in [1357]??) m=0755;; esac; printf '%s %s %s\n' "$m" "$(sha256sum < "$f" | cut -c1-64)" "$f"; done | sha256sum | cut -c1-64)
+    [ "$H" = "$KB_RELEASE" ]
+    R=/opt/keybox/releases/$KB_RELEASE && mkdir -p "$R/bin" && cp -a src/. "$R/"
+    tar xzf node.tar.gz --strip-components=2 -C "$R/bin" node-v24.11.1-linux-arm64/bin/node && tar xzf caddy.tar.gz -C "$R/bin" caddy
+    printf '%s  %s\n%s  %s\n' "$NODE_SHA256" "$R/bin/node" "$CADDY_SHA256" "$R/bin/caddy" | sha256sum -c
+    chown -R root:root /opt/keybox && chmod -R go-w /opt/keybox && ln -sfn "$R" /opt/keybox/current
+    for u in keybox keyrelay caddy; do id "$u" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$u"; done
+    cp "$R"/deploy/*.service "$R"/deploy/kb-install.path /etc/systemd/system/ && cp "$R/deploy/keybox-tmpfiles.conf" /etc/tmpfiles.d/keybox.conf
+    mkdir -p /etc/caddy && cp "$R/deploy/Caddyfile" /etc/caddy/Caddyfile
+    for u in keybox caddy; do mkdir -p "/etc/systemd/system/$u.service.d" && printf '[Service]\nEnvironment=KB_DOMAIN=%s\n' "$KB_DOMAIN" > "/etc/systemd/system/$u.service.d/domain.conf"; done
+    systemd-tmpfiles --create /etc/tmpfiles.d/keybox.conf && systemctl daemon-reload
+    /opt/keybox/current/bin/node /opt/keybox/current/src/cli/kb-code.ts setup
+    systemctl enable --now kb-code.service kb-install.path keybox.service keyrelay.service caddy.service

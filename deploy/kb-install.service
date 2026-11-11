@@ -1,0 +1,17 @@
+[Unit]
+Description=Key box installer (KBOX-6): verifies the owner's approval itself and installs only the bytes it hashed
+# A trigger is never refused: every run removes every *.request entry, so nothing can keep it starting.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+User=root
+# Runs from the RUNNING release, never from staging or a new releases/<H>.
+ExecStart=/opt/keybox/current/bin/node /opt/keybox/current/src/cli/kb-install.ts
+TimeoutStartSec=120s
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+PrivateNetwork=yes
+ReadWritePaths=/opt/keybox /var/lib/keybox/staging /etc/keybox /var/lib/keybox-install

@@ -1,0 +1,57 @@
+# KBOX-44: Caddy terminates TLS on 443 only, with ACME TLS-ALPN-01 (no HTTP challenge, no port 80 redirect listener), and
+# reaches core and the relay over their unix sockets. X-KB-Client-Ip is set from Caddy's own view of the connection and
+# replaces any value a client sent; the forwarding headers a client could forge, and those Caddy adds itself, are dropped.
+# Changes to this file come only through the bootstrap (KBOX-6, KBOX-48). Real header handling on the instance: UNVERIFIED.
+{
+	auto_https disable_redirects
+	servers {
+		protocols h1
+	}
+}
+
+keys.{$KB_DOMAIN}:443 {
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+	reverse_proxy unix//run/keybox/http.sock {
+		header_up X-KB-Client-Ip {remote_host}
+		header_up -X-Forwarded-For
+		header_up -X-Real-IP
+		header_up -Forwarded
+		header_up -X-Forwarded-Proto
+		header_up -X-Forwarded-Host
+	}
+}
+
+api.keys.{$KB_DOMAIN}:443 {
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+	handle /api/* {
+		reverse_proxy unix//run/keybox/http.sock {
+			header_up X-KB-Client-Ip {remote_host}
+			header_up -X-Forwarded-For
+			header_up -X-Real-IP
+			header_up -Forwarded
+			header_up -X-Forwarded-Proto
+			header_up -X-Forwarded-Host
+		}
+	}
+	handle /r/* {
+		reverse_proxy unix//run/keyrelay/http.sock {
+			header_up X-KB-Client-Ip {remote_host}
+			header_up -X-Forwarded-For
+			header_up -X-Real-IP
+			header_up -Forwarded
+			header_up -X-Forwarded-Proto
+			header_up -X-Forwarded-Host
+		}
+	}
+	handle {
+		respond 404
+	}
+}

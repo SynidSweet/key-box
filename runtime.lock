@@ -1,3 +1,5 @@
-# Placeholder format (scaffold). The update unit defines the real format.
-# One line per pinned binary: <name> <version> <arch> <sha256> <download url>
-node 24.0.0 arm64 0000000000000000000000000000000000000000000000000000000000000000 https://nodejs.org/dist/v24.0.0/node-v24.0.0-linux-arm64.tar.xz
+# KBOX-6, KBOX-44: the pinned binaries. Inside H; kb-install checks every binary against this file on every install.
+# <name> <version> <arch> <sha256 of the installed binary> <official download url>
+# The sha256 values below are placeholders until release 1 is tagged: they are filled from the official archives then (UNVERIFIED).
+node 24.11.1 arm64 0000000000000000000000000000000000000000000000000000000000000000 https://nodejs.org/dist/v24.11.1/node-v24.11.1-linux-arm64.tar.gz
+caddy 2.10.2 arm64 0000000000000000000000000000000000000000000000000000000000000000 https://github.com/caddyserver/caddy/releases/download/v2.10.2/caddy_2.10.2_linux_arm64.tar.gz
