@@ -269,9 +269,9 @@ test('KBOX-52 a sweep that throws at an hourly tick is audited and the schedule 
     }),
   });
   await w.api('/api/keys', { json: { platform: 'fake', name: 'OPENAI_KEY', projects: ['shop'], scope: { items: ['read'] }, rotate_every_days: 30 } });
-  const stop = await w.rotation.run();
+  const stop = w.rotation.run();
   t.after(stop);
-  await w.rotation.orchestrator.idle();
+  await w.rotation.idle();
   sweep.arm();
   w.clock.advance(HOUR);
   const after = sweeps;
@@ -287,9 +287,9 @@ test('KBOX-52 a sweep that throws at the start-up tick does not stop the start: 
   const w = await routesWorld(t, { approvals: (real) => ({ propose: (input) => real.propose(input), sweep: () => (sweep.fire(), real.sweep()) }) });
   await w.api('/api/keys', { json: { platform: 'fake', name: 'OPENAI_KEY', projects: ['shop'], scope: { items: ['read'] }, rotate_every_days: 30 } });
   sweep.arm();
-  const stop = await w.rotation.run();
+  const stop = w.rotation.run();
   t.after(stop);
-  await w.rotation.orchestrator.idle();
+  await w.rotation.idle();
   assert.deepEqual(scheduleFaults(w), [['tick', 'tick_failed']], 'the start-up tick failed, audited');
   w.clock.advance(30 * DAY);
   assert.equal(w.rotation.store.activeRunOf(KEYREF)?.origin, 'schedule');
@@ -302,9 +302,9 @@ test('KBOX-51 a reconcile that throws at start does not stop the start: it is au
   await w.api('/api/keys', { json: { platform: 'fake', name: 'OPENAI_KEY', projects: ['shop'], scope: { items: ['read'] }, rotate_every_days: 30 } });
   w.clock.advance(30 * DAY);
   lookup.arm();
-  const stop = await w.rotation.run();
+  const stop = w.rotation.run();
   t.after(stop);
-  await w.rotation.orchestrator.idle();
+  await w.rotation.idle();
   assert.deepEqual(scheduleFaults(w), [['reconcile', 'reconcile_failed']]);
   assert.equal(w.rotation.store.activeRunOf(KEYREF)?.origin, 'schedule', 'the start-up tick found the key due');
   await w.rotation.orchestrator.idle();

@@ -60,8 +60,14 @@ export interface Rotation {
   readonly executors: Partial<Readonly<Record<ActionKind, Executor>>>;
   /** Opens what is due: ordinary keys start a run, admin and master keys open their approval or paste task, once. */
   tick(): void;
-  /** At start: resume unfinished runs, then reconcile, then tick; arms the hourly tick and the daily reconcile. Returns the stop, which also stops the orchestrator's run timers. */
-  run(): Promise<() => void>;
+  /**
+   * Starts rotation without waiting on any port (review N4): arms the hourly tick and the daily reconcile, and in the background resumes
+   * unfinished runs, then reconciles, then ticks, each audited when it fails. Returns the stop, which also stops the orchestrator's run timers;
+   * start-up work not begun when it is called is not begun.
+   */
+  run(): () => void;
+  /** Resolves when the start-up work has ended and every run this process works on has finished or waits for a clock. */
+  idle(): Promise<void>;
 }
 
 export function openRotation(deps: RotationDeps): Rotation {
@@ -160,6 +166,13 @@ export function openRotation(deps: RotationDeps): Rotation {
     scheduled('tick', 'tick_failed', () => noticeStaleDeliveries(delivery));
   };
 
+  /** Start-up work and daily reconciles in flight: `idle()` waits for them, so the stores are not closed under them. */
+  const inBackground = new Set<Promise<void>>();
+  const background = (job: Promise<void>): void => {
+    inBackground.add(job);
+    void job.finally(() => inBackground.delete(job));
+  };
+
   /** The start-up and daily work that awaits ports: a throw is audited and the start or the loop goes on. */
   const scheduledAsync = async (subject: 'resume' | 'reconcile', code: ScheduleFault, work: () => Promise<void>): Promise<void> => {
     try {
@@ -177,10 +190,7 @@ export function openRotation(deps: RotationDeps): Rotation {
     routes,
     executors,
     tick,
-    async run() {
-      await scheduledAsync('resume', 'resume_failed', () => orchestrator.resume());
-      await scheduledAsync('reconcile', 'reconcile_failed', () => reconciler.run());
-      tick();
+    run() {
       let stopped = false;
       let cancelTick = (): void => undefined;
       let cancelReconcile = (): void => undefined;
@@ -191,18 +201,33 @@ export function openRotation(deps: RotationDeps): Rotation {
       };
       const loopReconcile = (): void => {
         if (stopped) return;
-        void scheduledAsync('reconcile', 'reconcile_failed', () => reconciler.run()).finally(() => {
-          if (!stopped) cancelReconcile = deps.scheduler.after(RECONCILE_MS, loopReconcile);
-        });
+        background(
+          scheduledAsync('reconcile', 'reconcile_failed', () => reconciler.run()).finally(() => {
+            if (!stopped) cancelReconcile = deps.scheduler.after(RECONCILE_MS, loopReconcile);
+          }),
+        );
       };
       cancelTick = deps.scheduler.after(TICK_MS, loopTick);
       cancelReconcile = deps.scheduler.after(RECONCILE_MS, loopReconcile);
+      // KBOX-51: reconcile on start runs after resume has re-leased the unfinished runs; neither holds back the caller (a port may hang).
+      background(
+        (async (): Promise<void> => {
+          await scheduledAsync('resume', 'resume_failed', () => orchestrator.resume());
+          if (stopped) return;
+          await scheduledAsync('reconcile', 'reconcile_failed', () => reconciler.run());
+          if (!stopped) tick();
+        })(),
+      );
       return () => {
         stopped = true;
         cancelTick();
         cancelReconcile();
         orchestrator.stop();
       };
+    },
+    async idle() {
+      while (inBackground.size > 0) await Promise.all([...inBackground]);
+      await orchestrator.idle();
     },
   };
 }
