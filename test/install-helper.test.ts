@@ -4,7 +4,7 @@
 // the uid half (core cannot read root's files) is test/install-root.test.ts, run as root in a container by the gate.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, constants, existsSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { softApprover } from './kit/approver.ts';
@@ -313,6 +313,27 @@ test('KBOX-6 a pre-planted directory, symlink or FIFO named x.request is removed
     assert.equal(w.result(name), 'refused:not_regular', name);
   }
   assert.equal(readFileSync(join(target, 'keep'), 'utf8'), 'keep', 'nothing behind a link was removed');
+});
+
+/** Plants `name` in `dir` as `depth` nested directories, made through held descriptors: the path is far past PATH_MAX. */
+function nestDirs(dir: string, name: string, depth: number): void {
+  mkdirSync(join(dir, name));
+  let fd = openSync(join(dir, name), constants.O_RDONLY | constants.O_DIRECTORY);
+  for (let i = 1; i < depth; i += 1) {
+    mkdirSync(`/proc/self/fd/${fd}/d`);
+    const next = openSync(`/proc/self/fd/${fd}/d`, constants.O_RDONLY | constants.O_DIRECTORY);
+    closeSync(fd);
+    fd = next;
+  }
+  closeSync(fd);
+}
+
+test('KBOX-6 a pre-planted x.request of 20,000 nested directories is removed (removal is iterative, not bounded by the call stack) and the run ends', async (t) => {
+  const w = await installWorld(t);
+  nestDirs(w.paths.staging, 'deep.request', 20_000);
+  await w.run();
+  assert.equal(existsSync(join(w.paths.staging, 'deep.request')), false, 'the entry that keeps the path unit triggered is gone');
+  assert.equal(w.result('deep'), 'refused:not_regular');
 });
 
 test('KBOX-6 a pre-planted <H>.result symlink in staging has no effect: results are written under the root-owned results directory', async (t) => {

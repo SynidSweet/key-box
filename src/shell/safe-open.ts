@@ -71,27 +71,65 @@ export function closeFd(fd: number): void {
   closeSync(fd);
 }
 
+/** How often one entry may change type under a removal before it gives up. */
+const REMOVE_TRIES = 4;
+const changing = (): Error => new Error('a staging entry kept changing while it was removed');
+
+/** Unlinks `name` (a link, FIFO or file: the entry itself, never a target), or opens it as a directory to empty. */
+function unlinkOrOpen(dirFd: number, name: Uint8Array | string): 'gone' | { readonly fd: number } {
+  for (let attempt = 0; attempt < REMOVE_TRIES; attempt += 1) {
+    const unlinked = tryOs(() => unlinkSync(at(dirFd, name)), ['ENOENT', 'EISDIR', 'EPERM']);
+    if (!isOs(unlinked) || unlinked.os === 'ENOENT') return 'gone';
+    const sub = tryOs(() => openDirectory(at(dirFd, name)), ['ELOOP', 'ENOTDIR', 'ENOENT']);
+    if (!isOs(sub)) return { fd: sub };
+    if (sub.os === 'ENOENT') return 'gone';
+    // it became a link or a file meanwhile: unlink it on the next try
+  }
+  throw changing();
+}
+
+/** One directory being emptied: its descriptor, its name in the directory below it on the stack, and what is left in it. */
+interface Emptying {
+  readonly parent: number;
+  readonly name: Uint8Array | string;
+  readonly fd: number;
+  left: Buffer[];
+  readonly tries: number;
+}
+
 /**
  * Removes one entry of a held directory whatever its type, never following a link: a link, FIFO or file is unlinked (the
- * link itself, not its target); a directory is opened O_NOFOLLOW and emptied through its own descriptor, then removed. If
- * the entry keeps changing type under it, it gives up after a few tries and throws.
+ * link itself, not its target); a directory is opened O_NOFOLLOW and emptied through its own descriptor, then removed. The
+ * walk keeps its own stack of held descriptors, so the depth of a planted tree is bounded by descriptors, not by the call
+ * stack. If an entry keeps changing type under it, it gives up after a few tries and throws.
  */
 export function removeAt(dirFd: number, name: Uint8Array | string): void {
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const unlinked = tryOs(() => unlinkSync(at(dirFd, name)), ['ENOENT', 'EISDIR', 'EPERM']);
-    if (!isOs(unlinked) || unlinked.os === 'ENOENT') return;
-    const sub = tryOs(() => openDirectory(at(dirFd, name)), ['ELOOP', 'ENOTDIR', 'ENOENT']);
-    if (isOs(sub)) {
-      if (sub.os === 'ENOENT') return;
-      continue; // it became a link or a file meanwhile: unlink it on the next try
+  const stack: Emptying[] = [];
+  /** Unlinks the entry, or puts it on the stack to be emptied; the stack owns every descriptor it holds. */
+  const enter = (parent: number, entry: Uint8Array | string, tries: number): void => {
+    const opened = unlinkOrOpen(parent, entry);
+    if (opened === 'gone') return;
+    const frame: Emptying = { parent, name: entry, fd: opened.fd, left: [], tries };
+    stack.push(frame);
+    frame.left = listAt(opened.fd);
+  };
+  try {
+    enter(dirFd, name, 0);
+    for (let top = stack.at(-1); top !== undefined; top = stack.at(-1)) {
+      const child = top.left.pop();
+      if (child !== undefined) {
+        enter(top.fd, child, 0);
+        continue;
+      }
+      const removed = tryOs(() => rmdirSync(at(top.parent, top.name)), ['ENOENT', 'ENOTEMPTY', 'ENOTDIR']);
+      stack.pop();
+      closeSync(top.fd);
+      if (!isOs(removed) || removed.os === 'ENOENT') continue;
+      // Something was added, or the entry was swapped, meanwhile: look again from its parent.
+      if (top.tries + 1 >= REMOVE_TRIES) throw changing();
+      enter(top.parent, top.name, top.tries + 1);
     }
-    try {
-      for (const child of listAt(sub)) removeAt(sub, child);
-    } finally {
-      closeSync(sub);
-    }
-    const removed = tryOs(() => rmdirSync(at(dirFd, name)), ['ENOENT', 'ENOTEMPTY', 'ENOTDIR']);
-    if (!isOs(removed) || removed.os === 'ENOENT') return;
+  } finally {
+    for (const frame of stack) closeSync(frame.fd);
   }
-  throw new Error('a staging entry kept changing while it was removed');
 }
