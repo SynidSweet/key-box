@@ -357,7 +357,7 @@ test('KBOX-14 a held value in an allowed header, or split across the last header
   const row = await settledRow(w, 2);
   assert.deepEqual([row.detail['code'], row.detail['reason'], row.detail['status']], ['withheld', 'value', 502]);
   await waitUntil(() => notices(w).length === 2, 'two notices');
-  w.canary.assertAbsent(w.journal.join('\n'), 'relay journal');
+  w.canary.assertAbsent({ 'relay journal': w.journal.join('\n') });
 });
 
 test('KBOX-14 a credential shape in the body is withheld with audit reason credential', async (t) => {
