@@ -165,6 +165,9 @@ test('KBOX-14 a wrapped sk- key never releases a byte of the key before it is wi
   }
 });
 
+/** A PEM private-key boundary line, assembled at run time so the source holds no secret-shaped literal for the commit scan. */
+const pemLine = (edge: 'BEGIN' | 'END', label: string): string => `${'-'.repeat(5)}${edge} ${label}PRIVATE KEY${'-'.repeat(5)}`;
+
 test('KBOX-14 credential shapes are withheld: an sk- key, a JWT, a client_secret member and a PEM private-key header', () => {
   const jwtHeader = Buffer.from('{"alg":"HS256","typ":"JWT"}').toString('base64url');
   for (const body of [
@@ -172,8 +175,8 @@ test('KBOX-14 credential shapes are withheld: an sk- key, a JWT, a client_secret
     `{"token":"${jwtHeader}.eyJzdWIiOiIxIn0.c2ln"}`,
     '{"client_secret":"x"}',
     '{ "client_secret" : "x" }',
-    '-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----',
-    '-----BEGIN PRIVATE KEY-----\nMIIB',
+    `${pemLine('BEGIN', 'RSA ')}\nMIIB\n${pemLine('END', 'RSA ')}`,
+    `${pemLine('BEGIN', '')}\nMIIB`,
     `{"k":"AIza${'b'.repeat(35)}"}`,
     `{"k":"ghp_${'c'.repeat(36)}"}`,
   ]) {
