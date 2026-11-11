@@ -10,6 +10,7 @@
 // directory; in staging it only removes. A `<name>.settled` marker core leaves once it has read an answer makes the next
 // run remove that `<name>.result`.
 import { closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeSync, fchmodSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import type { Clock } from '../ports/clock.ts';
 import type { TrustApprover } from '../ports/trust.ts';
@@ -22,7 +23,8 @@ import { parseRuntimeLock } from '../pure/runtime-lock.ts';
 import { DOMAIN_NAME, approverAddOf } from '../pure/actions.ts';
 import { decodeJsonBody } from '../pure/schemas.ts';
 import { createCodeRoot, readBootId } from './console.ts';
-import { closeFd, listAt, openAt, openDirectory, readThrough, removeAt } from './safe-open.ts';
+import { closeFd, listAt, openAt, openDirectory, readThrough, trashIn } from './safe-open.ts';
+import type { Trash } from './safe-open.ts';
 
 export interface InstallPaths {
   /** `/var/lib/keybox/staging`: core's, so nothing in it is trusted. */
@@ -427,26 +429,28 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
   };
 
   // --- one request ----------------------------------------------------------------------------------------------------
-  /** Reads a request through the safe open (at most 64 KiB) and removes the entry at once, whatever it is. */
-  const takeRequest = (stagingFd: number, name: Buffer): { readonly ok: true; readonly bytes: Uint8Array } | { readonly ok: false; readonly code: 'not_regular' | 'size' } => {
+  /** Reads a request through the safe open (at most 64 KiB) and moves the entry out of staging at once, whatever it is:
+   * into the trash, which the run empties last, so not even a planted tree too deep to remove in one run keeps the path
+   * unit triggered. */
+  const takeRequest = (stagingFd: number, trash: Trash, name: Buffer): { readonly ok: true; readonly bytes: Uint8Array } | { readonly ok: false; readonly code: 'not_regular' | 'size' } => {
     const opened = openAt(stagingFd, name);
     if (opened.kind !== 'file') {
       if (opened.kind === 'dir') closeFd(opened.fd);
-      removeAt(stagingFd, name);
+      trash.discard(name);
       return { ok: false, code: 'not_regular' };
     }
     try {
       const read = opened.size > REQUEST_LIMIT ? ({ ok: false } as const) : readThrough(opened.fd, opened.size, REQUEST_LIMIT);
-      removeAt(stagingFd, name);
+      trash.discard(name);
       return read.ok ? read : { ok: false, code: 'size' };
     } finally {
       closeFd(opened.fd);
     }
   };
 
-  const handle = async (stagingFd: number, name: Buffer): Promise<RootResult> => {
+  const handle = async (stagingFd: number, trash: Trash, name: Buffer): Promise<RootResult> => {
     try {
-      const taken = takeRequest(stagingFd, name);
+      const taken = takeRequest(stagingFd, trash, name);
       if (!taken.ok) return `refused:${taken.code}`;
       const parsed = parseRootRequest(taken.bytes);
       if (!parsed.ok) return `refused:${parsed.code}`;
@@ -459,22 +463,25 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
 
   await recoverInterrupted();
   const stagingFd = openDirectory(paths.staging);
+  const trash = trashIn(stagingFd, randomBytes(16).toString('hex'));
   const answered: { name: string; result: RootResult }[] = [];
   try {
     // First the answers core has read (`<name>.settled`): the result and the marker go, before any new answer is written.
     for (const name of listAt(stagingFd).filter((n) => endsWith(n, SETTLED_SUFFIX))) {
       const base = name.subarray(0, name.length - SETTLED_SUFFIX.length).toString('utf8');
       if (REQUEST_NAME.test(base)) rmSync(join(paths.results, `${base}.result`), { force: true });
-      removeAt(stagingFd, name);
+      trash.discard(name);
     }
     for (const name of listAt(stagingFd).filter((n) => endsWith(n, REQUEST_SUFFIX))) {
       const base = name.subarray(0, name.length - REQUEST_SUFFIX.length).toString('utf8');
-      const result = await handle(stagingFd, name);
+      const result = await handle(stagingFd, trash, name);
       if (REQUEST_NAME.test(base)) {
         writeResult(base, result);
         answered.push({ name: base, result });
       }
     }
+    // Last, once every answer is written: a tree that takes long to remove delays no answer.
+    trash.empty();
   } finally {
     closeFd(stagingFd);
   }

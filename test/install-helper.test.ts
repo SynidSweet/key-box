@@ -8,6 +8,7 @@ import { appendFileSync, closeSync, constants, existsSync, linkSync, mkdirSync, 
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { softApprover } from './kit/approver.ts';
+import { runShell } from './kit/index.ts';
 import { BOOT, COMMIT, NODE_BIN, CADDY_BIN, RELEASE_0, addActionOf, hashOf, installWorld, lockFor, sha256Hex } from './support/install-world.ts';
 import type { InstallWorld, Tree } from './support/install-world.ts';
 
@@ -351,6 +352,38 @@ test('KBOX-6 a pre-planted x.request of 20,000 nested directories is removed (re
   await w.run();
   assert.equal(existsSync(join(w.paths.staging, 'deep.request')), false, 'the entry that keeps the path unit triggered is gone');
   assert.equal(w.result('deep'), 'refused:not_regular');
+});
+
+test('KBOX-6 a trash a killed run left in staging (root-owned, 0700) is emptied by the next run; an entry core made under a trash name is left alone', async (t) => {
+  const w = await installWorld(t);
+  const left = join(w.paths.staging, '.kb-trash-left');
+  mkdirSync(join(left, '1'), { recursive: true, mode: 0o700 });
+  writeFileSync(join(left, '1', 'x'), 'x');
+  const planted = join(w.paths.staging, '.kb-trash-planted');
+  mkdirSync(planted, { mode: 0o755 });
+  writeFileSync(join(planted, 'keep'), 'keep');
+  w.request('nothing', { kind: 'trust', change: 'setup', code: 'x', domain: 'box.example', approvers: [] });
+  await w.run();
+  assert.equal(existsSync(left), false, 'the left trash is emptied');
+  assert.equal(readFileSync(join(planted, 'keep'), 'utf8'), 'keep', 'not ours (not 0700): never emptied, so a planted tree costs root nothing');
+});
+
+/** The open-file limit a kb-install run is started under below: far fewer descriptors than the planted tree is deep. */
+const FEW_FDS = 64;
+
+test('KBOX-6 a pre-planted x.request far deeper than the open-file limit is removed with a constant number of descriptors, and nothing is left in staging', async (t) => {
+  const w = await installWorld(t);
+  nestDirs(w.paths.staging, 'deep.request', 16 * FEW_FDS);
+  const pathsFile = join(w.root, 'paths.json');
+  writeFileSync(pathsFile, JSON.stringify(w.paths));
+  const helper = new URL('./support/install-run.ts', import.meta.url).pathname;
+  // The limit is set in the run's own shell, a process this test starts (soft and hard, so Node cannot raise it).
+  const run = runShell(`ulimit -n ${FEW_FDS} && exec "${process.execPath}" "${helper}" "${pathsFile}"`, w.root);
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, new RegExp(`^Max open files\\s+${FEW_FDS}\\s+${FEW_FDS}\\s`, 'm'), `the limit held in the run: ${run.stdout}`);
+  assert.equal(existsSync(join(w.paths.staging, 'deep.request')), false, `the entry is gone: ${run.stderr}`);
+  assert.equal(w.result('deep'), 'refused:not_regular');
+  assert.deepEqual(readdirSync(w.paths.staging), [], 'nothing is left in staging, the trash included');
 });
 
 test('KBOX-6 a pre-planted <H>.result symlink in staging has no effect: results are written under the root-owned results directory', async (t) => {
