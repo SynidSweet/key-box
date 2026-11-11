@@ -215,3 +215,21 @@ test('KBOX-34 KBOX-52 an ordinary key on a paste-source platform is never run as
   assert.deepEqual([asked.status, (asked.json() as { error?: { detail?: { code?: string } } }).error?.detail?.code], [422, 'no_issuer']);
   assert.deepEqual(w.rotation.store.runs().map((r) => r.origin), ['create']);
 });
+
+test('KBOX-52 KBOX-51 run() ticks at start and every hour after, resumes a run waiting out its grace, and its stop cancels the tick, the reconcile and the grace timer', async (t) => {
+  const w = await routesWorld(t);
+  await w.api('/api/keys', { json: { platform: 'fake', name: 'OPENAI_KEY', projects: ['shop'], scope: { items: ['read'] }, rotate_every_days: 30 } });
+  assert.equal(w.clock.pendingTimers, 0);
+  const stop = await w.rotation.run();
+  assert.equal(w.rotation.store.activeRunOf(KEYREF), undefined, 'not due at start');
+  w.clock.advance(30 * DAY);
+  assert.equal(w.rotation.store.activeRunOf(KEYREF)?.origin, 'schedule', 'the hourly tick found the key due');
+  await w.rotation.orchestrator.idle();
+  assert.equal(w.rotation.store.activeRunOf(KEYREF)?.state, 'grace');
+  assert.ok(w.clock.pendingTimers >= 3, 'the tick, the reconcile and the grace wait each hold a timer');
+  stop();
+  assert.equal(w.clock.pendingTimers, 0, 'nothing is left to keep the process alive');
+  w.clock.advance(2 * DAY);
+  await w.rotation.orchestrator.idle();
+  assert.equal(w.rotation.store.activeRunOf(KEYREF)?.state, 'grace', 'a stopped rotation does no more');
+});

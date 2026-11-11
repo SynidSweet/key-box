@@ -432,6 +432,8 @@ export function createRotationStore(db: DatabaseSync, clock: Clock, hub: EventSi
     setGenStatus(keyref, gen, status) {
       write(() => {
         if (db.prepare('UPDATE rotation_gens SET status = ? WHERE keyref = ? AND gen = ?').run(status, keyref, gen).changes === 0) throw new ApiError('not_found');
+        // A generation going live, into grace or out of it is a change of what the share file lists (KBOX-33): the share writer follows this event.
+        keyChanged(keyref);
       });
     },
     topGen: (keyref) => (db.prepare('SELECT coalesce(max(gen), 0) AS g FROM rotation_gens WHERE keyref = ?').get(keyref) as { g: number }).g,

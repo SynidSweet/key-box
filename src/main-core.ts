@@ -3,6 +3,8 @@
 // the only file besides the private-db adapter that names private.db.
 import { mkdirSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import type { Clock, Scheduler } from './ports/clock.ts';
+import type { Random } from './ports/random.ts';
 import { DOMAIN_NAME } from './pure/actions.ts';
 import type { Action } from './pure/actions.ts';
 import { parseWordlist } from './pure/codes.ts';
@@ -29,6 +31,10 @@ import { systemRandom } from './shell/random.ts';
 import { REGISTRY } from './platforms/registry.ts';
 import { createTrustInstaller } from './shell/trust-installer.ts';
 import { createUpdater } from './shell/updater.ts';
+import type { Executor } from './shell/approvals.ts';
+import { createPlatformSource } from './shell/platform-source.ts';
+import { openRotation } from './shell/rotation.ts';
+import type { Rotation } from './shell/rotation.ts';
 
 interface Config {
   readonly stateDir: string;
@@ -85,15 +91,39 @@ export function coreRoutes(parts: readonly Route[], approve: readonly Route[], u
   return [...parts, ...approve, ...update];
 }
 
-async function main(): Promise<void> {
-  const config = readConfig(process.env);
+/** What core takes from the process: the clock, the timers, the randomness and where the journal goes. A test hands in its own. */
+export interface CoreRuntime {
+  readonly clock: Clock;
+  readonly scheduler: Scheduler;
+  readonly random: Random;
+  readonly journal: (code: string) => void;
+}
+
+const systemRuntime: CoreRuntime = {
+  clock: systemClock,
+  scheduler: systemScheduler,
+  random: systemRandom,
+  journal: (code) => void process.stderr.write(`keybox core: ${code}\n`),
+};
+
+export interface StartedCore {
+  /** The route table the server answers from. */
+  readonly routes: readonly Route[];
+  /** Cancels every timer core set, then closes the sockets and the stores. */
+  stop(): Promise<void>;
+}
+
+/** Opens the state directory, wires every part and starts listening. The environment is read once, here. */
+export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = systemRuntime): Promise<StartedCore> {
+  const { clock, scheduler, random, journal } = runtime;
+  const config = readConfig(env);
   assertRegistry(REGISTRY);
-  const journal = (code: string): void => void process.stderr.write(`keybox core: ${code}\n`);
-  const parts = openCore({ stateDir: config.stateDir, clock: systemClock, scheduler: systemScheduler, random: systemRandom });
+  const parts = openCore({ stateDir: config.stateDir, clock, scheduler, random });
   const privateStore = openPrivateDatabase(join(config.stateDir, 'private.db'));
   let approve: ReturnType<typeof openApproveCore> | undefined;
   let idle: IdleWatch | undefined;
-  const wait = (ms: number): Promise<void> => new Promise((resolve) => void systemScheduler.after(ms, resolve));
+  let rotation: Rotation | undefined;
+  const wait = (ms: number): Promise<void> => new Promise((resolve) => void scheduler.after(ms, resolve));
   const updater = createUpdater({
     stagingDir: config.staging,
     resultsDir: config.installResults,
@@ -114,39 +144,62 @@ async function main(): Promise<void> {
   mkdirSync(config.staging, { recursive: true, mode: 0o750 });
   if (config.domain === undefined) journal('no_domain');
   else {
-    const trust = createTrustInstaller({ stagingDir: config.staging, resultsDir: config.installResults, random: systemRandom, clock: systemClock, wait });
-    const push = createPush({ store: privateStore, transport: createHttpPushTransport(createSystemEgress(REGISTRY)), scheduler: systemScheduler, clock: systemClock, random: systemRandom, audit: parts.audit, subject: `https://keys.${config.domain}` });
+    const trust = createTrustInstaller({ stagingDir: config.staging, resultsDir: config.installResults, random, clock, wait });
+    const push = createPush({ store: privateStore, transport: createHttpPushTransport(createSystemEgress(REGISTRY)), scheduler, clock, random, audit: parts.audit, subject: `https://keys.${config.domain}` });
     const wordlist = parseWordlist(readFileSync(new URL('./data/wordlist.txt', import.meta.url), 'utf8'));
-    idle = createIdleWatch({ files: { stat: '/proc/stat', meminfo: '/proc/meminfo', netdev: '/proc/net/dev' }, clock: systemClock, push, linkMbps: linkMbps(), notifier: { notice: journal } });
-    approve = openApproveCore({ parts, approverStore: privateStore, trust, push, clock: systemClock, random: systemRandom, domain: config.domain, wordlist, vet: vetWithoutAdapters, executors: { install_update: updater.executor }, updateChanges: (action) => updater.changes(action) });
+    idle = createIdleWatch({ files: { stat: '/proc/stat', meminfo: '/proc/meminfo', netdev: '/proc/net/dev' }, clock, push, linkMbps: linkMbps(), notifier: { notice: journal } });
+    // Rotation needs the approvals and approvers that need its executors: the executors reach it once it is open (an approval is decided long after start).
+    const viaRotation = (kind: 'rotate_key' | 'add_key'): Executor => (approval) => {
+      const executor = rotation?.executors[kind];
+      if (executor === undefined) throw new RangeError('rotation is not open');
+      return executor(approval);
+    };
+    approve = openApproveCore({
+      parts,
+      approverStore: privateStore,
+      trust,
+      push,
+      clock,
+      random,
+      domain: config.domain,
+      wordlist,
+      vet: vetWithoutAdapters,
+      executors: { install_update: updater.executor, rotate_key: viaRotation('rotate_key'), add_key: viaRotation('add_key') },
+      updateChanges: (action) => updater.changes(action),
+    });
+    rotation = openRotation({ parts, approvals: approve.approvals, approvers: approve.approvers, push, clock, scheduler, random, audit: parts.audit, source: createPlatformSource({ registry: REGISTRY, meta: parts.meta, vault: parts.vault }) });
   }
+  const rotationStore = rotation?.store;
   const shares = createShareWriter({
     dir: join(config.stateDir, 'share'),
     meta: parts.meta,
     signingKey: parts.share.signingKey,
-    source: createMetaShareSource({ meta: parts.meta, values: parts.share.values, shapeOf: noShapeYet }),
+    source: createMetaShareSource({ meta: parts.meta, values: parts.share.values, shapeOf: noShapeYet, ...(rotationStore === undefined ? {} : { generations: (keyref: string) => rotationStore.gens(keyref) }) }),
     events: parts.events,
     hub: parts.hub,
-    clock: systemClock,
-    scheduler: systemScheduler,
-    random: systemRandom,
+    clock,
+    scheduler,
+    random,
     audit: parts.audit,
   });
   // A first file that cannot be written does not stop the box: the file is served as stale (503) until the next key.changed makes one.
-  await shares.start().catch(() => parts.audit.append({ action: 'share.refresh_failed', subject: 'share', at: systemClock.now(), detail: { code: 'start_failed' } }));
+  await shares.start().catch(() => parts.audit.append({ action: 'share.refresh_failed', subject: 'share', at: clock.now(), detail: { code: 'start_failed' } }));
+  const routes = [...coreRoutes(parts.routes, approve?.routes ?? [], approve === undefined || running === undefined ? [] : updater.routes), shareRoute(shares), ...(rotation?.routes ?? [])];
   const server = createApiServer({
-    routes: [...coreRoutes(parts.routes, approve?.routes ?? [], approve === undefined || running === undefined ? [] : updater.routes), shareRoute(shares)],
+    routes,
     tokens: approve?.tokens.tokenStore ?? parts.meta,
     audit: parts.audit,
-    random: systemRandom,
-    clock: systemClock,
+    random,
+    clock,
     journal,
   });
   await server.listen(config.socket);
+  // Resume unfinished runs, reconcile, tick, and arm the hourly tick and the daily reconcile. No platform is registered yet, so on a fresh box this finds nothing to do.
+  const stopRotation = (await rotation?.run()) ?? ((): void => undefined);
   // Platform adapters register the short-lived values they mint here, so the scanner holds them while they live (KBOX-14).
-  const minted = createMintedValues(systemClock);
+  const minted = createMintedValues(clock);
   const lend = createLendServer(
-    createLendHandler({ meta: parts.meta, tokens: approve?.tokens.tokenStore ?? parts.meta, vault: parts.vault, audit: parts.audit, events: parts.events, registry: REGISTRY, shapes: loadCredentialShapes(), clock: systemClock, minted, journal }),
+    createLendHandler({ meta: parts.meta, tokens: approve?.tokens.tokenStore ?? parts.meta, vault: parts.vault, audit: parts.audit, events: parts.events, registry: REGISTRY, shapes: loadCredentialShapes(), clock, minted, journal }),
     journal,
   );
   if (config.lendSocket === undefined) journal('no_lend_socket');
@@ -154,34 +207,40 @@ async function main(): Promise<void> {
   let cancelSweep = (): void => undefined;
   const sweep = (): void => {
     approve?.approvals.sweep();
-    cancelSweep = systemScheduler.after(SWEEP_EVERY_MS, sweep);
+    cancelSweep = scheduler.after(SWEEP_EVERY_MS, sweep);
   };
   let cancelSettle = (): void => undefined;
   const settle = (): void => {
     updater.settle();
-    cancelSettle = systemScheduler.after(SETTLE_EVERY_MS, settle);
+    cancelSettle = scheduler.after(SETTLE_EVERY_MS, settle);
   };
   if (approve !== undefined) settle();
   let cancelIdle = (): void => undefined;
   const sampleIdle = (): void => {
     idle?.sample();
-    cancelIdle = systemScheduler.after(IDLE_SAMPLE_EVERY_MS, sampleIdle);
+    cancelIdle = scheduler.after(IDLE_SAMPLE_EVERY_MS, sampleIdle);
   };
   if (idle !== undefined) sampleIdle();
   if (approve !== undefined) sweep();
+  const shutDown = async (): Promise<void> => {
+    cancelSweep();
+    cancelSettle();
+    cancelIdle();
+    idle?.stop();
+    shares.stop();
+    stopRotation();
+    await Promise.all([server.stop(), lend.stop(), rotation?.orchestrator.idle()]);
+    privateStore.close();
+    parts.close();
+  };
+  let stopping: Promise<void> | undefined;
+  return { routes, stop: () => (stopping ??= shutDown()) };
+}
+
+async function main(): Promise<void> {
+  const core = await startCore(process.env);
   const stopped = new Promise<void>((resolve) => {
-    const stop = (): void => {
-      cancelSweep();
-      cancelSettle();
-      cancelIdle();
-      idle?.stop();
-      shares.stop();
-      void Promise.all([server.stop(), lend.stop()]).then(() => {
-        privateStore.close();
-        parts.close();
-        resolve();
-      });
-    };
+    const stop = (): void => void core.stop().then(resolve);
     process.once('SIGTERM', stop);
     process.once('SIGINT', stop);
   });

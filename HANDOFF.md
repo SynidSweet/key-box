@@ -1,124 +1,137 @@
-# HANDOFF — loop state
+# HANDOFF — codebase map and loop state
 
 Fresh-context loop state: this file and the code are the only channels.
 REWRITE it (never append) before you finish. Unchanged fails.
 
 ## Where things stand
 
-Units `scaffold`, `forms`, `kernel-store` and `kernel-approve` are built on main (`kernel-approve` from 76537bd; see "Recent").
-No platform, relay, update, rotate or share code exists yet. The core process (`src/main-core.ts`) serves the machine API and,
-when `KB_DOMAIN` is set, the phone app, Web Push and the approvals. Its `TrustPort` refuses every request (`no_installer`) until
-the `update` unit builds the real one (kb-install's trust requests), so on a real box setup, recovery and approver changes
-cannot complete yet. Kinds that need a platform adapter's check (`add_key`, `add_destination`, `set_allow_rules`, the two
-Vercel kinds) are `rejected` at proposal time until an adapter registers. Next: `update`, `relay`, `rotate`, `share` (Remaining).
-Spec: `docs/spec.md`. Run units with the compound-loop driver and `-G loop/gate.sh`.
+Every unit of stages 1 to 4 is built and integrated on `unit/integrate`: `scaffold`, `forms`, `kernel-store`, `kernel-approve`,
+`update`, `relay`, `rotate`, `share`. What is left is the six adapter units, three journeys and the items under Remaining.
+`src/main-core.ts` now wires everything: `startCore(env, runtime)` (exported; `main()` is `startCore` plus SIGTERM/SIGINT)
+serves the machine API, the share file and, when `KB_DOMAIN` is set, the phone app, approvals, the real `TrustPort`, the update
+intake and rotation (key routes, paste, deliveries, the hourly tick, the daily reconcile, the `rotate_key` and `add_key`
+executors). `src/platforms/registry.ts` is EMPTY until the adapter units add entries, so every action that needs a platform
+(`add_key`, `add_destination`, `set_allow_rules`, the two Vercel kinds) is `rejected` at proposal time, no key has a share shape
+(`noShapeYet`) and the relay forwards nothing. Spec: `docs/spec.md` (Build units table at the end). Verdicts of each unit's
+adversary: `/home/petter/.local/share/lanes/key-box/<unit>.verdict.md`.
 
 ## Codebase map
 
-- `package.json`, `package-lock.json`, `.nvmrc` (24), `tsconfig.json`, `runtime.lock` (placeholder). Dev dependencies only
-  (`typescript` 6.0.3, `@types/node` 24.19.2, exact); no runtime dependencies. `npm ci --ignore-scripts`.
-- `src/ports/`: interfaces of design 5.1 (`vault`, `audit`, `meta` incl. TokenStore, `events`, `private` (PushStore,
-  ApproverStore), `clock`, `random`, `issuer`, `destination`, `relay-profile`, `approvals`, `notifier`, `types`, `push`
-  (Push, PushSubscriptions incl. `applicationServerKey`, PushTransport), `trust` (TrustPort: setup, recovery, approver_add,
-  approver_remove requests; applied or refused)).
-- `src/pure/` (no I/O):
-  - `webauthn.ts` (assertion check by hand: clientData type/challenge/origin/crossOrigin/topOrigin, 37-byte authData, AT/ED
-    refused, rpIdHash, UP, UV, counter, ES256 over DER; `derToRaw`, `verifyEs256Raw`), `cose.ts` (strict CBOR subset, EC2 P-256
-    ES256 only, on-curve check), `challenge.ts` (the one home of every challenge: approval, denial (`kbox-v1-deny`), view, op, paste, registration;
-    `verifyProof` = passkey AND device key of the same approver; stateless HMAC nonces bound to purpose, approval id and
-    revision). Core and kb-install share these three; `test/kit` must not import them (arch check).
-  - `actions.ts` (closed `Action` union of 16 kinds, `parseAction`, `PROPOSAL_ROUTE_KINDS`, `DOMAIN_NAME`), `slots.ts` (`slotOf`,
-    `decideSlot`: open / replace / takeover / taken), `words.ts` (KBOX-8 fixed sentences, titles, `renderPage`), `codes.ts`
-    (12 BIP-39 words = 132 bits, hash only), `pushcrypto.ts` (RFC 8291 aes128gcm, RFC 8292 VAPID), `pushsub.ts` (endpoint check
-    against `src/data/push-hosts.json`), plus the kernel-store files (`forms`, `schemas`, `errors`, `canonical`, `tokens`, `address`).
-- `src/shell/`:
-  - `approve-core.ts` `openApproveCore(deps)`: wires approvers, approvals, machine tokens and the phone routes over `CoreParts`;
-    executes grant, revoke_grant, add/remove_destination, enrol, approver_remove itself; other kinds come in `executors`.
-  - `approvers.ts` (the proof check, nonces, view sessions `__Host-kb_view` 15 min, setup/recover/add/remove through the
-    TrustPort; core's table changes only after `applied`; an approver_add's registration code carries a `settle` callback
-    that ends its approval as done or failed: root_refused, proof_refused, code_expired, superseded, cancelled by a recovery or
-    by removing the approver who approved it; `GET /app/queue` answers `{phrase, approvals}`, the viewer's own phrase),
-    `approvals.ts` (proposals, 14-day expiry swept lazily, decide,
-    kept proofs for install_update/approver_add/approver_remove), `tokens.ts` (enrol window 10 min, one enrol; signed revoke;
-    new-network push), `routes-approve.ts` (`/api/proposals`, `/api/enrol`, `/api/enrol/:sha`, every phone route and asset),
-    `push.ts` + `push-transport.ts` (Web Push sender, 10 s timeout, 404/410 removes), `console.ts` (root's code store:
-    `/etc/keybox/codes` 0700, files 0600; recovery 30 min per boot_id; console sink).
-  - `http.ts` frame: path params (`:name`), open routes, raw replies and headers, the phone cookie; a bearer token on a phone
-    route is refused 403. Plus the kernel-store files (`core.ts`, `db.ts`, `meta.ts`, `audit.ts`, `events.ts`, `vault-fs.ts`,
-    `routes-control.ts`, `private-db.ts`, `clock.ts`, `random.ts`).
-- `src/web/`: the phone app, plain JS under `checkJs` (no DOM lib: `browser()` in `webauthn-client.js` is the one typed cast).
-  `index.html`/`app.js` (view, queue, approve/deny, signed ops, add phone), `setup.*`, `recover.*`, `register.js`, `sw.js`,
-  `manifest.webmanifest`, `app.css`. Errors go to `notifier` (the page's status line), which the silent-catch rule accepts.
-- `src/cli/kb-code.ts` (root oneshot: setup | recovery codes to the console device only), `src/main-core.ts`.
-- `deploy/`: `keybox.service`, `keyrelay.service`, `kb-code.service` (tty group, one DeviceAllow), `keybox-tmpfiles.conf`,
-  `runtime.config.json` (`console_device`, UNVERIFIED `/dev/ttyAMA0`).
-- `test/kit/` (add files, do not edit existing lines): kernel-store helpers plus `approver.ts` (`softApprover()`: passkey and
-  device key, faults planted under a valid signature) and `cbor.ts`. `test/support/approve-world.ts`: `approveWorld(t, opts)`
-  (real core + approve core on a socket, FakeTrust over the real code store, FakePush, journal capture, extra routes, shared
-  code dir for journeys). `test/fakes/{push,trust}.ts`. Fixtures: `test/fixtures/webauthn/` (`SOURCE.md` names the vectors).
-- Tests by rule: `approval-binding` (KBOX-9), `slots` (KBOX-7), `words` (KBOX-8), `machine-tokens` (KBOX-11), `recovery` (KBOX-20),
-  `web-push` (KBOX-22 incl. the URL walk), `setup` (KBOX-49, the pages, the running core), `proposal-routes` (KBOX-53, KBOX-19
-  route half), `journeys/recovery.test.ts` (J5); plus the kernel-store files. `test/journeys/process-split.test.ts` is root-only
-  (Docker in the gate). `loop/gate.sh`, `loop/probes/arch.sh`.
+- Root: `package.json` (dev dependencies only: `typescript` 6.0.3, `@types/node` 24.19.2, exact; no runtime dependencies),
+  `tsconfig.json`, `runtime.lock` (real Node 24.11.1 and Caddy 2.10.2 arm64 pins), `docs/spec.md`, `docs/setup-checklist.md`,
+  `loop/gate.sh` + `loop/probes/arch.sh`.
+- `src/ports/` (interfaces of design 5.1): `vault`, `audit`, `meta` (+TokenStore), `events`, `private`, `clock`, `random`,
+  `issuer` (Issuer, KeyLister with `listAt`, Verifier), `destination` (Destination, Redeployer, three push outcomes),
+  `relay-profile`, `platform` (`PlatformEntry`: id, issuer, lister, relay or denyOnly), `approvals`, `notifier`, `push`, `trust`,
+  `share`, `minted`, `types`.
+- `src/pure/` (no I/O), by concern:
+  - Approvals and proofs: `webauthn`, `cose`, `challenge` (every challenge; shared with kb-install), `actions` (closed `Action`
+    union), `slots`, `words`, `codes`, `tokens`, `canonical`, `schemas`, `errors`, `address`, `lent`, `pushcrypto`, `pushsub`.
+  - Update: `tar`, `release-hash`, `runtime-lock`, `install-request` (core's request and root's answer, one home), `kept-proof`.
+  - Relay: `target-parse`, `rule-match`, `profile` (engine and registry checks), `scanner`, `forms` (the one forms library for
+    the scanner and the share writer), `lend-protocol`, `relay-errors`, `egress-policy`.
+  - Rotation: `rotation-machine` (steps, intent name, retry delay), `scheduler` (due dates, staggering), `class` (class never
+    lowered, KBOX-16).
+  - Share: `coverage` (watch tier), `share-build` (format v3, envelope).
+- `src/shell/` (adapters and wiring), by concern:
+  - Kernel: `core.ts` (`openCore`: meta.db, audit, events, vault, control routes), `db`, `meta`, `audit`, `events`, `vault-fs`,
+    `http` (frame), `routes-control`, `private-db`, `clock`, `random`.
+  - Approval half: `approve-core` (`openApproveCore`), `approvers`, `approvals`, `tokens`, `routes-approve`, `push`,
+    `push-transport`, `console`, `idle-watch`.
+  - Update: `updater` (core's intake, `POST /api/updates`), `trust-installer` (real `TrustPort`), `installer` + `safe-open` +
+    `systemd` (kb-install's root half; `src/cli/kb-install.ts`), `src/cli/kb-code.ts`.
+  - Relay: `relay-http` (kb-relay on its own socket; `src/main-relay.ts`), `lend-core` + `lend-socket` (core's lend side),
+    `minted-values`, `egress` + `egress-system` (the one outbound gate; hosts from the registry and `deploy/egress-hosts.json`).
+  - Rotation: `rotation.ts` (`openRotation`: the one wiring), `orchestrator` (runs, `stop()` cancels run timers), `reconcile`,
+    `revoke-confirm`, `rotation-store`, `rotation-ports` (`PlatformSource`, `PlatformKit`, `Point`), `platform-source`
+    (`createPlatformSource`: registry to kits, master key = current generation of the platform's master-class key row),
+    `key-routes` (`/api/keys`, `/api/rotations`, `/api/retired`), `deliveries`, `paste` (phone paste flow), `new-key`.
+  - Share: `share-source` (admin and master keys; retired generations from the rotation store's `grace` and `retired` rows),
+    `share-writer` (`GET /api/share`, `share.version`).
+- `src/web/`: the phone app, plain JS under `checkJs` (`app.js`, `setup.*`, `recover.*`, `register.js`, `paste.*`, `sw.js`).
+- `src/data/`: `wordlist.txt`, `push-hosts.json`, `credential-shapes.json`.
+- `deploy/`: `keybox.service`, `keyrelay.service`, `kb-code.service`, `kb-install.service` + `.path`, `caddy.service`,
+  `Caddyfile`, `cloud-init.yaml`, `keybox-tmpfiles.conf`, `runtime.config.json` (`console_device` UNVERIFIED `/dev/ttyAMA0`,
+  `link_mbps`), `egress-hosts.json` (non-adapter hosts: the push services, `nodejs.org`, `github.com`).
+- Tests: `test/*.test.ts` named for the behaviour (one file per rule family; the spec's rule ids are in the test titles);
+  `test/journeys/` (J2 `relayed-call`, J3 in one process `ordinary-rotation`, J5 `recovery`, J6 `share`, `process-split`
+  is root-only); `test/contracts/` (one suite per port, run against the fake); `test/arch*` (architecture probe);
+  `test/kit/` (shared helpers; add files, do not edit lines; it must not import `src/pure/{webauthn,cose,challenge}`);
+  `test/support/*-world.ts` (`approveWorld`, `rotationWorld`, `routesWorld`, `shareWorld`, `relay-world`, `install-world`);
+  `test/fakes/` (platform, destination, push, trust, vault, audit, approvals). New this slice: `main-core.test.ts` (core started
+  in process on a `TimedClock`), `platform-source.test.ts`, `share-rotation.test.ts` (real share source over a real rotation).
 
 ## Remaining
 
-1. `update` (KBOX-1, 6, 21, 44, 46, 48): builds the real `TrustPort` (`src/shell/trust-installer.ts`) and wires it in
-   `main-core.ts` in place of `noInstaller`; kb-install verifies kept proofs with `src/pure/{webauthn,cose,challenge}.ts`;
-   sets `KB_DOMAIN` in the unit/cloud-init; registers the `install_update` executor; owns `POST /api/updates`. It also touches
-   `deploy/runtime.config.json`, which kernel-approve created with `console_device` only (keep that member).
-2. `relay` (KBOX-3, 13, 14, 23, 25, 32, 47), `rotate` (KBOX-12, 15, 16, 17, 34, 51, 52; paste `/p/<id>` and `pasteChallenge` are
-   ready), `share` (KBOX-18, 33); parallel. Adapters register the proposal check that `main-core`'s `vetWithoutAdapters` stands in for.
-3. The six adapter units (`google`, `vercel`, `supabase`, `openai`, `elevenlabs`, `paste`); each commits its probe report first.
-
-Open items, not fixed:
-- Old approvers' push subscriptions are not removed on recovery or removal: subscriptions carry no approver link.
-- The control enrol window is per label only (spec KBOX-11): the first `POST /api/enrol` with the label inside the 10 minutes
-  takes it, so an agent that polls can win the race against the real machine. The fix (the signed `enrol_window_open` operation
-  also names `token_sha256`, which the owner pastes from the machine) changes the operation shape the spec and these tests pin:
-  machine-tokens (window tests, `op` helper), proposal-routes (the three enrol cases), setup (client op challenge) and the phone
-  page. **Decided (orchestrator, 2026-11-11): not built; accepted residual.** The fix would make the owner copy a hash off a
-  machine, which the owner never does, and it buys nothing under S-717: relay passes are not pinned, any of the owner's
-  machines may hold one, and every machine is agent-controlled, so a pass won by the race is one an agent could get by asking.
-  Revisit only if passes are ever pinned or per-machine grants become a real boundary.
-- Unchanged and judged harmless (kernel-approve verdict): the `ENROL_LABEL` check on `enrol_window_open`, the future-nonce
-  guard, the duplicate COSE label check, the DER zero r/s check, `records().length <= 1` in `remove`. `private.db` from before
-  kernel-approve would fail `listApprovers` (no migration; no box is deployed). The audit grows with each refused proof by
-  design (owner: no numeric caps); spent nonces are pruned after 10 minutes. `deploy/keybox.service` sets no `KB_DOMAIN` until `update`.
-- Recovery and approver_add need a real TrustPort before J5 can run against two processes; J5 runs core in-process now.
-- The phone app was never run in a real browser (no WebAuthn here); only its challenge builders and COSE extraction are tested.
-- kernel-store review items: `put()` replaces a generation via rename; `retire()` does not sweep temps; a temp under a ref over 128
-  characters stops the start; spec-drift audit of the kernel-store files not done.
+1. The six adapter units, parallel: `google` (KBOX-24, 41), `vercel` (26, 36), `supabase` (37), `openai` (38), `elevenlabs` (39),
+   `paste` (40: Anthropic, Stripe). Each COMMITS A PROBE REPORT FIRST (`docs/probes/<id>.md`) of every UNVERIFIED endpoint named in
+   its rule, then code. To wire an adapter: add its `PlatformEntry` line to `src/platforms/registry.ts`; `PlatformEntry` has no
+   `verifier`, `keyPageUrl` or destination kits yet, so the first adapter to need them extends the port and the two lines in
+   `platform-source.ts` that read it; replace `noShapeYet` in `main-core.ts` with the registry's `issuer.capabilities().shape`;
+   drop the kind from `NEEDS_ADAPTER` / replace `vetWithoutAdapters` with the adapter's proposal check.
+2. Journeys J1 (setup, then approve a rotation of an admin key), J3 as two real processes (J3 runs in one process today) and J4
+   (an update bundle approved and installed, then a bad bundle rolled back). J1 and J3 need the registry; J4 needs the real
+   kb-install on a box. J2, J5 and J6 exist.
+3. Release downloads into `<H>.bin`: an update that changes a pin is refused (`lock`), unchanged pins work. GitHub release assets
+   redirect to a second host that must join `deploy/egress-hosts.json` (caller `update`) when downloads are built.
+4. Make the trust request's `deadline` required at root (`src/pure/install-request.ts` still parses it as optional).
+5. The OCI Run Command disable line in `deploy/cloud-init.yaml` (`oci-cloud-agent-plugin disable "Compute Instance Run Command"`)
+   is UNVERIFIED: probe it on the instance; the runcmd has no `set -e`, so a failure says nothing.
+6. The `set_allow_rules` executor's widening refusal comes with the adapters (it is `rejected` until one registers, and no code
+   reads a key's own allow set but the relay profile narrowing); wire it in the unit that builds that executor, with a test
+   through the proposal route.
+7. m6 (relay.verdict.md): the canonical re-encoding turns Google's literal `documents:runQuery` into `documents%3ArunQuery`
+   (`src/pure/target-parse.ts`, per the spec's rule). Whether Google's front end treats it the same is UNVERIFIED: the `google`
+   unit probes it.
+8. NEEDS A DECISION: `vault.retire` deletes the value file, so a generation the rotation has revoked has no value left and the
+   share file lists it as `none` (not watched); only a generation in grace is watched as retired. The spec says the old value
+   "stays in the vault for fingerprints only" (KBOX-51 step 10) and the file holds retired generations "found and reported as
+   retired" (KBOX-33). Fixing it means a vault port change (keep a retired value readable by the share reader only) and
+   touches kernel-store; `POST /api/retired` has the same effect.
+9. Open items not fixed: old approvers' push subscriptions are not removed on recovery or removal; the control enrol window is
+   per label only (decided 2026-11-11: accepted residual, see Decisions); `private.db` from before kernel-approve has no
+   migration; the phone app was never run in a real browser; findings of the unit verdicts that no fix commit names are in the
+   verdict files.
 
 ## Decisions
 
-- Node 24 LTS per spec; `typescript` 6.0.3. Silent-catch rule strict (throw, return a non-empty value, or `audit.append` /
-  `notifier.*` on every path), `src/` and `test/`. No `any`, `!`, ts/eslint suppressions anywhere.
-- kernel-approve readings: shape failures on `/api/proposals` are `bad_request`, vet and last-approver failures `rejected`;
-  `reason` is `{agent, text}`; the registration challenge is `SHA-256("kbox-v1-register" || nonce)` and a new approver proves both
-  keys; assertions with AT or ED flags are refused; a counter that does not grow is refused unless both are 0 (synced passkeys);
-  nonces are stateless HMAC, spent on any attempt that passes the HMAC check; replace and takeover send no push; expiry counts
-  from the first opening; the approver-add registration step is `POST /recover/register`; `GET /app/push-key` added (the phone
-  needs the VAPID key to subscribe; the spec's route list has none); `/app/propose-approver-add` is the one state change a view
-  cookie may make (spec lists it with a view session); kb-code makes `/etc/keybox/codes` itself (tmpfiles test pins the dirs).
+- Node 24 LTS; `typescript` 6.0.3. Silent-catch rule strict (throw, return a non-empty value, or `audit.append` / `notifier.*`
+  on every path), `src/` and `test/`. No `any`, `!`, ts or eslint suppressions anywhere.
+- Control enrol window per label only: not built, accepted residual (orchestrator, 2026-11-11). The fix would make the owner copy a
+  hash off a machine and buys nothing under S-717 (relay passes are not pinned and every machine is agent-controlled).
+- Integrate: rotation is opened only with the approval half (`KB_DOMAIN` set), because it needs `approvals` and `approvers`; a box
+  with no domain has no key, rotation or paste route. The approval executors reach rotation late (`viaRotation`), since rotation is
+  built from the approval half that takes the executors. `rotation.run()` is awaited after the server listens, with no catch: a
+  failed resume stops the start, loudly.
+- Integrate: the platform's master key is the first master-class key row of that platform, current generation, lent from the vault;
+  none gives a `RangeError` that the orchestrator audits (`drive_failed`). KBOX-36 says the owner pastes it once; no spec text names
+  the row, so this is a reading.
+- Integrate: `RotationStore.setGenStatus` writes `key.changed`, so a retirement, a grace and a promote each give the share writer a
+  new version (KBOX-33 asks for a version per retirement; nothing emitted one). `Orchestrator.stop()` and `startCore().stop()` cancel
+  run timers and are idempotent.
+- Share: `createMetaShareSource({generations})` is optional so fake-store tests keep the old shape; main-core passes the rotation
+  store's `gens`. A pending or failed generation is not listed.
 - Probe `arch` is the gate's architecture step. `GATE_PINNED_PATHS` pins `loop/probes/arch.sh` and `tsconfig.json`; lockfile pinned.
-- Planted mutants (scratch copies under `~/.cache`) are the stand-in for missed red steps: kernel-approve planted 17, all caught.
+- Planted mutants (scratch copies, one `runq` run) stand in for missed red steps; this slice planted three (the orchestrator stop,
+  core's rotation stop, the grace filter) and all were caught.
 
 ## Gotchas
 
-- Run the gate under `runq` naming the skill path (runs locally): `runq run --why "<why>" -- bash -c "env LOOP_SKILL_DIR=/home/petter/.claude/skills/deterministic-gates LOOP_WORKDIR=<tree> LOOP_BASE_COMMIT=<sha> bash loop/gate.sh"`. Needs Docker.
+- Run the gate under `runq` naming the skill path: `runq run --why "<why>" -- bash -c "env LOOP_SKILL_DIR=/home/petter/.claude/skills/deterministic-gates LOOP_WORKDIR=<tree> LOOP_BASE_COMMIT=<sha> bash loop/gate.sh"`. Needs Docker.
+- The guard refuses `node`, `python3` and other interpreters outside `runq run`, and blocks the whole command line: edit with the Edit
+  tool, run tests as `runq run --why "<why>" -- node --test <file>`. Never `--place`.
 - Plain `node --test` runs EVERY file under `test/`; helpers there must do nothing when run directly.
-- Other runq jobs may run remotely with a synced tree: a script outside the repo is not there (pass it inline, e.g. a data: URL import).
-- The guard refuses `perl`/`sed -i` outside the tree and some inline scripts; perl `s|..|..|` with `\|` in the pattern is an
-  alternation, not a literal bar (it corrupted a file once): use the Edit tool for multi-line edits.
+- Other runq jobs may run remotely with a synced tree: a script outside the repo is not there.
 - A bearer token on any phone path (even an unknown one like `/r/x`) is 403 from the frame.
+- `startCore` takes a `CoreRuntime` (clock, scheduler, random, journal): a test passes a `TimedClock` and checks
+  `pendingTimers === 0` after `stop()`. It still reads `/proc` (idle watch) and the real egress gate; set `KB_INSTALL_RESULTS` and
+  `KB_CURRENT` to temp paths.
+- `vault.lend` of a retired generation throws `unknown_key`; `shareValuesIn` turns that into `''`.
 
 ## Recent
 
-kernel-approve (KBOX-7, 8, 9, 11, 20, 22, 49, 53) on main after 76537bd: verifier, codes and kb-code, TrustPort, Web Push, the frame
-extension, approvals and slots, the phone app, recovery, machine tokens, proposal routes, main-core wiring, J5, mutants.
-Then the kernel-approve review fixes (verdict SOUND WITH FIXES): five test gaps pinned (nonce key per process, signature counter,
-view cookie flags, registration nonce spent, nonce purpose tag), the decision in the challenge (`test/support/approve-world.ts`:
-`proofFor(..., decision)`; `decide('deny')` re-signs an unchanged approval proof over the denial challenge, so older deny tests
-run as they were), the approver_add code lifecycle, the phrase in the queue, a VAPID pair that fails to decode is a fault,
-kb-code tightens an existing code directory. Open: the enrol window (above).
+`integrate` (this slice, on main after e1fd5e5): rotation wired into core (`startCore`, `platform-source`, executors, routes,
+tick and reconcile, stop), `Orchestrator.stop`, retired generations in the share file over the real source, `key.changed` on
+every generation status change, and this file. Before it: `rotate` (two adversary fix rounds; verdict "declared not done" named
+the wiring and J1/J3), `update` (verdict UNSOUND, fixes merged incl. spec revision 4: approver_add binds the new approver's key
+hashes), `relay` and `share` (SOUND WITH FIXES, fixes merged). Detail of those units is in their verdict files and git history.

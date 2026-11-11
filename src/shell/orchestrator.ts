@@ -85,6 +85,11 @@ export interface Orchestrator {
   isLeased(keyref: string): boolean;
   /** Resolves when every run this process works on has finished or is waiting for a clock. */
   idle(): Promise<void>;
+  /**
+   * Ends the process's work on runs for good: cancels every timer a run waits on (a grace, a retry) and starts nothing more. A drive in flight
+   * finishes its step; `idle()` then resolves. The runs stay as persisted: the next start's `resume` takes them up.
+   */
+  stop(): void;
 }
 
 type Next = 'continue' | 'wait';
@@ -106,6 +111,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   const leased = new Set<string>();
   const inflight = new Set<Promise<void>>();
   const timers = new Map<string, () => void>();
+  let stopped = false;
 
   /** Throws of one run's drive since it last went through cleanly: the retry after a fault backs off like any other (S-249). */
   const faults = new Map<string, number>();
@@ -123,6 +129,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   // --- running a run ----------------------------------------------------------------------------------------------------
 
   const launch = (runId: string): void => {
+    if (stopped) return;
     const job: Promise<void> = drive(runId).catch((error: unknown) => {
       deps.audit.append({ action: 'rotation.drive_failed', subject: runId, at: now(), detail: { run_id: runId, code: error instanceof Stopped ? 'stopped' : codeOf(error) } });
       recover(runId, error);
@@ -173,6 +180,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   }
 
   const later = (runId: string, ms: number): void => {
+    if (stopped) return;
     timers.get(runId)?.();
     timers.set(
       runId,
@@ -697,5 +705,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     },
     isLeased: (keyref) => leased.has(keyref),
     idle,
+    stop() {
+      stopped = true;
+      for (const cancel of timers.values()) cancel();
+      timers.clear();
+    },
   };
 }
