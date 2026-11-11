@@ -209,3 +209,8 @@ test('KBOX-6 kb-install.service also runs at every boot, so a switch a kill or p
   const enable = /^\s*systemctl enable --now (.*)$/m.exec(read('deploy/cloud-init.yaml'))?.[1]?.split(' ') ?? [];
   assert.ok(enable.includes('kb-install.service'), 'cloud-init enables the service itself, not only its path unit');
 });
+
+test('KBOX-49 the bootstrap gives kb-install the domain the box was made for (KB_DOMAIN), so root checks setup against it', () => {
+  const loop = /^\s*for u in ([a-z -]+); do mkdir -p "\/etc\/systemd\/system\/\$u\.service\.d" && printf '\[Service\]\\nEnvironment=KB_DOMAIN=%s\\n' "\$KB_DOMAIN"/m.exec(cloudInit);
+  assert.ok(loop?.[1]?.split(' ').includes('kb-install'), 'the KB_DOMAIN drop-in is written for kb-install.service');
+});

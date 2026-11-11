@@ -320,3 +320,34 @@ test('KBOX-6 settle ends an install root answered failed:interrupted (a kill mid
   updater.settle();
   assert.deepEqual(events('approval.executed').at(-1), { approval_id, result: 'failed', reason_code: 'interrupted' });
 });
+
+test('KBOX-6 a stale .<H>.tmp left in staging by a write that crashed does not block the request: on approval core still writes <H>.request', async (t) => {
+  const { iw, w, post } = await updateWorld(t);
+  const { approval_id } = (await post(tarOf(BUNDLE))).json() as { approval_id: string };
+  writeFileSync(join(iw.paths.staging, `.${BUNDLE_H}.tmp`), '{"half":');
+  const item = (await w.queue()).find((q) => q.approval_id === approval_id);
+  assert.ok(item);
+  assert.equal((await w.decide(approval_id, 'approve', w.proofFor(item))).status, 200);
+  const request = JSON.parse(readFileSync(join(iw.paths.staging, `${BUNDLE_H}.request`), 'utf8')) as { install: string };
+  assert.equal(request.install, BUNDLE_H);
+  assert.equal(existsSync(join(iw.paths.staging, `.${BUNDLE_H}.tmp`)), false);
+});
+
+test('KBOX-6 a trust request carries the deadline after which root refuses it, and core still takes an answer root gives just after that deadline', async (t) => {
+  const iw = await installWorld(t);
+  const clock = new FakeClock(1_700_000_000_000);
+  const start = clock.now();
+  let request: { deadline?: unknown } | undefined;
+  const answerLate = (ms: number): Promise<void> => {
+    clock.advance(ms);
+    const name = readdirSync(iw.paths.staging).find((f) => f.endsWith('.request'));
+    if (name !== undefined) request = JSON.parse(readFileSync(join(iw.paths.staging, name), 'utf8')) as { deadline?: unknown };
+    // Root checked the deadline just before it and writes its answer a second after it.
+    if (name !== undefined && typeof request?.deadline === 'number' && clock.now() >= request.deadline + 1_000) writeFileSync(join(iw.paths.results, `${name.slice(0, -'.request'.length)}.result`), 'applied');
+    return Promise.resolve();
+  };
+  const port = createTrustInstaller({ stagingDir: iw.paths.staging, resultsDir: iw.paths.results, random: seededRandom(6), clock, wait: answerLate, timeoutMs: 2_000 });
+  const added = iw.trusted('ap-late-000004', softApprover());
+  assert.deepEqual(await port.apply({ kind: 'trust', change: 'approver_add', approval: iw.proof(addActionOf(added)), approver: added }), { result: 'applied' });
+  assert.equal(request?.deadline, start + 2_000);
+});

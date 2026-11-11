@@ -4,6 +4,7 @@
 // rollback after the switch never loads code from the new release. stdout carries a count, never a request's content.
 import { readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
+import { DOMAIN_NAME } from '../pure/actions.ts';
 import { parseWordlist } from '../pure/codes.ts';
 import { systemClock, systemScheduler } from '../shell/clock.ts';
 import { runInstaller } from '../shell/installer.ts';
@@ -28,6 +29,13 @@ function readPaths(env: NodeJS.ProcessEnv): InstallPaths {
   };
 }
 
+/** KB_DOMAIN, set by the bootstrap's drop-in: setup is checked against it. Unset, setup is refused; malformed, the run stops. */
+function readDomain(env: NodeJS.ProcessEnv): string | undefined {
+  const domain = env['KB_DOMAIN'];
+  if (domain !== undefined && !DOMAIN_NAME.test(domain)) throw new RangeError('KB_DOMAIN is not a domain name');
+  return domain;
+}
+
 async function main(): Promise<number> {
   const env = process.env;
   const paths = readPaths(env);
@@ -39,7 +47,7 @@ async function main(): Promise<number> {
     clock: systemClock,
     wait: (ms) => new Promise<void>((resolve) => void systemScheduler.after(ms, resolve)),
   });
-  const answered = await runInstaller({ paths, units, clock: systemClock, wordlist, journal: (code) => void process.stderr.write(`kb-install: ${code}\n`) });
+  const answered = await runInstaller({ paths, units, clock: systemClock, wordlist, domain: readDomain(env), journal: (code) => void process.stderr.write(`kb-install: ${code}\n`) });
   process.stdout.write(`kb-install: ${answered.length} answered\n`);
   return 0;
 }

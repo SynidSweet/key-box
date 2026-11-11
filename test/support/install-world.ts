@@ -52,7 +52,15 @@ export const lockFor = (node: Uint8Array, caddy: Uint8Array): string =>
 export const RELEASE_0: Tree = { 'runtime.lock': lockFor(NODE_BIN, CADDY_BIN), 'src/main-core.ts': 'old core\n', 'README.md': 'v0\n' };
 
 /** A kept approval proof (KBOX-9) for an action, signed by `approver` over the `kbox-v1` challenge built here from the spec. */
-export function keptProof(approver: SoftApprover, approverId: string, action: object, o: { readonly approvalId?: string; readonly quirks?: Quirks; readonly deviceOf?: SoftApprover } = {}): ApprovalProof {
+/** How a kept proof is made: the challenge label (`kbox-v1` approves, `kbox-v1-deny` denies, KBOX-9) and the quirks of a bad one. */
+export interface ProofOptions {
+  readonly approvalId?: string;
+  readonly quirks?: Quirks;
+  readonly deviceOf?: SoftApprover;
+  readonly label?: 'kbox-v1' | 'kbox-v1-deny';
+}
+
+export function keptProof(approver: SoftApprover, approverId: string, action: object, o: ProofOptions = {}): ApprovalProof {
   const approvalId = o.approvalId ?? `apr_${b64u(randomBytes(12))}`;
   const nonce = Uint8Array.from(randomBytes(32));
   // RFC 8785 restricted to the flat string members these actions have: sorted keys, no whitespace.
@@ -60,7 +68,7 @@ export function keptProof(approver: SoftApprover, approverId: string, action: ob
     .sort(([a], [b]) => (a < b ? -1 : 1))
     .map(([k, v]) => `${JSON.stringify(k)}:${JSON.stringify(v)}`)
     .join(',')}}`;
-  const challenge = Uint8Array.from(sha('kbox-v1', approvalId, sha(canonical), nonce));
+  const challenge = Uint8Array.from(sha(o.label ?? 'kbox-v1', approvalId, sha(canonical), nonce));
   const parts = approver.prove(challenge, RP, o.quirks);
   const device = o.deviceOf === undefined ? parts.deviceSignature : o.deviceOf.deviceSign(challenge);
   return {
@@ -118,7 +126,7 @@ export interface InstallWorld {
   /** Writes a tree to staging/<H>/ and returns H. */
   stage(tree: Tree, name?: string): string;
   /** A kept approval proof for an action, signed by an approver (the owner by default) over the `kbox-v1` challenge. */
-  proof(action: object, options?: { readonly approver?: SoftApprover; readonly approverId?: string; readonly approvalId?: string; readonly quirks?: Quirks; readonly deviceOf?: SoftApprover }): ApprovalProof;
+  proof(action: object, options?: ProofOptions & { readonly approver?: SoftApprover; readonly approverId?: string }): ApprovalProof;
   /** Writes staging/<name>.request with the given JSON. */
   request(name: string, body: unknown): void;
   /** The install request core would write for H over the running release. */
@@ -198,7 +206,7 @@ export async function installWorld(t: TestContext, options: { readonly trust?: f
       world.request(h, { kind: 'install', install: h, commit: COMMIT, base, ...(approval === undefined ? {} : { approval }) });
     },
     runKilledAt: (step) => runNode([new URL('./install-kill.ts', import.meta.url).pathname, JSON.stringify(paths), step], root),
-    run: (hooks) => runInstaller({ paths, units, clock, wordlist: WORDLIST, ...(hooks === undefined ? {} : { hooks }) }).then(() => undefined),
+    run: (hooks) => runInstaller({ paths, units, clock, wordlist: WORDLIST, domain: DOMAIN, ...(hooks === undefined ? {} : { hooks }) }).then(() => undefined),
     result(name) {
       const file = join(paths.results, `${name}.result`);
       return existsSync(file) ? readFileSync(file, 'utf8') : undefined;

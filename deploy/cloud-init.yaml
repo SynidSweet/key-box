@@ -52,7 +52,7 @@ runcmd:
     for u in keybox keyrelay caddy; do id "$u" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$u"; done
     cp "$R"/deploy/*.service "$R"/deploy/kb-install.path /etc/systemd/system/ && cp "$R/deploy/keybox-tmpfiles.conf" /etc/tmpfiles.d/keybox.conf
     mkdir -p /etc/caddy && cp "$R/deploy/Caddyfile" /etc/caddy/Caddyfile
-    for u in keybox caddy; do mkdir -p "/etc/systemd/system/$u.service.d" && printf '[Service]\nEnvironment=KB_DOMAIN=%s\n' "$KB_DOMAIN" > "/etc/systemd/system/$u.service.d/domain.conf"; done
+    for u in keybox caddy kb-install; do mkdir -p "/etc/systemd/system/$u.service.d" && printf '[Service]\nEnvironment=KB_DOMAIN=%s\n' "$KB_DOMAIN" > "/etc/systemd/system/$u.service.d/domain.conf"; done
     systemd-tmpfiles --create /etc/tmpfiles.d/keybox.conf && systemctl daemon-reload
     /opt/keybox/current/bin/node /opt/keybox/current/src/cli/kb-code.ts setup
     systemctl enable --now kb-code.service kb-install.path kb-install.service keybox.service keyrelay.service caddy.service

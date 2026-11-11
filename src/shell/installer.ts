@@ -63,6 +63,8 @@ export interface InstallerDeps {
   readonly clock: Clock;
   readonly wordlist: readonly string[];
   readonly hooks?: InstallHooks;
+  /** The domain the box was made for (KB_DOMAIN); setup for any other, or with none configured, is refused `domain`. */
+  readonly domain: string | undefined;
   /** A fixed code for the journal when a request fails in a way no refusal code names. */
   readonly journal?: (code: string) => void;
 }
@@ -369,6 +371,8 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
   // --- trust changes --------------------------------------------------------------------------------------------------
   const trustChange = (req: Exclude<ReturnType<typeof parseRootRequest>, { ok: false }>['request']): `refused:${TrustRefusal}` | 'applied' => {
     if (req.kind !== 'trust') return 'refused:bad_request';
+    // Past its deadline core has answered `timeout`; applying it now would leave core's table and trust.json apart.
+    if (req.deadline !== undefined && deps.clock.now() > req.deadline) return 'refused:late';
     const current = readTrust();
     const keysDecode = (list: readonly TrustApprover[]): boolean => list.every((a) => approverKeys(a) !== undefined);
     switch (req.change) {
@@ -378,8 +382,10 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
         if (!check.ok) return `refused:${check.code}`;
         if (req.change === 'recovery' && current === undefined) return 'refused:no_trust';
         if (!keysDecode(req.approvers)) return 'refused:bad_request';
-        writeTrust({ domain: req.change === 'setup' ? req.domain : (current?.domain ?? ''), approvers: req.approvers });
+        if (req.change === 'setup' && req.domain !== deps.domain) return 'refused:domain';
+        // Spent before the write: a write that fails or a kill after it never leaves the code usable again.
         codes.consume(req.change);
+        writeTrust({ domain: req.change === 'setup' ? req.domain : (current?.domain ?? ''), approvers: req.approvers });
         return 'applied';
       }
       case 'approver_add':

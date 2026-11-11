@@ -14,7 +14,11 @@ export interface InstallRequest {
   readonly approval: ApprovalProof;
 }
 
-export type RootRequest = InstallRequest | TrustRequest;
+/** A trust request as core writes it for root: with the time (clock ms) after which root refuses it `late`, because core
+ * has answered `timeout` by then. Optional when read, so a request without one is never late. */
+export type RootTrustRequest = TrustRequest & { readonly deadline?: number };
+
+export type RootRequest = InstallRequest | RootTrustRequest;
 
 /** What kb-install answers, as the text of `<name>.result`. */
 export type InstallRefusal = 'no_proof' | 'bad_proof' | 'bad_request' | 'base' | 'already_current' | 'spent' | 'not_regular' | 'hash' | 'lock' | 'size' | 'timeout' | 'internal';
@@ -23,6 +27,8 @@ export type TrustRefusal =
   | 'bad_proof'
   | 'bad_request'
   | 'spent'
+  | 'late'
+  | 'domain'
   | 'no_trust'
   | 'unknown_approver'
   | 'last_approver'
@@ -72,6 +78,11 @@ const approverList = (v: unknown): readonly TrustApprover[] | undefined => {
   return out.every((a): a is TrustApprover => a !== undefined) && new Set(out.map((a) => a.id)).size === out.length ? out : undefined;
 };
 
+const deadlineOf = (v: unknown): { readonly deadline?: number } | undefined => {
+  if (v === undefined) return {};
+  return typeof v === 'number' && Number.isSafeInteger(v) && v > 0 ? { deadline: v } : undefined;
+};
+
 export type RequestParse = { readonly ok: true; readonly request: RootRequest } | { readonly ok: false; readonly code: 'no_proof' | 'bad_proof' | 'bad_request' };
 
 /** A request as root reads it: an unknown member, a missing proof or a malformed one is a fixed refusal. */
@@ -91,34 +102,36 @@ export function parseRootRequest(bytes: Uint8Array): RequestParse {
     return { ok: true, request: { kind: 'install', ...head.value, approval: p.value } };
   }
   if (v['kind'] !== 'trust') return bad;
+  const late = deadlineOf(v['deadline']);
+  if (late === undefined) return bad;
   switch (v['change']) {
     case 'setup': {
-      if (!onlyKeys(v, ['kind', 'change', 'code', 'domain', 'approvers'])) return bad;
+      if (!onlyKeys(v, ['kind', 'change', 'code', 'domain', 'approvers', 'deadline'])) return bad;
       const head = parseObject({ code: text(CODE_TEXT), domain: text(DOMAIN_NAME) }, { code: v['code'], domain: v['domain'] });
       const approvers = approverList(v['approvers']);
-      return head.ok && approvers !== undefined ? { ok: true, request: { kind: 'trust', change: 'setup', ...head.value, approvers } } : bad;
+      return head.ok && approvers !== undefined ? { ok: true, request: { kind: 'trust', change: 'setup', ...head.value, approvers, ...late } } : bad;
     }
     case 'recovery': {
-      if (!onlyKeys(v, ['kind', 'change', 'code', 'approvers'])) return bad;
+      if (!onlyKeys(v, ['kind', 'change', 'code', 'approvers', 'deadline'])) return bad;
       const code = typeof v['code'] === 'string' && CODE_TEXT.test(v['code']) ? v['code'] : undefined;
       const approvers = approverList(v['approvers']);
-      return code !== undefined && approvers !== undefined ? { ok: true, request: { kind: 'trust', change: 'recovery', code, approvers } } : bad;
+      return code !== undefined && approvers !== undefined ? { ok: true, request: { kind: 'trust', change: 'recovery', code, approvers, ...late } } : bad;
     }
     case 'approver_add': {
-      if (!onlyKeys(v, ['kind', 'change', 'approval', 'approver'])) return bad;
+      if (!onlyKeys(v, ['kind', 'change', 'approval', 'approver', 'deadline'])) return bad;
       const approver = approverOf(v['approver']);
       if (approver === undefined) return bad;
       const p = proof();
       if (p === 'none') return { ok: false, code: 'no_proof' };
-      return p.ok ? { ok: true, request: { kind: 'trust', change: 'approver_add', approval: p.value, approver } } : { ok: false, code: 'bad_proof' };
+      return p.ok ? { ok: true, request: { kind: 'trust', change: 'approver_add', approval: p.value, approver, ...late } } : { ok: false, code: 'bad_proof' };
     }
     case 'approver_remove': {
-      if (!onlyKeys(v, ['kind', 'change', 'approval', 'approver_id'])) return bad;
+      if (!onlyKeys(v, ['kind', 'change', 'approval', 'approver_id', 'deadline'])) return bad;
       const id = typeof v['approver_id'] === 'string' && APPROVER_ID.test(v['approver_id']) ? v['approver_id'] : undefined;
       if (id === undefined) return bad;
       const p = proof();
       if (p === 'none') return { ok: false, code: 'no_proof' };
-      return p.ok ? { ok: true, request: { kind: 'trust', change: 'approver_remove', approval: p.value, approver_id: id } } : { ok: false, code: 'bad_proof' };
+      return p.ok ? { ok: true, request: { kind: 'trust', change: 'approver_remove', approval: p.value, approver_id: id, ...late } } : { ok: false, code: 'bad_proof' };
     }
     default:
       return bad;

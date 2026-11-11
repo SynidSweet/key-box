@@ -8,7 +8,7 @@ import { appendFileSync, closeSync, constants, existsSync, linkSync, mkdirSync, 
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { softApprover } from './kit/approver.ts';
-import { COMMIT, NODE_BIN, CADDY_BIN, RELEASE_0, addActionOf, hashOf, installWorld, lockFor, sha256Hex } from './support/install-world.ts';
+import { BOOT, COMMIT, NODE_BIN, CADDY_BIN, RELEASE_0, addActionOf, hashOf, installWorld, lockFor, sha256Hex } from './support/install-world.ts';
 import type { InstallWorld, Tree } from './support/install-world.ts';
 
 const RELEASE_1: Tree = { 'runtime.lock': lockFor(NODE_BIN, CADDY_BIN), 'src/main-core.ts': 'new core\n', 'src/cli/kb-install.ts': 'installer\n', 'README.md': 'v1\n', 'run.sh': { body: '#!/bin/sh\n', exec: true } };
@@ -596,6 +596,62 @@ test('KBOX-53 a kept approved approver_add presented with other keys is refused 
   await w.run();
   assert.equal(w.result('x-good'), 'applied', 'control: the keys the owner approved are added');
   assert.deepEqual(w.trust()?.approvers.at(-1), approved);
+});
+
+test('KBOX-6 a trust request is refused late once its deadline has passed (core has answered timeout by then) and changes nothing; at its deadline it applies', async (t) => {
+  const w = await installWorld(t);
+  const second = { id: 'ap-second-0002', a: softApprover() };
+  w.writeTrust([
+    { id: w.ownerId, a: w.owner },
+    second,
+  ]);
+  const before = readFileSync(w.paths.trustFile, 'utf8');
+  const remove = { kind: 'approver_remove', approver_id: second.id };
+  w.request('late', { kind: 'trust', change: 'approver_remove', approval: w.proof(remove), approver_id: second.id, deadline: w.clock.now() - 1 });
+  await w.run();
+  assert.equal(w.result('late'), 'refused:late');
+  assert.equal(readFileSync(w.paths.trustFile, 'utf8'), before);
+  w.request('on-time', { kind: 'trust', change: 'approver_remove', approval: w.proof(remove), approver_id: second.id, deadline: w.clock.now() });
+  await w.run();
+  assert.equal(w.result('on-time'), 'applied');
+});
+
+test('KBOX-6 a denial proof (kbox-v1-deny) presented to root as an approval is refused bad_proof: for an install and for a trust change', async (t) => {
+  const w = await installWorld(t);
+  const h = w.stage(RELEASE_1);
+  w.installRequest(h, w.proof({ kind: 'install_update', install: h, commit: COMMIT, base: w.h0 }, { label: 'kbox-v1-deny' }));
+  await w.run();
+  assert.equal(w.result(h), 'refused:bad_proof');
+  nothingCopied(w, h);
+  const added = newApprover(w, 'ap-second-0002');
+  w.request('deny-add', { kind: 'trust', change: 'approver_add', approval: w.proof(addActionOf(added), { label: 'kbox-v1-deny' }), approver: added });
+  await w.run();
+  assert.equal(w.result('deny-add'), 'refused:bad_proof');
+  assert.equal(w.trust()?.approvers.length, 1);
+});
+
+test('KBOX-20 a recovery code is spent before trust.json is written: a write that fails leaves no code to use again', async (t) => {
+  const w = await installWorld(t);
+  w.codes.writeRecoveryCode(BOOT);
+  const code = codeFrom(w.console);
+  mkdirSync(`${w.paths.trustFile}.tmp`); // the write of trust.json fails
+  w.request('r1', { kind: 'trust', change: 'recovery', code, approvers: [newApprover(w, 'ap-recovered-1')] });
+  await w.run();
+  assert.equal(w.result('r1'), 'refused:internal');
+  rmSync(`${w.paths.trustFile}.tmp`, { recursive: true });
+  w.request('r2', { kind: 'trust', change: 'recovery', code, approvers: [newApprover(w, 'ap-recovered-2')] });
+  await w.run();
+  assert.equal(w.result('r2'), 'refused:no_code');
+  assert.deepEqual(w.trust()?.approvers.map((a) => a.id), [w.ownerId]);
+});
+
+test('KBOX-49 setup for another domain than the box was made for (KB_DOMAIN) is refused domain and writes no trust.json', async (t) => {
+  const w = await installWorld(t, { trust: false });
+  w.codes.writeSetupCode(false);
+  w.request('s', { kind: 'trust', change: 'setup', code: codeFrom(w.console), domain: 'other.example', approvers: [newApprover(w, 'ap-first-00001')] });
+  await w.run();
+  assert.equal(w.result('s'), 'refused:domain');
+  assert.equal(w.trust(), undefined);
 });
 
 test('KBOX-6 approver_add or approver_remove with a proof by an approver not in trust.json, or for another action, changes nothing', async (t) => {
