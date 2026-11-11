@@ -7,11 +7,14 @@ import { DOMAIN_NAME } from './pure/actions.ts';
 import type { Action } from './pure/actions.ts';
 import { parseWordlist } from './pure/codes.ts';
 import { osErrorCode } from './pure/errors.ts';
+import { decodeJsonBody } from './pure/schemas.ts';
 import { openApproveCore } from './shell/approve-core.ts';
 import { systemClock, systemScheduler } from './shell/clock.ts';
 import { openCore } from './shell/core.ts';
 import { createApiServer } from './shell/http.ts';
 import type { Route } from './shell/http.ts';
+import { createIdleWatch } from './shell/idle-watch.ts';
+import type { IdleWatch } from './shell/idle-watch.ts';
 import { createPush } from './shell/push.ts';
 import { createHttpPushTransport } from './shell/push-transport.ts';
 import { openPrivateDatabase } from './shell/private-db.ts';
@@ -50,6 +53,16 @@ const vetWithoutAdapters = (action: Action): 'ok' | 'rejected' => (NEEDS_ADAPTER
 const SWEEP_EVERY_MS = 60 * 60_000;
 /** How often core looks for root's answer to an install it waits for. */
 const SETTLE_EVERY_MS = 5_000;
+/** How often core samples /proc for the idle watch (KBOX-21). */
+const IDLE_SAMPLE_EVERY_MS = 10 * 60_000;
+
+/** The nominal link speed from deploy/runtime.config.json (KBOX-21); the file is shared, so only this member is read. */
+function linkMbps(): number {
+  const raw = decodeJsonBody(readFileSync(new URL('../deploy/runtime.config.json', import.meta.url)));
+  const value = raw.ok && typeof raw.value === 'object' && raw.value !== null ? (raw.value as Record<string, unknown>)['link_mbps'] : undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) throw new RangeError('runtime.config.json does not name link_mbps');
+  return value;
+}
 
 /** The route table of core (KBOX-1): the store's control routes, then the phone and approval routes, then the update intake. */
 export function coreRoutes(parts: readonly Route[], approve: readonly Route[], update: readonly Route[]): readonly Route[] {
@@ -62,6 +75,7 @@ async function main(): Promise<void> {
   const parts = openCore({ stateDir: config.stateDir, clock: systemClock, scheduler: systemScheduler, random: systemRandom });
   const privateStore = openPrivateDatabase(join(config.stateDir, 'private.db'));
   let approve: ReturnType<typeof openApproveCore> | undefined;
+  let idle: IdleWatch | undefined;
   const wait = (ms: number): Promise<void> => new Promise((resolve) => void systemScheduler.after(ms, resolve));
   const updater = createUpdater({
     stagingDir: config.staging,
@@ -86,6 +100,7 @@ async function main(): Promise<void> {
     const trust = createTrustInstaller({ stagingDir: config.staging, resultsDir: config.installResults, random: systemRandom, clock: systemClock, wait });
     const push = createPush({ store: privateStore, transport: createHttpPushTransport(), scheduler: systemScheduler, clock: systemClock, random: systemRandom, audit: parts.audit, subject: `https://keys.${config.domain}` });
     const wordlist = parseWordlist(readFileSync(new URL('./data/wordlist.txt', import.meta.url), 'utf8'));
+    idle = createIdleWatch({ files: { stat: '/proc/stat', meminfo: '/proc/meminfo', netdev: '/proc/net/dev' }, clock: systemClock, push, linkMbps: linkMbps(), notifier: { notice: journal } });
     approve = openApproveCore({ parts, approverStore: privateStore, trust, push, clock: systemClock, random: systemRandom, domain: config.domain, wordlist, vet: vetWithoutAdapters, executors: { install_update: updater.executor } });
   }
   const server = createApiServer({
@@ -108,11 +123,19 @@ async function main(): Promise<void> {
     cancelSettle = systemScheduler.after(SETTLE_EVERY_MS, settle);
   };
   if (approve !== undefined) settle();
+  let cancelIdle = (): void => undefined;
+  const sampleIdle = (): void => {
+    idle?.sample();
+    cancelIdle = systemScheduler.after(IDLE_SAMPLE_EVERY_MS, sampleIdle);
+  };
+  if (idle !== undefined) sampleIdle();
   if (approve !== undefined) sweep();
   const stopped = new Promise<void>((resolve) => {
     const stop = (): void => {
       cancelSweep();
       cancelSettle();
+      cancelIdle();
+      idle?.stop();
       void server.stop().then(() => {
         privateStore.close();
         parts.close();
