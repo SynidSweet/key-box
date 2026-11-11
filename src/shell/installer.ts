@@ -5,7 +5,7 @@
 //     re-applied limits and name rules and a 60 s deadline; takes H from the bytes it read; checks every pinned binary;
 //     writes exactly those bytes into a root-owned release, switches `current`, restarts and rolls back a failed health check.
 //   trust: changes /etc/keybox/trust.json only on a proof by an approver in it (approver_add, approver_remove; each approval
-//     works once) or on a setup or recovery code root itself checks.
+//     works once) or on a setup or recovery code root itself checks. An install approval works once too.
 // Nothing here reads core's approver table, and nothing is written outside releases/, current, trust.json and the results
 // directory; in staging it only removes.
 import { closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeSync, fchmodSync } from 'node:fs';
@@ -136,6 +136,7 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     renameSync(temp, paths.trustFile);
   };
 
+  // Every approval id root acted on (install and trust alike): each approval works once.
   const spentFile = join(paths.results, 'trust-spent');
   const spent = (approvalId: string): boolean => existsSync(spentFile) && readFileSync(spentFile, 'utf8').split('\n').includes(approvalId);
   const spend = (approvalId: string): void => {
@@ -276,6 +277,7 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     const trust = readTrust();
     const action = { kind: 'install_update', install: req.install, commit: req.commit, base: req.base };
     if (trust === undefined || !keptProofHolds(trust, req.approval, action)) return 'refused:bad_proof';
+    if (spent(req.approval.approval_id)) return 'refused:spent';
     const h = req.install;
     const temp = join(paths.releases, `${h}.tmp`);
     const release = join(paths.releases, h);
@@ -294,6 +296,8 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     }
     writeRelease(temp, copy, binaries);
     renameSync(temp, release);
+    // Spent before the switch: an approval that ever reached `current` never installs again, whatever follows.
+    spend(req.approval.approval_id);
     switchCurrent(h);
     hooks.afterSwitch?.();
     const healthy = await deps.units

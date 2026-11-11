@@ -17,7 +17,7 @@ export interface InstallRequest {
 export type RootRequest = InstallRequest | TrustRequest;
 
 /** What kb-install answers, as the text of `<name>.result`. */
-export type InstallRefusal = 'no_proof' | 'bad_proof' | 'bad_request' | 'base' | 'already_current' | 'not_regular' | 'hash' | 'lock' | 'size' | 'timeout' | 'internal';
+export type InstallRefusal = 'no_proof' | 'bad_proof' | 'bad_request' | 'base' | 'already_current' | 'spent' | 'not_regular' | 'hash' | 'lock' | 'size' | 'timeout' | 'internal';
 export type TrustRefusal =
   | 'no_proof'
   | 'bad_proof'

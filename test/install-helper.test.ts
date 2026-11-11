@@ -8,7 +8,7 @@ import { appendFileSync, closeSync, constants, existsSync, linkSync, mkdirSync, 
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { softApprover } from './kit/approver.ts';
-import { COMMIT, NODE_BIN, CADDY_BIN, addActionOf, hashOf, installWorld, lockFor, sha256Hex } from './support/install-world.ts';
+import { COMMIT, NODE_BIN, CADDY_BIN, RELEASE_0, addActionOf, hashOf, installWorld, lockFor, sha256Hex } from './support/install-world.ts';
 import type { InstallWorld, Tree } from './support/install-world.ts';
 
 const RELEASE_1: Tree = { 'runtime.lock': lockFor(NODE_BIN, CADDY_BIN), 'src/main-core.ts': 'new core\n', 'src/cli/kb-install.ts': 'installer\n', 'README.md': 'v1\n', 'run.sh': { body: '#!/bin/sh\n', exec: true } };
@@ -162,6 +162,23 @@ test('KBOX-6 a request replayed after a success is refused base (current is no l
   await w.run();
   assert.equal(w.result(h), 'refused:base');
   assert.equal(w.current(), h);
+});
+
+test('KBOX-6 an install approval works once: replayed after a later approved revert to its base it is refused spent', async (t) => {
+  const w = await installWorld(t);
+  const h = w.stage(RELEASE_1);
+  const forward = w.proof({ kind: 'install_update', install: h, commit: COMMIT, base: w.h0 });
+  w.installRequest(h, forward);
+  await w.run();
+  assert.equal(w.result(h), 'installed');
+  w.stage(RELEASE_0);
+  w.installRequest(w.h0, w.proof({ kind: 'install_update', install: w.h0, commit: COMMIT, base: h }), h);
+  await w.run();
+  assert.equal(w.result(w.h0), 'installed', 'the owner approved going back');
+  w.installRequest(h, forward);
+  await w.run();
+  assert.equal(w.result(h), 'refused:spent');
+  assert.equal(w.current(), w.h0);
 });
 
 test('KBOX-6 an approval of H1 cannot install H2: staging that holds another tree under H1 is refused hash', async (t) => {
