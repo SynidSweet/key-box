@@ -68,6 +68,7 @@ async function main(): Promise<void> {
     events: parts.events,
     hub: parts.hub,
     clock: systemClock,
+    scheduler: systemScheduler,
     random: systemRandom,
     audit: parts.audit,
   });

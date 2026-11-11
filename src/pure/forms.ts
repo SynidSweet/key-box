@@ -130,12 +130,24 @@ const MIN_CORE_BYTES = 2;
 const SAFE_SETS: readonly string[] = ['', '/', "!*'()"]; // quote(safe=''), quote()'s default safe='/', encodeURIComponent
 const UNRESERVED = /^[A-Za-z0-9_.~-]$/;
 
+/**
+ * Which base64 characters are fixed by a core's bytes alone when its first byte sits at byte offset `alignment` (0 to 2) mod 3:
+ * the characters `from` to `to` (exclusive) of the encoding of the padded core, and the bits of the core they cover, `startBit` to
+ * `endBit` (exclusive, 0 = the first bit of the core's first byte).
+ */
+export function base64InteriorSpan(coreLength: number, alignment: number): { readonly from: number; readonly to: number; readonly startBit: number; readonly endBit: number } {
+  const from = Math.ceil((8 * alignment) / 6);
+  const to = Math.floor((8 * (alignment + coreLength)) / 6);
+  return { from, to, startBit: 6 * from - 8 * alignment, endBit: 6 * to - 8 * alignment };
+}
+
 /** The base64 characters fixed by `core`'s bytes alone when its first byte sits at byte offset `alignment` (0 to 2) mod 3. */
 export function base64Interior(core: Uint8Array, alignment: number, url: boolean): Uint8Array {
   const padded = new Uint8Array(alignment + core.length);
   padded.set(core, alignment);
   const encoded = Buffer.from(padded).toString(url ? 'base64url' : 'base64');
-  return utf8.encode(encoded.slice(Math.ceil((8 * alignment) / 6), Math.floor((8 * (alignment + core.length)) / 6)));
+  const { from, to } = base64InteriorSpan(core.length, alignment);
+  return utf8.encode(encoded.slice(from, to));
 }
 
 function percentEncode(core: Uint8Array, safe: string): string {

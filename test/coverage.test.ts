@@ -174,3 +174,27 @@ test(`KBOX-18 property: the tier depends on the measured core, never on the past
     }
   });
 });
+
+// ---------------------------------------------------------------- the anchored floor is counted over the digested run (KBOX-2)
+
+// The numbers are the review's exact counts of the bits each shared form's digested run holds (per-byte distinct values over the bits
+// the run covers), at the boundary lengths: base64 and base64url 12 characters hold 72.0 bits at one alignment and 68.2 / 68.3 at the
+// other two; hex 18 characters 72.0 / 69.6 / 69.0; base62 13 characters (77.4 bits whole) 75.5 / 71.8 / 77.2.
+const anchoredShape = (alphabet: keyof typeof ALPHABETS, length: number): KeyShape => shape({ prefix: 'abcd', alphabet, coreLength: { min: length, max: length } });
+
+test('KBOX-2 a core whose digested run holds under 72 bits in some shared form or alignment is not anchored, though the whole core holds 72 or more', () => {
+  for (const [alphabet, length] of [['base64', 12], ['base64url', 12], ['hex', 18], ['base62', 13]] as const) {
+    assert.equal(tierOf(anchoredShape(alphabet, length), `abcd${coreOf(alphabet, length)}`), 'none', `${alphabet} ${length}`);
+  }
+});
+
+test('KBOX-2 one more character of core brings every run to 72 bits: anchored', () => {
+  for (const [alphabet, length] of [['base64', 13], ['base64url', 13], ['hex', 19], ['base62', 14]] as const) {
+    assert.equal(tierOf(anchoredShape(alphabet, length), `abcd${coreOf(alphabet, length)}`), 'anchored', `${alphabet} ${length}`);
+  }
+});
+
+test('KBOX-2 the run floor does not touch a core that is windowed, nor a long anchored one', () => {
+  assert.equal(tierOf(anchoredShape('hex', 32), `abcd${coreOf('hex', 32)}`), 'windowed');
+  assert.equal(tierOf(anchoredShape('base64', 300), `abcd${coreOf('base64', 300)}`), 'anchored');
+});

@@ -74,6 +74,7 @@ export async function shareWorld(t: TestContext, options: ShareWorldOptions = {}
     events: core.events,
     hub: core.hub,
     clock: core.clock,
+    scheduler: core.clock,
     random: seededRandom(options.seed ?? 21),
     audit: core.audit,
   });

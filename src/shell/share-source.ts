@@ -26,7 +26,8 @@ export function createMetaShareSource(deps: MetaShareSourceDeps): ShareSource {
         if (key.class === 'ordinary') continue;
         const shape = deps.shapeOf(key.platform);
         const value = shape === undefined ? '' : await deps.values.text(key.keyref, key.gen_current);
-        const projects = key.projects.length === 0 ? [NO_PROJECT] : key.projects;
+        // A row may list a project twice; the file holds one entry set per project, name and generation.
+        const projects = key.projects.length === 0 ? [NO_PROJECT] : [...new Set(key.projects)];
         for (const project of projects) out.push({ project, name: key.name, gen: key.gen_current, retired: false, shape, origin: 'pasted', value });
       }
       return out;

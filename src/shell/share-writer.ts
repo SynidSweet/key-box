@@ -1,13 +1,16 @@
 // KBOX-33: the share writer. At start and on every `key.changed` of an admin or master key it reads the store, builds the share
 // file (src/pure/share-build.ts), signs it with a key of its own (a master value in the key store), writes it durably (temp
 // file, fsync, rename, fsync of the directory), and only then announces the version (one `share.version` event). A version is never
-// reused and never lower: it is above the database's last and above any file already on disk. A file the box cannot refresh is
-// served as stale (503), not as an old file that lacks a new generation.
+// reused and never lower: it is above the database's last, and a file already on disk is reused only when this box signed it (a file
+// signed by this box holds a version the database may not know yet, which the writer announces first), and one it did not sign
+// raises the floor under the next version only when that version and the next are safe integers. A file the box cannot
+// refresh is served as stale (503), not as an old file that lacks a new generation: the file is fresh again only when no refresh is
+// still queued, and a refresh that failed is tried again on the injected scheduler, with no limit on tries.
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Audit } from '../ports/audit.ts';
-import type { Clock } from '../ports/clock.ts';
+import type { Clock, Scheduler } from '../ports/clock.ts';
 import type { EventLog, EventSignal } from '../ports/events.ts';
 import type { MetaStore } from '../ports/meta.ts';
 import type { Random } from '../ports/random.ts';
@@ -22,7 +25,11 @@ const SEED_BYTES = 32;
 const FILE_NAME = 'share.json';
 const TEMP_NAME = '.share.json.tmp';
 
-const PKCS8_ED25519_SEED = Buffer.from('302e020100300506032b657004220420', 'hex');
+/** A failed refresh is tried again after this long, then after twice as long, up to the cap. There is no limit on tries. */
+const RETRY_FIRST_MS = 10_000;
+const RETRY_MAX_MS = 600_000;
+
+const PKCS8_ED25519_SEED =Buffer.from('302e020100300506032b657004220420', 'hex');
 
 export interface ShareSigner {
   /** The raw 32-byte public key, base64. */
@@ -56,6 +63,8 @@ export interface ShareWriterDeps {
   readonly events: EventLog;
   readonly hub: EventSignal;
   readonly clock: Clock;
+  /** Times the retries of a failed refresh. */
+  readonly scheduler: Scheduler;
   readonly random: Random;
   /** A failed refresh in the background is reported here as `share.refresh_failed` with a fixed code. */
   readonly audit: Audit;
@@ -134,6 +143,11 @@ export function createShareWriter(deps: ShareWriterDeps): ShareWriter {
   let current: ShareFile | undefined;
   let stale = false;
   let tail: Promise<unknown> = Promise.resolve();
+  /** Refreshes asked for and not yet finished, the one running included. */
+  let outstanding = 0;
+  let failedTries = 0;
+  let stopped = false;
+  let cancelRetry: (() => void) | undefined;
   let stopListening: (() => void) | undefined;
 
   async function loadSigner(): Promise<ShareSigner> {
@@ -156,7 +170,9 @@ export function createShareWriter(deps: ShareWriterDeps): ShareWriter {
     const keys = await deps.source.keys();
     const raw = readFileIfAny(deps.dir);
     const summary = raw === null ? undefined : summaryOf(raw);
-    // A file on disk counts only when this box signed it; any file still sets the floor under the next version.
+    // A file on disk counts as the box's own only when this box signed it. One it did not sign (a restored or foreign one) only
+    // raises the floor under the next version, so a reader that saw it does not take the new file for a rollback, and only when
+    // that version and the next are safe integers: any other is ignored, as an unreadable file is.
     const known: { readonly raw: Buffer; readonly summary: FileSummary } | undefined = raw !== null && summary !== undefined && signer.verify(summary.body, summary.signature) ? { raw, summary } : undefined;
     let announced = deps.meta.shareState().version;
     if (known !== undefined && known.summary.version > announced) {
@@ -164,29 +180,54 @@ export function createShareWriter(deps: ShareWriterDeps): ShareWriter {
       deps.meta.announceShare(known.summary.version);
       announced = known.summary.version;
     }
-    const version = Math.max(announced, summary?.version ?? 0) + 1;
+    const floor = summary !== undefined && Number.isSafeInteger(summary.version + 1) ? Math.max(announced, summary.version) : announced;
+    const version = floor + 1;
     const built = buildShare({ version, issuedAt: deps.clock.now(), random: deps.random, keys });
-    if (known !== undefined && known.summary.contentKey === built.contentKey) {
+    // A file below the announced version is never reused: a reader may have seen the higher one, and would take this for a rollback.
+    if (known !== undefined && known.summary.version === announced && known.summary.contentKey === built.contentKey) {
       current = { version: known.summary.version, bytes: known.raw };
-      stale = false;
       return 'unchanged';
     }
     const envelope = sealEnvelope(built.bytes, signer.sign(built.bytes));
     writeDurably(deps.dir, envelope);
     deps.meta.announceShare(version);
     current = { version, bytes: envelope };
-    stale = false;
     return 'written';
+  }
+
+  function retryLater(): void {
+    if (stopped) return;
+    cancelRetry?.();
+    const delay = Math.min(RETRY_FIRST_MS * 2 ** failedTries, RETRY_MAX_MS);
+    failedTries += 1;
+    cancelRetry = deps.scheduler.after(delay, () => {
+      cancelRetry = undefined;
+      inBackground();
+    });
+  }
+
+  function worked(): void {
+    failedTries = 0;
+    cancelRetry?.();
+    cancelRetry = undefined;
+    // A refresh still queued was asked for by a change this one may not have read: the file stays stale until it has run.
+    if (outstanding === 1) stale = false;
   }
 
   /** Runs after every refresh already asked for; a failure is a fixed error and leaves the file marked stale. */
   function enqueue(): Promise<'written' | 'unchanged'> {
+    outstanding += 1;
     const run = async (): Promise<'written' | 'unchanged'> => {
       try {
-        return await attempt();
+        const result = await attempt();
+        worked();
+        return result;
       } catch (error) {
         stale = true;
+        retryLater();
         throw error instanceof ShareError ? error : new ShareError('refresh_failed');
+      } finally {
+        outstanding -= 1;
       }
     };
     const result = tail.then(run);
@@ -237,6 +278,9 @@ export function createShareWriter(deps: ShareWriterDeps): ShareWriter {
       return current;
     },
     stop() {
+      stopped = true;
+      cancelRetry?.();
+      cancelRetry = undefined;
       stopListening?.();
       stopListening = undefined;
     },
