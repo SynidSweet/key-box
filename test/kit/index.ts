@@ -12,3 +12,4 @@ export type { SoftAssertion, SoftAuthenticator, SoftCredential } from './soft-au
 export { tempDir } from './temp.ts';
 export { runNode } from './proc.ts';
 export type { NodeRun } from './proc.ts';
+export { bytesOf, lent } from './lent.ts';
