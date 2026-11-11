@@ -184,6 +184,12 @@ export const AUDIT_SCHEMAS = {
   },
   'key.issued': {},
   'key.revoked': {},
+  /** A push service accepted one message. The row's ref is `push`; no endpoint, key or title is recorded. */
+  'push.delivered': { status: int(100, 599) },
+  /** A push service answered 404 or 410: that subscription was removed. */
+  'push.subscription_removed': { status: int(100, 599) },
+  /** One push did not arrive: a closed `code` (`bad_status` carries the status). */
+  'push.failed': { code: text(CODE), status: optional(int(100, 599)) },
   /** An orphan temp file of a vault write was zero-filled and removed at start; the row's ref is the key, nothing else is recorded. */
   'vault.temp_swept': {},
 } as const satisfies Readonly<Record<string, Schema>>;

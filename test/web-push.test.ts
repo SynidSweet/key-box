@@ -8,11 +8,14 @@ import type { PrivateStore } from '../src/ports/private.ts';
 import type { Push, PushSubscriptionInput, PushSubscriptions, PushTransport } from '../src/ports/push.ts';
 import { encryptPayload, vapidAuthorization } from '../src/pure/pushcrypto.ts';
 import type { P256KeyPair } from '../src/pure/pushcrypto.ts';
+import { AUDIT_SCHEMAS, isAuditAction, parseObject } from '../src/pure/schemas.ts';
+import type { Schema } from '../src/pure/schemas.ts';
+import { createHttpPushTransport } from '../src/shell/push-transport.ts';
 import { createPush } from '../src/shell/push.ts';
 import { openPrivateDatabase } from '../src/shell/private-db.ts';
 import { FakeAudit } from './fakes/audit.ts';
-import { TimedClock, seedFor, seededRandom, tempDir } from './kit/index.ts';
-import type { SeededRandom } from './kit/index.ts';
+import { TimedClock, canary, fakePlatform, seedFor, seededRandom, settle, tempDir, waitUntil } from './kit/index.ts';
+import type { SeededRandom, Surface } from './kit/index.ts';
 
 const b64u = (s: string): Uint8Array => Uint8Array.from(Buffer.from(s.replace(/\s+/g, ''), 'base64url'));
 const toB64u = (b: Uint8Array): string => Buffer.from(b).toString('base64url');
@@ -107,7 +110,7 @@ test('KBOX-22 a VAPID header from a mismatched key pair is refused by fixed code
 });
 
 // Receiver side of RFC 8291 section 3-4 and RFC 8188, written for the tests: the oracle that decrypts what the box sends.
-function decryptAes128gcm(body: Uint8Array, uaPrivate: Uint8Array, uaPublic: Uint8Array, authSecret: Uint8Array): Uint8Array {
+function decrypt(body: Uint8Array, uaPrivate: Uint8Array, uaPublic: Uint8Array, authSecret: Uint8Array): Uint8Array {
   const salt = body.slice(0, 16);
   const idlen = body[20];
   assert.equal(idlen, 65);
@@ -127,7 +130,7 @@ function decryptAes128gcm(body: Uint8Array, uaPrivate: Uint8Array, uaPublic: Uin
 }
 
 test('KBOX-22 the test-side decryption opens the RFC example, so it can stand as the oracle for what the box sends', () => {
-  const opened = decryptAes128gcm(concat(RFC.header, RFC.ciphertext), RFC.uaPrivate, RFC.uaPublic, RFC.authSecret);
+  const opened = decrypt(concat(RFC.header, RFC.ciphertext), RFC.uaPrivate, RFC.uaPublic, RFC.authSecret);
   assert.deepEqual(opened, RFC.plaintext);
 });
 
@@ -257,4 +260,245 @@ test('KBOX-22 a subscription key that is not a 65-byte uncompressed P-256 point,
   assert.deepEqual(code({ auth: toB64u(concat(b.authSecret, new Uint8Array(1))) }), bad, '17 bytes');
   assert.deepEqual(code({ auth: '' }), bad);
   assert.deepEqual(w.store.listPushSubscriptions(), []);
+});
+
+const HOSTS_SUB = GOOD_ENDPOINTS[0] ?? '';
+const PAYLOAD_BYTES_MAX = 4096;
+
+function subscribeAll(w: World, endpoints: readonly string[]): Browser[] {
+  return endpoints.map((endpoint) => {
+    const b = browser(w.rng);
+    assert.deepEqual(w.push.subscribe(b.subscription(endpoint)), { ok: true });
+    return b;
+  });
+}
+
+/** What the box audited must be a closed row of the audit schemas, and name nothing about an endpoint. */
+function assertClosedAudit(w: World, extra: Readonly<Record<string, Surface>> = {}): void {
+  const events = w.audit.entries();
+  for (const event of events) {
+    assert.ok(isAuditAction(event.action), `${event.action} is a declared audit action`);
+    assert.ok(parseObject(AUDIT_SCHEMAS[event.action] as Schema, event.detail ?? {}).ok, `${event.action} detail is closed: ${JSON.stringify(event.detail)}`);
+  }
+  canary().assertAbsent({ audit: JSON.stringify(events), ...extra });
+}
+
+test('KBOX-22 send posts to every subscription an aes128gcm body that only its browser can open, with TTL, Urgency and a VAPID Authorization', async (t) => {
+  const w = await world(t);
+  const [a, b] = subscribeAll(w, [GOOD_ENDPOINTS[0] ?? '', GOOD_ENDPOINTS[1] ?? '']);
+  assert.ok(a !== undefined && b !== undefined);
+  assert.equal(w.push.send({ title: 'Add key stripe-prod', kind: 'add_key' }), undefined);
+  assert.equal(w.transport.sent.length, 2, 'both posts are made before send returns: nothing waits on the push service');
+  const [first, second] = w.transport.sent;
+  assert.ok(first !== undefined && second !== undefined);
+  assert.equal(first.endpoint, GOOD_ENDPOINTS[0]);
+  assert.equal(second.endpoint, GOOD_ENDPOINTS[1]);
+  for (const [sent, receiver] of [[first, a], [second, b]] as const) {
+    assert.equal(sent.headers['Content-Encoding'], 'aes128gcm');
+    assert.match(sent.headers['TTL'] ?? '', /^[1-9]\d*$/);
+    assert.ok(['very-low', 'low', 'normal', 'high'].includes(sent.headers['Urgency'] ?? ''), 'RFC 8030 section 5.3 urgency');
+    assert.ok(sent.body.length <= PAYLOAD_BYTES_MAX);
+    const opened = decrypt(sent.body, receiver.privateKey, receiver.publicKey, receiver.authSecret);
+    assert.deepEqual(JSON.parse(Buffer.from(opened).toString('utf8')), { title: 'Add key stripe-prod', kind: 'add_key' });
+  }
+  assert.notDeepEqual(first.body.slice(0, 16), second.body.slice(0, 16), 'a fresh salt for every message');
+  assert.notDeepEqual(first.body.slice(21, 86), second.body.slice(21, 86), 'a fresh ephemeral sender key for every message');
+  const wrong = browser(w.rng);
+  assert.throws(() => decrypt(first.body, wrong.privateKey, wrong.publicKey, wrong.authSecret), 'another browser cannot open it');
+  await settle();
+  assertClosedAudit(w);
+});
+
+test('KBOX-22 the VAPID header of a send verifies for the stored public key, names the endpoint origin and expires within a day', async (t) => {
+  const w = await world(t);
+  subscribeAll(w, [GOOD_ENDPOINTS[3] ?? '']);
+  w.push.send({ title: 'Enrol', kind: 'enrol', count: 2 });
+  const sent = w.transport.sent[0];
+  assert.ok(sent !== undefined);
+  const { jwt, key } = parseAuthorization(sent.headers['Authorization'] ?? '');
+  const stored = w.store.getVapidKeyPair();
+  assert.ok(stored !== undefined);
+  assert.deepEqual(key, b64u(stored.publicKey));
+  assert.equal(verifyEs256(jwt, key), true);
+  assert.equal(jwt.claims['aud'], 'https://db5p.notify.windows.com');
+  assert.equal(jwt.claims['sub'], 'mailto:box@example.test');
+  const now = w.clock.now() / 1000;
+  assert.ok(typeof jwt.claims['exp'] === 'number' && jwt.claims['exp'] > now && jwt.claims['exp'] <= now + 24 * 3600, 'RFC 8292 section 2: exp is within 24 hours');
+});
+
+test('KBOX-22 the VAPID key pair is made once, kept only in the private store and reused by the next start', async (t) => {
+  const w = await world(t);
+  subscribeAll(w, [HOSTS_SUB]);
+  assert.equal(w.store.getVapidKeyPair(), undefined, 'nothing is generated before the first send');
+  w.push.send({ title: 'x', kind: 'enrol' });
+  const pair = w.store.getVapidKeyPair();
+  assert.ok(pair !== undefined);
+  assert.equal(b64u(pair.privateKey).length, 32);
+  assert.equal(b64u(pair.publicKey).length, 65);
+  w.push.send({ title: 'y', kind: 'enrol' });
+  const restarted = createPush({ store: w.store, transport: w.transport, scheduler: w.clock, clock: w.clock, random: w.rng, audit: w.audit, subject: 'mailto:box@example.test' });
+  restarted.send({ title: 'z', kind: 'enrol' });
+  const keys = w.transport.sent.map((s) => toB64u(parseAuthorization(s.headers['Authorization'] ?? '').key));
+  assert.equal(keys.length, 3);
+  assert.deepEqual(new Set(keys), new Set([pair.publicKey]));
+  assert.deepEqual(w.store.getVapidKeyPair(), pair);
+});
+
+test('KBOX-22 a payload never contains more than title, kind and count, whatever the caller handed in', async (t) => {
+  const w = await world(t);
+  const [b] = subscribeAll(w, [HOSTS_SUB]);
+  assert.ok(b !== undefined);
+  const wider = { title: 'T', kind: 'enrol', count: 3, url: 'https://box.example.test/approve/1', value: 'hunter2', requester: 'free text' };
+  w.push.send(wider);
+  w.push.send({ title: 'only', kind: 'recovery' });
+  const [one, two] = w.transport.sent.map((s) => JSON.parse(Buffer.from(decrypt(s.body, b.privateKey, b.publicKey, b.authSecret)).toString('utf8')) as Record<string, unknown>);
+  assert.deepEqual(one, { title: 'T', kind: 'enrol', count: 3 });
+  assert.deepEqual(two, { title: 'only', kind: 'recovery' }, 'no count member when there is no count');
+  assert.deepEqual(Object.keys(two ?? {}).sort(), ['kind', 'title']);
+});
+
+test('KBOX-22 a 404 or 410 answer removes that subscription and only that one; other answers keep it', async (t) => {
+  const w = await world(t);
+  const endpoints = GOOD_ENDPOINTS.slice(0, 4);
+  subscribeAll(w, endpoints);
+  const answers = new Map<string, number>([
+    [endpoints[0] ?? '', 410],
+    [endpoints[1] ?? '', 404],
+    [endpoints[2] ?? '', 201],
+    [endpoints[3] ?? '', 429],
+  ]);
+  w.transport.answer = (endpoint) => Promise.resolve(answers.get(endpoint) ?? 0);
+  w.push.send({ title: 'x', kind: 'enrol' });
+  await waitUntil(() => w.audit.entries().length === 4, 'four outcomes audited');
+  assert.deepEqual(w.store.listPushSubscriptions().map((s) => s.endpoint), [endpoints[2], endpoints[3]]);
+  assert.deepEqual(w.audit.entries().map((e) => e.action).sort(), ['push.delivered', 'push.failed', 'push.subscription_removed', 'push.subscription_removed']);
+  assertClosedAudit(w);
+});
+
+/** The real HTTP adapter, pointed at a loopback fake instead of the push service the endpoint names (the endpoint's path is kept). */
+class LoopbackTransport implements PushTransport {
+  readonly signals: AbortSignal[] = [];
+  readonly #platformUrl: string;
+  readonly #real = createHttpPushTransport();
+
+  constructor(platformUrl: string) {
+    this.#platformUrl = platformUrl;
+  }
+
+  post(endpoint: URL, headers: Readonly<Record<string, string>>, body: Uint8Array, signal: AbortSignal): Promise<number> {
+    this.signals.push(signal);
+    return this.#real.post(new URL(`${endpoint.pathname}${endpoint.search}`, this.#platformUrl), headers, body, signal);
+  }
+}
+
+const SEND_TIMEOUT_MS = 10_000;
+
+test('KBOX-22 a push service answering 500 gets one request, nothing is retried and the subscription is kept (real HTTP adapter, loopback fake)', async (t) => {
+  const platform = await fakePlatform(t);
+  await platform.setMode('500');
+  const w = await world(t, new LoopbackTransport(platform.url));
+  subscribeAll(w, [HOSTS_SUB]);
+  w.push.send({ title: 'x', kind: 'enrol' });
+  await waitUntil(() => w.audit.entries().length === 1, 'the 500 audited');
+  w.clock.advance(24 * 3600 * 1000);
+  await settle();
+  assert.equal(platform.requests.length, 1, 'one POST, no retry');
+  assert.equal(platform.requests[0]?.method, 'POST');
+  assert.equal(platform.requests[0]?.headers['content-encoding'], 'aes128gcm');
+  assert.equal(w.store.listPushSubscriptions().length, 1);
+  assert.deepEqual(w.audit.entries().map((e) => [e.action, e.detail]), [['push.failed', { code: 'bad_status', status: 500 }]]);
+  assertClosedAudit(w);
+});
+
+test('KBOX-22 a push service that never answers is aborted at 10 s of scheduler time and send never waits for it (real HTTP adapter, loopback fake)', async (t) => {
+  const platform = await fakePlatform(t);
+  await platform.setMode('hang');
+  const loopback = new LoopbackTransport(platform.url);
+  const w = await world(t, loopback);
+  subscribeAll(w, [HOSTS_SUB]);
+  const arrived = platform.nextRequest();
+  w.push.send({ title: 'x', kind: 'enrol' });
+  await arrived;
+  const [signal] = loopback.signals;
+  assert.ok(signal !== undefined);
+  assert.equal(w.clock.pendingTimers, 1, 'one timeout is set for the one send');
+  w.clock.advance(SEND_TIMEOUT_MS - 1);
+  await settle();
+  assert.equal(signal.aborted, false, 'not aborted before 10 s');
+  assert.equal(w.audit.entries().length, 0);
+  w.clock.advance(1);
+  assert.equal(signal.aborted, true, 'aborted at 10 s');
+  await waitUntil(() => w.audit.entries().length === 1, 'the abort audited');
+  assert.deepEqual(w.audit.entries().map((e) => [e.action, e.detail]), [['push.failed', { code: 'timeout' }]]);
+  assert.equal(w.store.listPushSubscriptions().length, 1, 'a hang does not drop the subscription');
+  assert.equal(w.clock.pendingTimers, 0);
+  assertClosedAudit(w);
+});
+
+test('KBOX-22 a hung push service for one subscription does not hold up the others', async (t) => {
+  const w = await world(t);
+  const endpoints = GOOD_ENDPOINTS.slice(0, 3);
+  subscribeAll(w, endpoints);
+  w.transport.answer = (endpoint) => (endpoint === endpoints[0] ? new Promise<number>(() => undefined) : Promise.resolve(201));
+  w.push.send({ title: 'x', kind: 'enrol' });
+  assert.equal(w.transport.sent.length, 3, 'the post to the second subscription does not wait for the first');
+  await waitUntil(() => w.audit.entries().length === 2, 'the two answered ones audited');
+});
+
+test('KBOX-22 a refused connection is audited by code and send neither throws nor reports it to the caller (real HTTP adapter, loopback fake)', async (t) => {
+  const platform = await fakePlatform(t);
+  await platform.setMode('refuse');
+  const w = await world(t, new LoopbackTransport(platform.url));
+  subscribeAll(w, [HOSTS_SUB]);
+  assert.doesNotThrow(() => w.push.send({ title: 'x', kind: 'enrol' }));
+  await waitUntil(() => w.audit.entries().length === 1, 'the failure audited');
+  assert.deepEqual(w.audit.entries().map((e) => [e.action, e.detail]), [['push.failed', { code: 'transport_failed' }]]);
+  assert.equal(w.store.listPushSubscriptions().length, 1);
+  assert.equal(w.clock.pendingTimers, 0, 'the timeout is cancelled when the call ends');
+  assertClosedAudit(w);
+});
+
+test('KBOX-22 a redirect from a push service is not followed and counts as a bad status (real HTTP adapter, loopback fake)', async (t) => {
+  const platform = await fakePlatform(t);
+  await platform.setMode('redirect');
+  const w = await world(t, new LoopbackTransport(platform.url));
+  subscribeAll(w, [HOSTS_SUB]);
+  w.push.send({ title: 'x', kind: 'enrol' });
+  await waitUntil(() => w.audit.entries().length === 1, 'the redirect audited');
+  assert.equal(platform.requests.length, 1, 'the Location was not fetched');
+  assert.deepEqual(w.audit.entries().map((e) => [e.action, e.detail]), [['push.failed', { code: 'bad_status', status: 302 }]]);
+});
+
+test('KBOX-22 send never throws when the transport throws at once, rejects with text, or the store is closed; the audit holds codes only', async (t) => {
+  const planted = canary();
+  const secretText = Buffer.from(planted.bytes).toString('base64url');
+  const w = await world(t);
+  subscribeAll(w, [`https://fcm.googleapis.com/fcm/send/${secretText}`]);
+  w.transport.answer = () => {
+    throw new Error(`boom ${secretText}`);
+  };
+  assert.doesNotThrow(() => w.push.send({ title: 'x', kind: 'enrol' }));
+  w.transport.answer = () => Promise.reject(new Error(`rejected ${secretText}`));
+  assert.doesNotThrow(() => w.push.send({ title: 'x', kind: 'enrol' }));
+  await waitUntil(() => w.audit.entries().length === 2, 'both failures audited');
+  assert.deepEqual(w.audit.entries().map((e) => e.detail), [{ code: 'transport_failed' }, { code: 'transport_failed' }]);
+  const closed = openPrivateDatabase(join(w.dir, 'closed.db'));
+  closed.close();
+  const broken = createPush({ store: closed, transport: w.transport, scheduler: w.clock, clock: w.clock, random: w.rng, audit: w.audit, subject: 'mailto:box@example.test' });
+  assert.doesNotThrow(() => broken.send({ title: 'x', kind: 'enrol' }));
+  assert.deepEqual(w.audit.entries().map((e) => e.detail).at(-1), { code: 'store_failed' });
+  assertClosedAudit(w);
+  planted.assertAbsent({ audit: JSON.stringify(w.audit.entries()) });
+});
+
+test('KBOX-22 send with no subscriptions does nothing and a malformed stored subscription is skipped by code without stopping the others', async (t) => {
+  const w = await world(t);
+  w.push.send({ title: 'x', kind: 'enrol' });
+  assert.equal(w.transport.sent.length, 0);
+  const [good] = subscribeAll(w, [GOOD_ENDPOINTS[1] ?? '']);
+  assert.ok(good !== undefined);
+  w.store.addPushSubscription({ endpoint: GOOD_ENDPOINTS[0] ?? '', p256dh: 'AAAA', auth: 'AAAA' });
+  w.push.send({ title: 'x', kind: 'enrol' });
+  assert.deepEqual(w.transport.sent.map((s) => s.endpoint), [GOOD_ENDPOINTS[1]], 'the good one still gets its push');
+  assert.deepEqual(w.audit.entries().map((e) => [e.action, e.detail]), [['push.failed', { code: 'bad_secret' }]]);
 });
