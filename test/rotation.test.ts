@@ -311,6 +311,29 @@ test('KBOX-17 a destination that refuses the re-push keeps the run failed with a
   assert.equal(w.store.runs().at(-1)?.state, 'failed');
 });
 
+test('KBOX-16 a destination whose properties turned api-readable since the key was added is refused at push for an admin key: the old key stays everywhere', async (t) => {
+  const w = await rotationWorld(t, { klass: 'admin' });
+  const keyref = await w.seedKey();
+  const oldValue = await w.valueOf(keyref, 1);
+  w.destinations.a.setRuntime(false);
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  const failed = w.events('rotation.failed');
+  assert.deepEqual([failed.length, failed[0]?.data['step'], failed[0]?.data['reason_code']], [1, 'pushing', 'destination_not_allowed']);
+  assert.deepEqual(heldBy(w), [oldValue, oldValue], 'nothing was pushed');
+  assert.equal((await w.live()).length, 1);
+});
+
+test('KBOX-16 the same api-readable destination is accepted for an ordinary key', async (t) => {
+  const w = await rotationWorld(t);
+  const keyref = await w.seedKey();
+  w.destinations.a.setRuntime(false);
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.equal(w.events('rotation.failed').length, 0);
+  assert.equal(genOf(w, keyref, 2)?.status, 'current');
+});
+
 test('KBOX-2 the new key value is absent from every event, audit row and push of a failed rotation', async (t) => {
   const { w, keyref } = await seeded(t, { klass: 'admin' });
   w.destinations.redeployer.failNext();

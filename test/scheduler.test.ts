@@ -3,6 +3,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { checkProperty, seedFor } from './kit/index.ts';
+import { PASTE_PLATFORM, pasteValue, routesWorld } from './support/routes-world.ts';
+import type { RoutesWorld } from './support/routes-world.ts';
 import type { SeededRandom } from './kit/index.ts';
 import type { KeyClass } from '../src/ports/types.ts';
 import { dueDates, unstaggeredDue } from '../src/pure/scheduler.ts';
@@ -70,4 +72,93 @@ test('KBOX-52 property: at most one admin or master rotation per day, every due 
       privileged.add(day);
     }
   });
+});
+
+// --- the tick: what opens when a key is due ---------------------------------------------------------------------------------
+
+const KEYREF = 'fake/shop/OPENAI_KEY';
+const addAdminKey = async (w: RoutesWorld, platform = 'fake'): Promise<void> => {
+  if (platform === 'fake') {
+    const execute = w.rotation.executors.add_key;
+    assert.ok(execute);
+    await execute({ approvalId: 'apr_x', revision: 1, action: { kind: 'add_key', platform, name: 'OPENAI_KEY', projects: ['shop'], scope: { items: ['admin'] } }, requester: { kind: 'box' }, proof: undefined });
+    return;
+  }
+  const opened = await w.api('/api/keys', { json: { platform, name: 'OPENAI_KEY', projects: ['shop'], scope: { items: ['admin'] } } });
+  const task = (opened.json() as { paste_task_id: string }).paste_task_id;
+  const cookie = await w.view();
+  const view = (await w.call(`/p/${task}`, { cookie })).json() as { paste_id: string; digest_b64: string; nonce_b64: string };
+  const value = pasteValue('3'.repeat(32));
+  w.accepted.add(value);
+  const stored = await w.call(`/p/${task}`, { cookie, json: { value, proof: w.pasteProof(view) } });
+  assert.equal(stored.status, 201, stored.body);
+};
+const rotatePushes = (w: RoutesWorld) => w.push.sent.filter((p) => p.kind === 'rotate_key');
+
+test('KBOX-52 an ordinary key that is due starts a run of its own at the tick, and one that is not yet due does not', async (t) => {
+  const w = await routesWorld(t);
+  await w.api('/api/keys', { json: { platform: 'fake', name: 'OPENAI_KEY', projects: ['shop'], scope: { items: ['read'] }, rotate_every_days: 30 } });
+  w.clock.advance(30 * DAY - 1);
+  w.rotation.tick();
+  assert.equal(w.rotation.store.activeRunOf(KEYREF), undefined);
+  w.clock.advance(1);
+  w.rotation.tick();
+  assert.equal(w.rotation.store.activeRunOf(KEYREF)?.origin, 'schedule');
+  await w.rotation.orchestrator.idle();
+});
+
+test('KBOX-52 a due admin key opens exactly one approval, with the old key still working, and a second tick opens none', async (t) => {
+  const w = await routesWorld(t);
+  await addAdminKey(w);
+  w.clock.advance(91 * DAY);
+  w.rotation.tick();
+  const first = await w.queue();
+  assert.deepEqual(first.map((q) => [q.kind, q.revision]), [['rotate_key', 1]]);
+  assert.equal(rotatePushes(w).length, 1);
+  assert.equal(w.rotation.store.activeRunOf(KEYREF), undefined, 'nothing runs before the phone approves');
+  assert.equal(w.parts.meta.snapshot().keys.find((k) => k.keyref === KEYREF)?.status, 'awaiting_approval');
+  w.rotation.tick();
+  w.rotation.tick();
+  assert.deepEqual((await w.queue()).map((q) => [q.kind, q.revision]), [['rotate_key', 1]], 'no second approval and no new revision that would void the assertion');
+  assert.equal(rotatePushes(w).length, 1);
+  assert.equal((await w.platform.lister.list(w.platform.master())).length, 1, 'the old key keeps working while it waits');
+});
+
+test('KBOX-52 a due admin key on a paste-source platform opens exactly one paste task, and a second tick opens none', async (t) => {
+  const w = await routesWorld(t);
+  await addAdminKey(w, PASTE_PLATFORM);
+  w.clock.advance(91 * DAY);
+  w.rotation.tick();
+  w.rotation.tick();
+  const listed = await w.call('/app/pastes', { cookie: await w.view() });
+  assert.equal((listed.json() as { pastes: unknown[] }).pastes.length, 1);
+  assert.equal(w.parts.meta.snapshot().keys.find((k) => k.keyref === `${PASTE_PLATFORM}/shop/OPENAI_KEY`)?.status, 'awaiting_paste');
+});
+
+test('KBOX-52 a denied or expired approval puts the key back to works at the next tick, and a failed run is not tried again for a day', async (t) => {
+  const w = await routesWorld(t);
+  await addAdminKey(w);
+  w.clock.advance(91 * DAY);
+  w.rotation.tick();
+  const expiring = w.parts.meta.snapshot().approvals.map((a) => a.approval_id);
+  w.clock.advance(15 * DAY);
+  w.rotation.tick();
+  const reopened = w.parts.meta.snapshot().approvals.map((a) => a.approval_id);
+  assert.equal(reopened.length, 1, 'the box opens a new approval after the old one expired');
+  assert.notDeepEqual(reopened, expiring);
+  const ordinary = await routesWorld(t);
+  await ordinary.api('/api/keys', { json: { platform: 'fake', name: 'OPENAI_KEY', projects: ['shop'], scope: { items: ['read'] }, destinations: [{ kind: 'vercel_env', target: 'app-a' }], rotate_every_days: 1 } });
+  ordinary.destination.refuse('app-a');
+  ordinary.clock.advance(DAY);
+  ordinary.rotation.tick();
+  await ordinary.rotation.orchestrator.idle();
+  assert.equal(ordinary.parts.events.after(0).filter((e) => e.kind === 'rotation.failed').length, 1);
+  ordinary.clock.advance(23 * 3600_000);
+  ordinary.rotation.tick();
+  await ordinary.rotation.orchestrator.idle();
+  assert.equal(ordinary.parts.events.after(0).filter((e) => e.kind === 'rotation.failed').length, 1, 'no second try within a day');
+  ordinary.clock.advance(3600_000);
+  ordinary.rotation.tick();
+  await ordinary.rotation.orchestrator.idle();
+  assert.equal(ordinary.parts.events.after(0).filter((e) => e.kind === 'rotation.failed').length, 2, 'tried again after a day');
 });

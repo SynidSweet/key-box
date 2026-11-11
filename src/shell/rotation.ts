@@ -34,7 +34,7 @@ const AFTER_FAILURE_MS = 24 * HOUR_MS;
 
 export interface RotationDeps {
   readonly parts: CoreParts;
-  readonly approvals: Pick<Approvals, 'propose'>;
+  readonly approvals: Pick<Approvals, 'propose' | 'sweep'>;
   readonly approvers: Approvers;
   readonly push: Push;
   readonly clock: Clock;
@@ -113,6 +113,7 @@ export function openRotation(deps: RotationDeps): Rotation {
   };
 
   const tick = (): void => {
+    deps.approvals.sweep();
     const now = deps.clock.now();
     const keys = store.keys();
     const due = dueDates(keys.map((k) => ({ keyref: k.keyref, class: k.class, rotateEveryDays: k.rotateEveryDays, graceHours: k.graceHours, lastRotatedAt: k.rotatedAt, expiresAt: k.expiresAt, manual: false })));

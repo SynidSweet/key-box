@@ -11,10 +11,15 @@ export class RecordingDestination implements Destination {
   readonly #refused = new Map<string, number>();
   readonly #trace: string[];
   #versions = 0;
-  readonly #runtime: boolean;
+  #runtime: boolean;
 
   constructor(trace: string[], runtime = true) {
     this.#trace = trace;
+    this.#runtime = runtime;
+  }
+
+  /** The destination's own properties change while the box runs (KBOX-16): true is `runtime`, false is `api`. */
+  setRuntime(runtime: boolean): void {
     this.#runtime = runtime;
   }
 
