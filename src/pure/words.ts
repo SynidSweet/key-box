@@ -13,6 +13,8 @@ export const FIXED = {
   recoverReinstalled: 'The app was reinstalled or its data cleared: recover with the authenticator app on the same phone.',
   recoverLostPhone: "The phone is lost: recover with the authenticator app restored from your Google account on a new phone.",
   deviceKeyWarning: 'This phone keeps a device key that cannot be copied. If you reinstall the app or clear its data, you will need to recover.',
+  withheld: 'response withheld: it carried a key',
+  upstreamRefused: 'upstream refused the key',
 } as const;
 
 export const reasonLine = (machine: string, agent: string, text: string): string => `Reason given by ${machine}/${agent} (not checked): ${text}`;

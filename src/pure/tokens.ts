@@ -23,6 +23,28 @@ export function parseBearer(header: string | undefined): BearerParse {
   return token !== undefined && TOKEN.test(token) ? { kind: 'token', token } : { kind: 'malformed' };
 }
 
+export type PassHeaderName = 'authorization' | 'apikey';
+export type PassParse =
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'malformed' }
+  | { readonly kind: 'mismatch' }
+  | { readonly kind: 'pass'; readonly token: string; readonly carriers: readonly PassHeaderName[] };
+
+/** KBOX-13 step 1, KBOX-32: a relay pass from `Authorization: Bearer` and `apikey`; when both are present they must agree. */
+export function parsePass(authorization: string | undefined, apikey: string | undefined): PassParse {
+  const found: { readonly header: PassHeaderName; readonly token: string | undefined }[] = [];
+  if (authorization !== undefined) {
+    const bearer = parseBearer(authorization);
+    found.push({ header: 'authorization', token: bearer.kind === 'token' ? bearer.token : undefined });
+  }
+  if (apikey !== undefined) found.push({ header: 'apikey', token: TOKEN.test(apikey) ? apikey : undefined });
+  const first = found[0];
+  if (first === undefined) return { kind: 'absent' };
+  if (found.some((f) => f.token === undefined)) return { kind: 'malformed' };
+  if (found.some((f) => f.token !== first.token) || first.token === undefined) return { kind: 'mismatch' };
+  return { kind: 'pass', token: first.token, carriers: found.map((f) => f.header) };
+}
+
 /** The record whose hash equals the token's. Every record is compared, whatever the outcome, with a constant-time comparison. */
 export const findToken = (records: readonly TokenRecord[], token: string): TokenRecord | undefined => findTokenHash(records, hashToken(token));
 
