@@ -1,21 +1,25 @@
 // KBOX-22: how the owner learns something waits. Web Push from the box itself: RFC 8291 payload encryption, RFC 8292 VAPID.
 import assert from 'node:assert/strict';
 import { createDecipheriv, createECDH, createPublicKey, hkdfSync, verify } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import type { PrivateStore } from '../src/ports/private.ts';
 import type { Push, PushSubscriptionInput, PushSubscriptions, PushTransport } from '../src/ports/push.ts';
 import { ApiError } from '../src/pure/errors.ts';
+import { parseEgressHosts } from '../src/pure/egress-policy.ts';
 import { encryptPayload, vapidAuthorization } from '../src/pure/pushcrypto.ts';
 import type { P256KeyPair } from '../src/pure/pushcrypto.ts';
 import { AUDIT_SCHEMAS, isAuditAction, parseObject } from '../src/pure/schemas.ts';
 import type { Schema } from '../src/pure/schemas.ts';
+import { EgressRefused, createEgress } from '../src/shell/egress.ts';
 import { createHttpPushTransport } from '../src/shell/push-transport.ts';
 import { createPush } from '../src/shell/push.ts';
 import { openPrivateDatabase } from '../src/shell/private-db.ts';
 import { FakeAudit } from './fakes/audit.ts';
 import { approveWorld } from './support/approve-world.ts';
+import { loopbackConnector } from './support/loopback-connector.ts';
 import { TimedClock, canary, fakePlatform, seedFor, seededRandom, settle, tempDir, waitUntil } from './kit/index.ts';
 import type { SeededRandom, Surface } from './kit/index.ts';
 
@@ -380,19 +384,25 @@ test('KBOX-22 a 404 or 410 answer removes that subscription and only that one; o
   assertClosedAudit(w);
 });
 
-/** The real HTTP adapter, pointed at a loopback fake instead of the push service the endpoint names (the endpoint's path is kept). */
+/** The real HTTP adapter over the real gate, whose connector goes to a loopback fake instead of the push service the endpoint names. */
 class LoopbackTransport implements PushTransport {
   readonly signals: AbortSignal[] = [];
-  readonly #platformUrl: string;
-  readonly #real = createHttpPushTransport();
+  readonly #real: PushTransport;
 
   constructor(platformUrl: string) {
-    this.#platformUrl = platformUrl;
+    const egress = createEgress({
+      adapterHosts: [],
+      listed: PUSH_LISTED,
+      resolver: { resolve: () => Promise.resolve(['203.0.113.10']) },
+      connector: loopbackConnector(Number(new URL(platformUrl).port)),
+      scheduler: new TimedClock(0),
+    });
+    this.#real = createHttpPushTransport(egress);
   }
 
   post(endpoint: URL, headers: Readonly<Record<string, string>>, body: Uint8Array, signal: AbortSignal): Promise<number> {
     this.signals.push(signal);
-    return this.#real.post(new URL(`${endpoint.pathname}${endpoint.search}`, this.#platformUrl), headers, body, signal);
+    return this.#real.post(endpoint, headers, body, signal);
   }
 }
 
@@ -579,4 +589,70 @@ test('KBOX-22 a stored VAPID pair that does not decode is never replaced (that w
   assert.deepEqual(w.store.getVapidKeyPair(), bad, 'the stored row is untouched');
   assert.equal(w.transport.sent.length, 0, 'nothing was signed with a made-up key');
   assert.ok(w.audit.entries().some((e) => e.action === 'push.failed' && e.detail?.['code'] === 'store_failed'));
+});
+
+// ---------------------------------------------------------------- the egress gate (KBOX-47, KBOX-22)
+
+const PUSH_LISTED = (() => {
+  const parsed = parseEgressHosts(JSON.parse(readFileSync(new URL('../deploy/egress-hosts.json', import.meta.url), 'utf8')) as unknown);
+  if (!parsed.ok) throw new Error('deploy/egress-hosts.json does not parse');
+  return parsed.value;
+})();
+/** A host the list gives to push (a wildcard entry), so a refusal in these tests is about the address, not the name. */
+const PUSH_ENDPOINT = new URL('https://kb-gate-test.notify.windows.com/w/?token=abc');
+
+/** The production transport over the gate with a scripted resolver and a connector that only counts: nothing leaves the process. */
+function gatedTransport(answers: (call: number) => readonly string[]): { readonly transport: PushTransport; readonly lookups: string[]; readonly connects: string[] } {
+  const lookups: string[] = [];
+  const connects: string[] = [];
+  const egress = createEgress({
+    adapterHosts: [],
+    listed: PUSH_LISTED,
+    resolver: {
+      resolve: (host) => {
+        lookups.push(host);
+        return Promise.resolve(answers(lookups.length));
+      },
+    },
+    connector: { connect: (target) => (connects.push(target.address), Promise.reject(new Error('no network in this test'))) },
+    scheduler: new TimedClock(0),
+  });
+  return { transport: createHttpPushTransport(egress), lookups, connects };
+}
+
+const refusedWith = (code: string) => (error: unknown): boolean => error instanceof EgressRefused && error.code === code;
+
+test('KBOX-47 a push endpoint that resolves to a private, loopback or link-local address is refused by the gate before any connection', async () => {
+  for (const address of ['10.0.0.5', '127.0.0.1', '169.254.169.254', '192.168.1.9', '::1', 'fd00::1', '::ffff:10.0.0.5']) {
+    const gate = gatedTransport(() => [address]);
+    await assert.rejects(gate.transport.post(PUSH_ENDPOINT, {}, new Uint8Array(1), new AbortController().signal), refusedWith('private_address'), address);
+    assert.deepEqual(gate.connects, [], `${address}: no connection`);
+  }
+  const mixed = gatedTransport(() => ['203.0.113.10', '10.0.0.5']);
+  await assert.rejects(mixed.transport.post(PUSH_ENDPOINT, {}, new Uint8Array(1), new AbortController().signal), refusedWith('private_address'), 'one private answer among public ones');
+  assert.deepEqual(mixed.connects, []);
+});
+
+test('KBOX-47 a push call resolves the name once and connects to the address it got, so a second answer cannot move the connection', async () => {
+  const gate = gatedTransport((call) => (call === 1 ? ['203.0.113.10'] : ['10.0.0.5']));
+  await assert.rejects(gate.transport.post(PUSH_ENDPOINT, {}, new Uint8Array(1), new AbortController().signal), refusedWith('connect_failed'));
+  assert.deepEqual([gate.lookups, gate.connects], [['kb-gate-test.notify.windows.com'], ['203.0.113.10']]);
+});
+
+test('KBOX-47 a push call to a host the list does not give to push is refused before any lookup', async () => {
+  const gate = gatedTransport(() => ['203.0.113.10']);
+  for (const [url, code] of [['https://evil.example/x', 'undeclared_host'], ['https://nodejs.org/x', 'wrong_caller'], ['http://fcm.googleapis.com/x', 'bad_url']] as const) {
+    await assert.rejects(gate.transport.post(new URL(url), {}, new Uint8Array(1), new AbortController().signal), refusedWith(code), url);
+  }
+  assert.deepEqual([gate.lookups, gate.connects], [[], []]);
+});
+
+test('KBOX-22 a send whose endpoint resolves to a private address is audited by code and neither throws nor connects', async (t) => {
+  const gate = gatedTransport(() => ['10.0.0.5']);
+  const w = await world(t, gate.transport);
+  subscribeAll(w, ['https://kb-gate-test.notify.windows.com/w/?token=abc']);
+  assert.doesNotThrow(() => w.push.send({ title: 'x', kind: 'enrol' }));
+  await waitUntil(() => w.audit.entries().length === 1, 'the refusal audited');
+  assert.deepEqual(w.audit.entries().map((e) => [e.action, e.detail]), [['push.failed', { code: 'transport_failed' }]]);
+  assert.deepEqual(gate.connects, []);
 });

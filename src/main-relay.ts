@@ -1,17 +1,14 @@
 // The relay process (kb-relay, uid keyrelay): serves /r/* on its own unix socket behind Caddy, asks core for every pass,
 // grant, lent value, scan and audit row over the lend socket, and reaches upstream only through the egress gate. It holds
 // no state and reads no vault; it stops on SIGTERM (KBOX-3, KBOX-13, KBOX-45, KBOX-47).
-import { readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { REGISTRY } from './platforms/registry.ts';
 import { DOMAIN_NAME } from './pure/actions.ts';
-import { parseEgressHosts } from './pure/egress-policy.ts';
 import { osErrorCode } from './pure/errors.ts';
 import { RegistryRefused } from './pure/profile.ts';
-import { systemScheduler } from './shell/clock.ts';
-import { createEgress, createTlsConnector, systemResolver } from './shell/egress.ts';
+import { createSystemEgress } from './shell/egress-system.ts';
 import { createLendClient } from './shell/lend-socket.ts';
-import { adapterHostsOf, createRelayServer } from './shell/relay-http.ts';
+import { createRelayServer } from './shell/relay-http.ts';
 
 interface Config {
   readonly socket: string;
@@ -33,9 +30,7 @@ function readConfig(env: NodeJS.ProcessEnv): Config {
 async function main(): Promise<void> {
   const config = readConfig(process.env);
   const journal = (code: string): void => void process.stderr.write(`keybox relay: ${code}\n`);
-  const listed = parseEgressHosts(JSON.parse(readFileSync(new URL('../deploy/egress-hosts.json', import.meta.url), 'utf8')) as unknown);
-  if (!listed.ok) throw new RangeError('deploy/egress-hosts.json does not parse');
-  const egress = createEgress({ adapterHosts: adapterHostsOf(REGISTRY), listed: listed.value, resolver: systemResolver, connector: createTlsConnector(), scheduler: systemScheduler });
+  const egress = createSystemEgress(REGISTRY);
   const server = createRelayServer({ registry: REGISTRY, lend: createLendClient(config.lendSocket), egress, domain: config.domain, journal });
   if (config.domain === undefined) journal('no_domain');
   await server.listen(config.socket);

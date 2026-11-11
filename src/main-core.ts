@@ -19,6 +19,7 @@ import { createMintedValues } from './shell/minted-values.ts';
 import { createShareWriter, shareRoute } from './shell/share-writer.ts';
 import { createMetaShareSource } from './shell/share-source.ts';
 import { createPush } from './shell/push.ts';
+import { createSystemEgress } from './shell/egress-system.ts';
 import { createHttpPushTransport } from './shell/push-transport.ts';
 import { openPrivateDatabase } from './shell/private-db.ts';
 import { systemRandom } from './shell/random.ts';
@@ -65,7 +66,7 @@ async function main(): Promise<void> {
   let approve: ReturnType<typeof openApproveCore> | undefined;
   if (config.domain === undefined) journal('no_domain');
   else {
-    const push = createPush({ store: privateStore, transport: createHttpPushTransport(), scheduler: systemScheduler, clock: systemClock, random: systemRandom, audit: parts.audit, subject: `https://keys.${config.domain}` });
+    const push = createPush({ store: privateStore, transport: createHttpPushTransport(createSystemEgress(REGISTRY)), scheduler: systemScheduler, clock: systemClock, random: systemRandom, audit: parts.audit, subject: `https://keys.${config.domain}` });
     const wordlist = parseWordlist(readFileSync(new URL('./data/wordlist.txt', import.meta.url), 'utf8'));
     approve = openApproveCore({ parts, approverStore: privateStore, trust: noInstaller, push, clock: systemClock, random: systemRandom, domain: config.domain, wordlist, vet: vetWithoutAdapters });
   }
