@@ -84,6 +84,9 @@ interface Fresh {
   readonly value: Lent;
 }
 
+/** The process stopped at a checkpoint (a test's crash): the drive ends there and recovery is the next start's. */
+class Stopped extends Error {}
+
 const underscored = (kind: string): string => kind.replace(/[^a-z0-9]+/g, '_');
 const hex = (b: Uint8Array): string => Buffer.from(b).toString('hex');
 
@@ -93,20 +96,74 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   const inflight = new Set<Promise<void>>();
   const timers = new Map<string, () => void>();
 
+  /** Throws of one run's drive since it last went through cleanly: the retry after a fault backs off like any other (S-249). */
+  const faults = new Map<string, number>();
+
   const now = (): number => deps.clock.now();
+  /** A checkpoint that throws is the process stopping there (a test): nothing more happens in this process. */
   const point = async (p: Point): Promise<void> => {
-    await deps.checkpoint?.(p);
+    try {
+      await deps.checkpoint?.(p);
+    } catch (cause: unknown) {
+      throw new Stopped(p, { cause });
+    }
   };
 
   // --- running a run ----------------------------------------------------------------------------------------------------
 
   const launch = (runId: string): void => {
     const job: Promise<void> = drive(runId).catch((error: unknown) => {
-      deps.audit.append({ action: 'rotation.drive_failed', subject: store.run(runId)?.keyref ?? 'unknown', at: now(), detail: { run_id: runId, code: error instanceof ApiError ? error.code : 'drive_failed' } });
+      recover(runId, error);
     });
     inflight.add(job);
     void job.finally(() => inflight.delete(job));
   };
+
+  /**
+   * A throw outside `attempt()` (the master key unreadable, the store refusing a write) is never silent (review M2): it is audited, a retry
+   * timer is kept, and the run gets its one notice: before promote the run fails and rolls back (`rotation.failed`); from promote on, the new
+   * key works and the old one stays on (`rotation.old_key_still_on`); while rolling back, the failure's notice was already sent.
+   */
+  function recover(runId: string, error: unknown): void {
+    if (error instanceof Stopped) {
+      deps.audit.append({ action: 'rotation.drive_failed', subject: runId, at: now(), detail: { run_id: runId, code: 'stopped' } });
+      return;
+    }
+    const count = (faults.get(runId) ?? 0) + 1;
+    faults.set(runId, count);
+    later(runId, retryDelayMs(count - 1));
+    const code = error instanceof ApiError ? error.code : 'internal';
+    try {
+      const run = store.run(runId);
+      deps.audit.append({ action: 'rotation.drive_failed', subject: run?.keyref ?? runId, at: now(), detail: { run_id: runId, code } });
+      if (run !== undefined) noticeStuck(run, code);
+    } catch {
+      // The store refused even this: the timer above tries the whole run again; the audit says so.
+      deps.audit.append({ action: 'rotation.drive_failed', subject: runId, at: now(), detail: { run_id: runId, code: 'notice_failed' } });
+    }
+  }
+
+  function noticeStuck(run: RunRow, code: string): void {
+    switch (run.state) {
+      case 'issuing':
+      case 'verifying':
+      case 'pushing':
+      case 'redeploying':
+      case 'checking':
+        if (!run.failedNotified) markFailed(run, store.key(run.keyref), run.state, code);
+        return;
+      case 'promoting':
+      case 'grace':
+      case 'revoking':
+        noticeStillOn(run);
+        return;
+      case 'rolling_back':
+      case 'done':
+      case 'failed':
+      case 'abandoned':
+        return;
+    }
+  }
 
   const later = (runId: string, ms: number): void => {
     timers.get(runId)?.();
@@ -126,8 +183,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     try {
       for (;;) {
         const run = store.run(runId);
-        if (run === undefined || run.state === 'done' || run.state === 'failed' || run.state === 'abandoned') return;
-        if ((await step(run)) === 'wait') return;
+        if (run === undefined || run.state === 'done' || run.state === 'failed' || run.state === 'abandoned' || (await step(run)) === 'wait') {
+          faults.delete(runId);
+          return;
+        }
       }
     } finally {
       leased.delete(first.keyref);
@@ -378,12 +437,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     const attempts = run.attempts + 1;
     store.update(run.runId, { attempts });
     deps.audit.append({ action: 'rotation.revoke_unconfirmed', subject: run.keyref, at: now(), detail: { run_id: run.runId, gen: run.genOld, attempt: attempts } });
-    if (!run.stillOnNotified) {
-      deps.events.append('rotation.old_key_still_on', { run_id: run.runId, keyref: run.keyref, gen: Math.max(1, run.genOld) });
-      store.update(run.runId, { stillOnNotified: true });
-    }
+    noticeStillOn(run);
     later(run.runId, retryDelayMs(attempts - 1));
     return 'wait';
+  }
+
+  /** The run's one `rotation.old_key_still_on` notice, recorded before it goes out. A create run has no old key to keep on, so it sends none. */
+  function noticeStillOn(run: RunRow): void {
+    if (run.stillOnNotified || run.genOld === 0) return;
+    store.update(run.runId, { stillOnNotified: true });
+    deps.events.append('rotation.old_key_still_on', { run_id: run.runId, keyref: run.keyref, gen: run.genOld });
   }
 
   // --- failure: the old key stays ---------------------------------------------------------------------------------------------------

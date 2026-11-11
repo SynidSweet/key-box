@@ -522,3 +522,104 @@ test('KBOX-17 a failed run records that its notice went out before it sends it, 
   await w.settle();
   assert.deepEqual(recordedAtSend, [true]);
 });
+
+// --- a throw outside a guarded step is never silent (review M2) --------------------------------------------------------------------
+
+/** A write the database itself refuses (an I/O error stand-in), planted as a trigger on the real meta.db and taken away by the returned function. */
+function refuseWrite(w: RotationWorld, table: 'rotation_runs' | 'rotation_gens', when: string): () => void {
+  const name = `refuse_${table}`;
+  w.parts.db.exec(`CREATE TRIGGER ${name} BEFORE UPDATE ON ${table} WHEN ${when} BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END`);
+  return () => w.parts.db.exec(`DROP TRIGGER ${name}`);
+}
+const stillOn = (w: RotationWorld): number => w.events('rotation.old_key_still_on').length;
+const failedCards = (w: RotationWorld): number => w.events('rotation.failed').length;
+
+test('KBOX-17 a master key that cannot be lent at push files the run\'s one failure card and keeps a retry: once it can be lent, the rollback ends with the old key everywhere', async (t) => {
+  const { w, keyref, oldValue, oldId } = await seeded(t);
+  w.checkpoints.hook = async (point) => {
+    if (point === 'verifying') w.faults.master = true;
+  };
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.checkpoints.hook = undefined;
+  assert.equal(failedCards(w), 1, 'one card at once');
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'rolling_back');
+  assert.equal(w.orch.isLeased(keyref), false, 'the lease is not left behind');
+  w.clock.advance(MINUTE);
+  await w.orch.idle();
+  assert.equal(failedCards(w), 1, 'a retry that throws again sends no second card');
+  w.faults.master = false;
+  await w.settle(2 * MINUTE);
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+  assert.deepEqual(heldBy(w), [oldValue, oldValue]);
+  assert.deepEqual(await w.live(), [oldId]);
+  assert.equal(failedCards(w), 1);
+});
+
+test('KBOX-17 a run whose step write the database refuses files the one failure card and rolls back', async (t) => {
+  const { w, keyref, oldValue, oldId } = await seeded(t);
+  const restore = refuseWrite(w, 'rotation_runs', "NEW.state = 'checking'");
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  restore();
+  await w.settle(MINUTE);
+  assert.equal(failedCards(w), 1);
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+  assert.deepEqual(heldBy(w), [oldValue, oldValue]);
+  assert.deepEqual(await w.live(), [oldId]);
+});
+
+test('KBOX-17 a store write refused at promote keeps the old key on, sends one old_key_still_on notice and retries until it goes through', async (t) => {
+  const { w, keyref } = await seeded(t);
+  const restore = refuseWrite(w, 'rotation_gens', "NEW.status = 'grace'");
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'promoting');
+  assert.equal(stillOn(w), 1);
+  assert.equal(failedCards(w), 0, 'nothing is rolled back after the check passed');
+  w.clock.advance(MINUTE);
+  await w.orch.idle();
+  assert.equal(stillOn(w), 1, 'one notice, however many retries');
+  restore();
+  await w.settle(2 * MINUTE + 24 * HOUR);
+  assert.equal(w.store.activeRuns().length, 0);
+  assert.equal(genOf(w, keyref, 1)?.status, 'retired');
+  assert.equal(genOf(w, keyref, 2)?.status, 'current');
+});
+
+test('KBOX-17 a master key that cannot be lent at revoke keeps the old key in grace, sends one old_key_still_on notice and retries', async (t) => {
+  const { w, keyref, oldId } = await seeded(t);
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.faults.master = true;
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  assert.equal(genOf(w, keyref, 1)?.status, 'grace');
+  assert.equal(stillOn(w), 1);
+  w.clock.advance(MINUTE);
+  await w.orch.idle();
+  assert.equal(stillOn(w), 1);
+  w.faults.master = false;
+  await w.settle(2 * MINUTE);
+  assert.equal(genOf(w, keyref, 1)?.status, 'retired');
+  assert.ok(!(await w.live()).includes(oldId));
+});
+
+test('KBOX-17 a master key that cannot be lent during the rollback sends no second card and retries the rollback until it ends', async (t) => {
+  const { w, keyref, oldValue, oldId } = await seeded(t);
+  w.faults.verifyAt = 2;
+  w.checkpoints.hook = async (point) => {
+    if (point === 'redeploying') w.faults.master = true;
+  };
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.checkpoints.hook = undefined;
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'rolling_back');
+  assert.equal(failedCards(w), 1);
+  w.faults.master = false;
+  await w.settle(MINUTE);
+  assert.equal(failedCards(w), 1);
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+  assert.deepEqual(heldBy(w), [oldValue, oldValue]);
+  assert.deepEqual(await w.live(), [oldId]);
+});

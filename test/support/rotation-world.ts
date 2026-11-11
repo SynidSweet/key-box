@@ -35,6 +35,8 @@ export interface Faults {
   revoke404: boolean;
   /** A key that was never revoked still answers ok on the verifier even after revoke. */
   vaultPut: boolean;
+  /** The master key cannot be lent (the vault refuses it). */
+  master: boolean;
 }
 
 export interface WorldOptions {
@@ -97,7 +99,7 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
   const push = new FakePush();
   const platform = new FakePlatformWorld(random);
   const trace: string[] = [];
-  const faults: Faults = { issue: false, verifyAt: undefined, revoke404: false, vaultPut: false };
+  const faults: Faults = { issue: false, verifyAt: undefined, revoke404: false, vaultPut: false, master: false };
   const regionOf = new Map<PlatformKeyId, string>();
   const recording = { a: new RecordingDestination(trace), redeployer: new RecordingRedeployer(trace) };
 
@@ -181,7 +183,10 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
         vault,
         platform: () => ({ issuer, lister, ...(options.verifier === false ? {} : { verifier }) }),
         destination: () => ({ destination: recording.a, redeployer: recording.redeployer }),
-        master: () => platform.master(),
+        master: () => {
+          if (faults.master) throw new Error('vault: the master key is unreadable');
+          return platform.master();
+        },
         clock,
         scheduler: clock,
         random,
