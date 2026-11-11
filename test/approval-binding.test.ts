@@ -380,7 +380,7 @@ test('KBOX-9 KBOX-11 a signed operation needs the device signature, a fresh nonc
 test('KBOX-9 KBOX-7 a replaced action is stored under the digest of its new content: the queue shows that digest and a fresh proof over the old one is refused', async (t) => {
   const w = await approveWorld(t);
   const first = await pending(w, { kind: 'grant', keyref: 'k1', machine: 'ws-1' });
-  const replacement = { kind: 'grant', keyref: 'k1', machine: 'ws-evil' };
+  const replacement = { kind: 'grant', keyref: 'k1', machine: 'ws-evil' } as const;
   w.propose(replacement, 'ctl-1');
   const item = (await w.queue()).find((q) => q.approval_id === first.approval_id);
   assert.ok(item);
