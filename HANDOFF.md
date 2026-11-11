@@ -77,7 +77,10 @@ Open items, not fixed:
   takes it, so an agent that polls can win the race against the real machine. The fix (the signed `enrol_window_open` operation
   also names `token_sha256`, which the owner pastes from the machine) changes the operation shape the spec and these tests pin:
   machine-tokens (window tests, `op` helper), proposal-routes (the three enrol cases), setup (client op challenge) and the phone
-  page. Needs the owner's decision and authorised test flips; not built.
+  page. **Decided (orchestrator, 2026-11-11): not built; accepted residual.** The fix would make the owner copy a hash off a
+  machine, which the owner never does, and it buys nothing under S-717: relay passes are not pinned, any of the owner's
+  machines may hold one, and every machine is agent-controlled, so a pass won by the race is one an agent could get by asking.
+  Revisit only if passes are ever pinned or per-machine grants become a real boundary.
 - Unchanged and judged harmless (kernel-approve verdict): the `ENROL_LABEL` check on `enrol_window_open`, the future-nonce
   guard, the duplicate COSE label check, the DER zero r/s check, `records().length <= 1` in `remove`. `private.db` from before
   kernel-approve would fail `listApprovers` (no migration; no box is deployed). The audit grows with each refused proof by
