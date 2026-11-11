@@ -60,3 +60,19 @@ test('KBOX-51 only the verifier rejecting the old value, or the lister showing t
   assert.equal(confirmDead({ by: 'lister', id: 'pk-1', listed: [{ platformKeyId: 'pk-1', name: 'n', location: { region: 'us' } }] }), false, 'listed anywhere is alive');
   assert.equal(confirmDead({ by: 'lister', id: 'pk-1', listed: undefined }), false, 'a list that failed proves nothing');
 });
+
+test('KBOX-51 a listing proves a key dead only when it is complete, is for the location recorded with the key, and shows the id absent or disabled', () => {
+  const at = { region: 'eu', project: 'shop' };
+  const other = { platformKeyId: 'pk-2', name: 'n' };
+  const dead = (listing: { complete: boolean; at: { region?: string; project?: string }; keys: { platformKeyId: string; name: string; disabled?: true }[] } | undefined): boolean =>
+    confirmDead({ by: 'lister', id: 'pk-1', at, listing });
+  assert.equal(dead({ complete: true, at, keys: [other] }), true, 'absent from a complete listing of its own location');
+  assert.equal(dead({ complete: true, at, keys: [other, { platformKeyId: 'pk-1', name: 'n', disabled: true }] }), true, 'disabled there');
+  assert.equal(dead({ complete: true, at, keys: [{ platformKeyId: 'pk-1', name: 'n' }] }), false, 'listed and enabled');
+  assert.equal(dead({ complete: false, at, keys: [other] }), false, 'one page of several proves nothing');
+  assert.equal(dead({ complete: true, at: { region: 'us', project: 'shop' }, keys: [other] }), false, 'another region');
+  assert.equal(dead({ complete: true, at: { project: 'shop' }, keys: [other] }), false, 'a listing that omits the region');
+  assert.equal(dead({ complete: true, at: { region: 'eu', project: 'blog' }, keys: [other] }), false, 'another project');
+  assert.equal(dead({ complete: true, at: { region: 'eu' }, keys: [other] }), false, 'a listing that omits the project');
+  assert.equal(dead(undefined), false, 'a listing that failed proves nothing');
+});

@@ -51,7 +51,7 @@ export function createReconciler(deps: ReconcileDeps): Reconciler {
         continue;
       }
       if (orchestrator.isLeased(run.keyref)) continue;
-      const dead = await revokeAndConfirm({ kit, platform, id: key.platformKeyId, value: undefined, master: deps.master(platform) });
+      const dead = await revokeAndConfirm({ kit, platform, id: key.platformKeyId, at: key.location ?? {}, value: undefined, master: deps.master(platform) });
       if (!dead) continue;
       deps.audit.append({ action: 'rotation.orphan_revoked', subject: run.keyref, at: deps.clock.now(), detail: { run_id: run.runId } });
       if (run.state === 'issuing') orchestrator.retake(run.runId);

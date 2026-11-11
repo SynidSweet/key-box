@@ -1,7 +1,7 @@
 // KBOX-51 step 10: revoke a key at its platform, then CONFIRM it is dead. A 404 is not proof. The proof is the verifier rejecting the
-// value (the vault still holds it), or, where the platform has no verifier call, the lister showing the id nowhere. One home for the
-// new key's revoke on a failed run, the old key's revoke after the grace, and the orphan found by reconcile.
-import type { Lent, PlatformId, PlatformKeyId } from '../ports/types.ts';
+// value (the vault still holds it), or, where the platform has no verifier call, a complete listing of the key's recorded location showing
+// the id absent or disabled. One home for the new key's revoke on a failed run, the old key's revoke after the grace, and the orphan found by reconcile.
+import type { KeyLocation, Lent, PlatformId, PlatformKeyId } from '../ports/types.ts';
 import { confirmDead } from '../pure/rotation-machine.ts';
 import type { Evidence } from '../pure/rotation-machine.ts';
 import type { PlatformKit } from './rotation-ports.ts';
@@ -22,6 +22,8 @@ export interface RevokeTarget {
   readonly platform: PlatformId;
   /** Null for a key the box did not make (pasted): there is nothing to revoke here, only to watch. */
   readonly id: PlatformKeyId | null;
+  /** The region and project recorded with the key: only a complete listing of exactly there can confirm it gone. */
+  readonly at: KeyLocation;
   /** The value, when the vault holds it: the verifier tests it. */
   readonly value: Lent | undefined;
   readonly master: Lent;
@@ -46,8 +48,8 @@ async function confirm(target: RevokeTarget): Promise<boolean> {
   }
   if (kit.lister !== undefined && id !== null) {
     const lister = kit.lister;
-    const listed = await settled(() => lister.list(target.master));
-    return confirmDead({ by: 'lister', id, listed: listed.ok ? listed.value : undefined });
+    const listing = await settled(() => lister.listAt(target.at, target.master));
+    return confirmDead({ by: 'lister', id, at: target.at, listing: listing.ok ? listing.value : undefined });
   }
   return false;
 }

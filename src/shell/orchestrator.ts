@@ -422,7 +422,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   async function revokeOld(run: RunRow, head: KeyHead, kit: PlatformKit): Promise<Next> {
     if (run.genOld > 0) {
       const old = store.gen(run.keyref, run.genOld);
-      const dead = await revokeAndConfirm({ kit, platform: head.platform, id: old?.platformKeyId ?? null, value: lendOrUndefined(run.keyref, run.genOld), master: deps.master(head.platform) });
+      const dead = await revokeAndConfirm({ kit, platform: head.platform, id: old?.platformKeyId ?? null, at: old?.location ?? {}, value: lendOrUndefined(run.keyref, run.genOld), master: deps.master(head.platform) });
       if (!dead) return retryRevoke(run);
       store.setGenStatus(run.keyref, run.genOld, 'retired');
       deps.vault.retire(run.keyref, run.genOld);
@@ -548,7 +548,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     const id = created?.platformKeyId ?? fresh?.id ?? null;
     // A key the box did not make (pasted) has nothing to revoke here; one it made is revoked and confirmed before the run ends.
     if (id !== null) {
-      const dead = await revokeAndConfirm({ kit, platform: head.platform, id, value: fresh?.value ?? lendOrUndefined(run.keyref, run.genNew), master });
+      const dead = await revokeAndConfirm({ kit, platform: head.platform, id, at: created?.location ?? store.keyInfo(run.keyref)?.location ?? {}, value: fresh?.value ?? lendOrUndefined(run.keyref, run.genNew), master });
       if (!dead) {
         const attempts = run.attempts + 1;
         store.update(run.runId, { attempts });

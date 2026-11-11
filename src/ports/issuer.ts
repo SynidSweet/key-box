@@ -38,11 +38,25 @@ export interface PlatformKeyInfo {
   readonly name: string;
   /** Where the platform holds it, when the platform has regions or projects (KBOX-51: a revoke is confirmed against this). */
   readonly location?: KeyLocation;
+  /** The platform holds the key switched off: it grants nothing (KBOX-51 counts it as dead). */
+  readonly disabled?: true;
+}
+
+/** The keys a platform holds at one location, and whether the lister read every page of them. */
+export interface KeyListing {
+  /** False when any page could not be read: absence from an incomplete listing proves nothing. */
+  readonly complete: boolean;
+  /** The location the listing is of, as the platform answered it. */
+  readonly at: KeyLocation;
+  readonly keys: readonly PlatformKeyInfo[];
 }
 
 /** Required when `revealOnce` is true. */
 export interface KeyLister {
+  /** Every key the master can see (reconcile's sweep for `kbox_` names). */
   list(master: Lent): Promise<PlatformKeyInfo[]>;
+  /** The keys at one location (region and project), saying whether the listing is complete: what confirms a revoke (KBOX-51 step 10). */
+  listAt(at: KeyLocation, master: Lent): Promise<KeyListing>;
 }
 
 export interface VerifyTarget {

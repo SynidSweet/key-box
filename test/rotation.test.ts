@@ -623,3 +623,25 @@ test('KBOX-17 a master key that cannot be lent during the rollback sends no seco
   assert.deepEqual(heldBy(w), [oldValue, oldValue]);
   assert.deepEqual(await w.live(), [oldId]);
 });
+
+// --- the lister confirms only by a complete listing of the recorded location (review M3) ------------------------------------------
+
+test('KBOX-51 with no verifier call, a lister that answers for another region than the one recorded does not confirm the revoke, even with the key gone; a listing of the right region does', async (t) => {
+  const { w, keyref, oldId } = await seeded(t, { verifier: false });
+  w.faults.listerAt = { region: 'us' };
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  assert.ok(!(await w.live()).includes(oldId), 'the platform did revoke it');
+  assert.equal(genOf(w, keyref, 1)?.status, 'grace', 'but a listing of another region proves nothing');
+  w.faults.listerAt = undefined;
+  w.faults.listingIncomplete = true;
+  w.clock.advance(MINUTE);
+  await w.orch.idle();
+  assert.equal(genOf(w, keyref, 1)?.status, 'grace', 'nor does an incomplete listing of the right region');
+  w.faults.listingIncomplete = false;
+  w.clock.advance(2 * MINUTE);
+  await w.orch.idle();
+  assert.equal(genOf(w, keyref, 1)?.status, 'retired');
+});

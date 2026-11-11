@@ -1,7 +1,7 @@
 // KBOX-51, KBOX-17: the pure parts of the rotation state machine: the order of the steps, the intent name written before any
 // platform call, the grace default, the retry schedule and what proves an old key dead. No I/O: the orchestrator does the work.
-import type { PlatformKeyInfo } from '../ports/issuer.ts';
-import type { PlatformKeyId } from '../ports/types.ts';
+import type { KeyListing } from '../ports/issuer.ts';
+import type { KeyLocation, PlatformKeyId } from '../ports/types.ts';
 
 /** The steps of a run, in order. `issuing` covers create and store; `grace` is the wait before the old key is switched off. */
 export type Step = 'issuing' | 'verifying' | 'pushing' | 'redeploying' | 'checking' | 'promoting' | 'grace' | 'revoking';
@@ -40,13 +40,20 @@ export function retryDelayMs(attempt: number): number {
   return Math.min(RETRY_CAP_MS, RETRY_FIRST_MS * 2 ** Math.min(attempt, 20));
 }
 
-/** What the box saw after a revoke: the verifier's verdict on the old value, or the platform's list. */
+/** What the box saw after a revoke: the verifier's verdict on the old value, or the platform's listing where the key was recorded. */
 export type Evidence =
   | { readonly by: 'verifier'; readonly verdict: 'ok' | 'rejected' | 'unreachable' }
-  | { readonly by: 'lister'; readonly id: PlatformKeyId; readonly listed: readonly PlatformKeyInfo[] | undefined };
+  | { readonly by: 'lister'; readonly id: PlatformKeyId; readonly at: KeyLocation; readonly listing: KeyListing | undefined };
 
-/** A 404 is not proof. Dead means the verifier rejects the value, or the list (a failed one proves nothing) shows the id nowhere. */
+const sameLocation = (a: KeyLocation, b: KeyLocation): boolean => a.region === b.region && a.project === b.project;
+
+/**
+ * A 404 is not proof. Dead means the verifier rejects the value, or a listing that is complete and of the region and project recorded with
+ * the key shows the id absent or disabled. A failed listing, one page of several, or a listing of another location proves nothing.
+ */
 export function confirmDead(evidence: Evidence): boolean {
   if (evidence.by === 'verifier') return evidence.verdict === 'rejected';
-  return evidence.listed !== undefined && !evidence.listed.some((k) => k.platformKeyId === evidence.id);
+  const { listing, id } = evidence;
+  if (listing === undefined || !listing.complete || !sameLocation(listing.at, evidence.at)) return false;
+  return !listing.keys.some((k) => k.platformKeyId === id && k.disabled !== true);
 }

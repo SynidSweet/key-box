@@ -1,7 +1,7 @@
 // One in-memory platform: an issuer, its lister and its verifier over the same set of live keys.
 import type { Random } from '../../src/ports/random.ts';
-import type { Issuer, IssuerCapabilities, IssuedKey, IssueRequest, KeyLister, PlatformKeyInfo, Verifier } from '../../src/ports/issuer.ts';
-import type { KeyClass, Lent, PlatformKeyId, Scope } from '../../src/ports/types.ts';
+import type { Issuer, IssuerCapabilities, IssuedKey, IssueRequest, KeyListing, KeyLister, PlatformKeyInfo, Verifier } from '../../src/ports/issuer.ts';
+import type { KeyClass, KeyLocation, Lent, PlatformKeyId, Scope } from '../../src/ports/types.ts';
 import { lent } from '../kit/index.ts';
 
 const hex = (b: Uint8Array): string => Buffer.from(b).toString('hex');
@@ -63,6 +63,11 @@ export class FakePlatformWorld {
     list: async (master: Lent): Promise<PlatformKeyInfo[]> => {
       await this.#requireMaster(master);
       return [...this.#keys].map(([platformKeyId, { name }]) => ({ platformKeyId, name }));
+    },
+    /** One place holds every key: any location asked for is answered with all of them, in one complete page. */
+    listAt: async (at: KeyLocation, master: Lent): Promise<KeyListing> => {
+      await this.#requireMaster(master);
+      return { complete: true, at, keys: [...this.#keys].map(([platformKeyId, { name }]) => ({ platformKeyId, name, location: at })) };
     },
   };
 

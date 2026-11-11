@@ -3,7 +3,7 @@
 // same stores, which is how a test plays "the process died and started again". Run directly, this file does nothing.
 import type { TestContext } from 'node:test';
 import { join } from 'node:path';
-import type { Issuer, IssuerCapabilities, IssueRequest, IssuedKey, KeyLister, PlatformKeyInfo, Verifier } from '../../src/ports/issuer.ts';
+import type { Issuer, IssuerCapabilities, IssueRequest, IssuedKey, KeyListing, KeyLister, PlatformKeyInfo, Verifier } from '../../src/ports/issuer.ts';
 import type { KeyClass, KeyLocation, Lent, PlatformKeyId, Scope } from '../../src/ports/types.ts';
 import type { Vault } from '../../src/ports/vault.ts';
 import type { EventLog } from '../../src/ports/events.ts';
@@ -37,6 +37,10 @@ export interface Faults {
   vaultPut: boolean;
   /** The master key cannot be lent (the vault refuses it). */
   master: boolean;
+  /** The lister answers a listing of this location whatever it was asked for (a lister that omits the key's region). */
+  listerAt: KeyLocation | undefined;
+  /** The lister's listing says it is not complete (one page of several). */
+  listingIncomplete: boolean;
 }
 
 export interface WorldOptions {
@@ -99,7 +103,7 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
   const push = new FakePush();
   const platform = new FakePlatformWorld(random);
   const trace: string[] = [];
-  const faults: Faults = { issue: false, verifyAt: undefined, revoke404: false, vaultPut: false, master: false };
+  const faults: Faults = { issue: false, verifyAt: undefined, revoke404: false, vaultPut: false, master: false, listerAt: undefined, listingIncomplete: false };
   const regionOf = new Map<PlatformKeyId, string>();
   const recording = { a: new RecordingDestination(trace), redeployer: new RecordingRedeployer(trace) };
 
@@ -123,6 +127,11 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
   };
   const lister: KeyLister = {
     list: async (master: Lent): Promise<PlatformKeyInfo[]> => (await platform.lister.list(master)).map((k) => ({ ...k, location: { region: regionOf.get(k.platformKeyId) ?? 'eu' } satisfies KeyLocation })),
+    listAt: async (at: KeyLocation, master: Lent): Promise<KeyListing> => {
+      const where = faults.listerAt ?? at;
+      const keys = (await lister.list(master)).filter((k) => k.location?.region === where.region && k.location?.project === where.project);
+      return { complete: !faults.listingIncomplete, at: where, keys };
+    },
   };
   const verifier: Verifier = {
     verify: async (key, target) => {
