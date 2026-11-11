@@ -9,6 +9,8 @@ import { hashToken, newToken } from '../../src/pure/tokens.ts';
 import { openCore } from '../../src/shell/core.ts';
 import type { CoreParts } from '../../src/shell/core.ts';
 import { createLendHandler, loadCredentialShapes } from '../../src/shell/lend-core.ts';
+import { createMintedValues } from '../../src/shell/minted-values.ts';
+import type { MintedValues } from '../../src/shell/minted-values.ts';
 import { createLendClient, createLendServer } from '../../src/shell/lend-socket.ts';
 import type { LendClient, LendServer } from '../../src/shell/lend-socket.ts';
 import { TimedClock, seededRandom, tempDir } from '../kit/index.ts';
@@ -21,6 +23,10 @@ export interface NewKey {
   readonly cls?: KeyClass;
   readonly grants?: readonly string[];
   readonly gen?: number;
+  /** The key's own allow set (meta rows); none leaves it to the profile's whole list. */
+  readonly allowRules?: readonly string[];
+  /** False leaves the value out of the vault, as a key whose generation is not stored yet. */
+  readonly stored?: boolean;
 }
 
 export interface LendWorld {
@@ -30,6 +36,10 @@ export interface LendWorld {
   readonly socket: string;
   readonly server: LendServer;
   readonly client: LendClient;
+  /** The fixed codes core's lend handler journalled. */
+  readonly journal: readonly string[];
+  /** Core's registry of live minted values: what a platform adapter calls (KBOX-14). */
+  readonly minted: MintedValues;
   /** Enrols a machine and returns its pass. */
   enrol(label: string, scope?: 'relay' | 'control'): string;
   addKey(key: NewKey): void;
@@ -40,7 +50,9 @@ export async function lendWorld(t: TestContext, registry: readonly PlatformEntry
   const clock = new TimedClock(1_000_000);
   const random = seededRandom(11);
   const core = openCore({ stateDir: join(dir, 'state'), clock, scheduler: clock, random });
-  const handler = createLendHandler({ meta: core.meta, tokens: core.meta, vault: core.vault, audit: core.audit, events: core.events, registry, shapes: loadCredentialShapes(), clock });
+  const minted = createMintedValues(clock);
+  const journal: string[] = [];
+  const handler = createLendHandler({ meta: core.meta, tokens: core.meta, vault: core.vault, audit: core.audit, events: core.events, registry, shapes: loadCredentialShapes(), clock, minted, journal: (code) => void journal.push(code) });
   const server = createLendServer(handler);
   const socket = join(dir, 'lend.sock');
   await server.listen(socket);
@@ -55,6 +67,8 @@ export async function lendWorld(t: TestContext, registry: readonly PlatformEntry
     socket,
     server,
     client: createLendClient(socket),
+    journal,
+    minted,
     enrol: (label, scope = 'relay') => seedPass(core, label, scope, random, clock.now()),
     addKey: (key) => seedKey(core, key),
   };
@@ -82,6 +96,7 @@ export function seedKey(core: CoreParts, key: NewKey): void {
     coverage: null,
     last_use_at: null,
   });
-  core.vault.put(key.keyref, gen, key.value);
+  if (key.stored !== false) core.vault.put(key.keyref, gen, key.value);
+  for (const rule of key.allowRules ?? []) core.meta.putAllowRule(key.keyref, rule);
   for (const machine of key.grants ?? []) core.meta.putGrant(key.keyref, machine);
 }

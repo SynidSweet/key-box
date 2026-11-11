@@ -19,6 +19,7 @@ import { createResponseScanner, parseCredentialShapes } from '../pure/scanner.ts
 import type { CredentialShapes, ResponseScanner } from '../pure/scanner.ts';
 import { findTokenHash } from '../pure/tokens.ts';
 import type { LendHandler, LendSession } from './lend-socket.ts';
+import type { MintedValues } from './minted-values.ts';
 
 export interface LendCoreDeps {
   readonly meta: MetaStore;
@@ -30,6 +31,10 @@ export interface LendCoreDeps {
   readonly registry: readonly PlatformEntry[];
   readonly shapes: CredentialShapes;
   readonly clock: Clock;
+  /** Live minted values the scanner holds next to the stored ones (KBOX-14); adapters add to it. */
+  readonly minted: MintedValues;
+  /** A fixed code when core could not do part of its job. Never text of a value or a key. */
+  readonly journal: (code: string) => void;
 }
 
 type Checked<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly code: LendRefusal };
@@ -57,37 +62,60 @@ export function createLendHandler(deps: LendCoreDeps): LendHandler {
     return key !== undefined && key.grants.some((g) => g.machine === record.label) ? { ok: true, value: key } : { ok: false, code: 'forbidden' };
   };
 
-  /** KBOX-3: only an admin key with a relay profile, and only for a rule of that profile, is ever lent. */
+  /**
+   * KBOX-3: only an admin key with a relay profile, and only for a rule of that profile, is ever lent. A key's own allow set,
+   * when it has one, narrows the profile's list (an unset one leaves the whole list); it never widens it.
+   */
   const lendable = (key: MetaKey, ruleId: string): boolean => {
     if (key.class !== 'admin') return false;
     const profile = profileOf(key.platform);
-    return profile !== undefined && profile.allow.some((r) => r.id === ruleId);
+    if (profile === undefined || !profile.allow.some((r) => r.id === ruleId)) return false;
+    return key.allow_rules.length === 0 || key.allow_rules.includes(ruleId);
   };
 
-  /** The forms of one stored generation; none for a generation the vault no longer has. */
-  const formsOfStored = async (keyref: string, gen: number): Promise<readonly Form[]> => {
+  /** What the vault holds for one generation: its forms, nothing (not stored), or a value no form can be built of. */
+  type Stored = { readonly kind: 'forms'; readonly forms: readonly Form[] } | { readonly kind: 'absent' } | { readonly kind: 'unbuildable' };
+
+  const formsOfStored = async (keyref: string, gen: number): Promise<Stored> => {
     let lent;
     try {
       lent = deps.vault.lend(keyref, gen);
     } catch (error) {
-      if (error instanceof VaultError && error.failure === 'unknown_key') return [];
+      if (error instanceof VaultError && error.failure === 'unknown_key') return { kind: 'absent' };
       throw error;
     }
     return lent.use((bytes) => {
       const result = scanForms(Buffer.from(bytes).toString('utf8'));
-      return Promise.resolve(result.ok ? result.forms : []);
+      return Promise.resolve<Stored>(result.ok ? { kind: 'forms', forms: result.forms } : { kind: 'unbuildable' });
     });
   };
+  /** Only built forms are kept: a generation not stored yet, or one that failed, is looked at again the next time. */
   const formsCache = new Map<string, readonly Form[]>();
-  /** The forms of every live value: the current generation of each key and the one before it while it may still work. */
+  const storedForms = async (keyref: string, gen: number): Promise<Stored> => {
+    const id = `${keyref}:${gen}`;
+    const cached = formsCache.get(id);
+    if (cached !== undefined) return { kind: 'forms', forms: cached };
+    const stored = await formsOfStored(keyref, gen);
+    if (stored.kind === 'forms') formsCache.set(id, stored.forms);
+    return stored;
+  };
+
+  /** Fail closed (KBOX-14): a key whose current value cannot be scanned is neither lent nor scanned for, and the journal says so. */
+  const scannable = async (key: MetaKey): Promise<boolean> => {
+    const current = await storedForms(key.keyref, key.gen_current);
+    if (current.kind === 'forms') return true;
+    deps.journal('forms_unbuildable');
+    return false;
+  };
+
+  /** The forms of every live value: the current generation of each key and the one before it while it may still work, and the minted values. */
   const heldForms = async (): Promise<readonly Form[]> => {
-    const all: Form[] = [];
+    const all: Form[] = [...deps.minted.forms()];
     for (const key of deps.meta.snapshot().keys) {
       for (const gen of [key.gen_current, key.gen_current - 1].filter((g) => g >= 1)) {
-        const id = `${key.keyref}:${gen}`;
-        const forms = formsCache.get(id) ?? (await formsOfStored(key.keyref, gen));
-        formsCache.set(id, forms);
-        all.push(...forms);
+        const stored = await storedForms(key.keyref, gen);
+        if (stored.kind === 'forms') all.push(...stored.forms);
+        else if (stored.kind === 'unbuildable') deps.journal('forms_unbuildable');
       }
     }
     return all;
@@ -132,7 +160,7 @@ export function createLendHandler(deps: LendCoreDeps): LendHandler {
       }
       case 'lend': {
         const key = grantedKey(record.value, request.keyref);
-        if (!key.ok || !lendable(key.value, request.rule_id)) return session.reply(refusalMessage('forbidden'));
+        if (!key.ok || !lendable(key.value, request.rule_id) || !(await scannable(key.value))) return session.reply(refusalMessage('forbidden'));
         return deps.vault.lend(key.value.keyref, key.value.gen_current).use((bytes) => {
           session.replyBytes(bytes);
           return Promise.resolve();
@@ -140,7 +168,7 @@ export function createLendHandler(deps: LendCoreDeps): LendHandler {
       }
       case 'scan': {
         const key = grantedKey(record.value, request.keyref);
-        if (!key.ok) return session.reply(refusalMessage('forbidden'));
+        if (!key.ok || !(await scannable(key.value))) return session.reply(refusalMessage('forbidden'));
         const scanner = createResponseScanner(await heldForms(), deps.shapes);
         session.reply(acceptedMessage());
         return runScan(session, scanner);

@@ -102,6 +102,8 @@ export interface MetaStore {
   putKey(key: KeyRow): void;
   putDestination(keyref: string, destination: MetaDestination): void;
   putGrant(keyref: string, machine: string): void;
+  /** Adds a rule id to the key's own allow set (KBOX-3: when the set is not empty, the relay lends only for its rules). Writes `key.changed`. */
+  putAllowRule(keyref: string, ruleId: string): void;
   /** Removes a grant; `not_found` when there was none. Writes `key.changed`. */
   removeGrant(keyref: string, machine: string): void;
   /** Removes a destination; `not_found` when there was none. Writes `key.changed`. */

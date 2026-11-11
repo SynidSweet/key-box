@@ -15,6 +15,7 @@ import { openCore } from './shell/core.ts';
 import { createApiServer } from './shell/http.ts';
 import { createLendHandler, loadCredentialShapes } from './shell/lend-core.ts';
 import { createLendServer } from './shell/lend-socket.ts';
+import { createMintedValues } from './shell/minted-values.ts';
 import { createShareWriter, shareRoute } from './shell/share-writer.ts';
 import { createMetaShareSource } from './shell/share-source.ts';
 import { createPush } from './shell/push.ts';
@@ -91,8 +92,10 @@ async function main(): Promise<void> {
     journal,
   });
   await server.listen(config.socket);
+  // Platform adapters register the short-lived values they mint here, so the scanner holds them while they live (KBOX-14).
+  const minted = createMintedValues(systemClock);
   const lend = createLendServer(
-    createLendHandler({ meta: parts.meta, tokens: approve?.tokens.tokenStore ?? parts.meta, vault: parts.vault, audit: parts.audit, events: parts.events, registry: REGISTRY, shapes: loadCredentialShapes(), clock: systemClock }),
+    createLendHandler({ meta: parts.meta, tokens: approve?.tokens.tokenStore ?? parts.meta, vault: parts.vault, audit: parts.audit, events: parts.events, registry: REGISTRY, shapes: loadCredentialShapes(), clock: systemClock, minted, journal }),
     journal,
   );
   if (config.lendSocket === undefined) journal('no_lend_socket');

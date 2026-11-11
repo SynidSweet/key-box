@@ -224,3 +224,91 @@ test('KBOX-3 the relay with core down answers 503 unavailable and journals fixed
   assert.deepEqual([...w.journal], ['lend_unavailable', 'audit_unavailable']);
   w.canary.assertAbsent({ 'relay journal': w.journal.join('\n'), reply: reply.body });
 });
+
+// ---------------------------------------------------------------- the key's own allow set (KBOX-3, KBOX-25)
+
+test('KBOX-3 a key with its own allow set is lent only for a rule in that set; with none set it gets the profile list', async (t) => {
+  const { w, pass } = await granted(t);
+  w.addKey({ keyref: 'narrowkey1', value: Buffer.from('NarrowKeyValue0123456789abcdefgh'), grants: ['laptop'], allowRules: ['model-get'] });
+  assert.equal((await lendOf(w, pass, 'narrowkey1', 'model-get')).ok, true, 'a rule in the key set');
+  assert.deepEqual(await lendOf(w, pass, 'narrowkey1', 'models-list'), { ok: false, code: 'forbidden' }, 'a profile rule outside the key set');
+  assert.deepEqual(await lendOf(w, pass, 'narrowkey1', 'no-such-rule'), { ok: false, code: 'forbidden' });
+  assert.equal((await lendOf(w, pass, 'adminkey1', 'models-list')).ok, true, 'a key with no set of its own gets the profile list');
+  assert.equal((await lendOf(w, pass, 'adminkey1', 'model-get')).ok, true);
+});
+
+test('KBOX-3 through the relay: a request matching a profile rule outside the key set is 403 with no upstream call; one inside the set passes', async (t) => {
+  const w = await relayWorld(t);
+  w.lend.addKey({ keyref: 'narrowkey1', value: Buffer.from('NarrowKeyValue0123456789abcdefgh'), grants: ['laptop'], allowRules: ['model-get'] });
+  const outside = await w.call('/r/narrowkey1/v1/models');
+  assert.deepEqual([outside.status, outside.body.toString()], [403, relayErrorBody('forbidden')]);
+  assert.equal(w.upstream.requests.length, 0);
+  const inside = await w.call('/r/narrowkey1/v1/models/gpt-4');
+  assert.equal(inside.status, 200);
+  assert.equal(w.upstream.requests.length, 1);
+});
+
+// ---------------------------------------------------------------- minted values (KBOX-14, KBOX-41)
+
+/** Whether a scan session over `text` cuts it. A clean stream is released whole at its end. */
+async function cutsStream(w: LendWorld, pass: string, text: string): Promise<boolean> {
+  const opened = await w.client.scan({ op: 'scan', token_hash: hashToken(pass), keyref: 'adminkey1' });
+  assert.ok(opened.ok);
+  try {
+    const step = await opened.session.feed(Buffer.from(text));
+    return step.kind === 'hit' || (await opened.session.end()).kind === 'hit';
+  } finally {
+    opened.session.close();
+  }
+}
+
+const MINTED = 'Zm9vYmFy/cXV4+QmF6eHl6MDEyMzQ1Njc4OQ9aB';
+/** The minted value as an upstream echo might carry it: the forms the scanner knows. */
+const MINTED_FORMS: Readonly<Record<string, string>> = {
+  raw: MINTED,
+  'JSON-escaped': MINTED.replaceAll('/', '\\/'),
+  base64: Buffer.from(MINTED).toString('base64'),
+  'base64 shifted by one byte': Buffer.from(`x${MINTED}`).toString('base64'),
+  percent: encodeURIComponent(MINTED),
+  '\\u-escaped': [...MINTED].map((c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`).join(''),
+};
+
+test('KBOX-14 a minted value is cut in every form the scanner knows while it lives, and is no longer held after it expires', async (t) => {
+  const { w, pass } = await granted(t);
+  const expiresAt = w.clock.now() + 60_000;
+  for (const [name, form] of Object.entries(MINTED_FORMS)) assert.equal(await cutsStream(w, pass, `{"echo":"${form}"}`), false, `${name}: not held before it is registered`);
+  w.minted.add('adminkey1', Buffer.from(MINTED), expiresAt);
+  for (const [name, form] of Object.entries(MINTED_FORMS)) assert.equal(await cutsStream(w, pass, `{"echo":"${form}"}`), true, `${name}: held while it lives`);
+  w.clock.advance(59_999);
+  assert.equal(await cutsStream(w, pass, `{"echo":"${MINTED}"}`), true, 'still held one millisecond before expiry');
+  w.clock.advance(1);
+  for (const [name, form] of Object.entries(MINTED_FORMS)) assert.equal(await cutsStream(w, pass, `{"echo":"${form}"}`), false, `${name}: dropped at expiry`);
+});
+
+test('KBOX-14 a minted value the scanner cannot build forms of (empty, a NUL byte, one byte) is refused when it is added, so it is never injected unscanned', async (t) => {
+  const { w } = await granted(t);
+  for (const value of [Buffer.alloc(0), Buffer.from('ab\0cd'), Buffer.from('a')]) {
+    assert.throws(() => w.minted.add('adminkey1', value, w.clock.now() + 1000), RangeError);
+  }
+});
+
+// ---------------------------------------------------------------- forms that cannot be built (KBOX-14, fail closed)
+
+test('KBOX-14 a generation that is not in the vault yet is scanned from the moment it is stored: an empty result is never cached', async (t) => {
+  const { w, pass } = await granted(t);
+  w.addKey({ keyref: 'latekey001', value: Buffer.from('LateValue0123456789abcdefghijklmn'), stored: false });
+  assert.equal(await cutsStream(w, pass, '{"echo":"LateValue0123456789abcdefghijklmn"}'), false, 'nothing to match yet');
+  w.core.vault.put('latekey001', 1, Buffer.from('LateValue0123456789abcdefghijklmn'));
+  assert.equal(await cutsStream(w, pass, '{"echo":"LateValue0123456789abcdefghijklmn"}'), true);
+});
+
+test('KBOX-14 a key whose forms cannot be built is refused for lend and scan, with a fixed journal code; other keys are still scanned', async (t) => {
+  const { w, pass, value } = await granted(t);
+  w.addKey({ keyref: 'nulkey0001', value: Buffer.from('ab\0cd'), grants: ['laptop'] });
+  assert.deepEqual(await lendOf(w, pass, 'nulkey0001'), { ok: false, code: 'forbidden' });
+  assert.deepEqual(await w.client.scan({ op: 'scan', token_hash: hashToken(pass), keyref: 'nulkey0001' }), { ok: false, code: 'forbidden' });
+  assert.deepEqual([...new Set(w.journal)], ['forms_unbuildable']);
+  const other = await lendOf(w, pass, 'adminkey1');
+  assert.equal(other.ok, true, 'another key is lent as before');
+  assert.equal(await cutsStream(w, pass, `{"echo":"${Buffer.from(value).toString()}"}`), true, 'and its value is still held by the scan');
+});

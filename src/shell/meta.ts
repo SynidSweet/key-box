@@ -43,6 +43,7 @@ const KEY_SCHEMA = {
 } as const;
 const DESTINATION_SCHEMA = { keyref: text(NAME), kind: text(NAME), target: text(NAME), readable_by: oneOf('api', 'runtime') } as const;
 const GRANT_SCHEMA = { keyref: text(NAME), machine: text(LABEL) } as const;
+const ALLOW_RULE_SCHEMA = { keyref: text(NAME), rule_id: text(NAME) } as const;
 const MACHINE_SCHEMA = { label: text(LABEL), scope: oneOf('control', 'relay'), token_sha256: text(/^[0-9a-f]{64}$/), enrolled_at: int() } as const;
 const APPROVAL_SCHEMA = { approval_id: text(NAME), kind: text(CODE), title: text(TITLE), slot: text(NAME), opened_at: int(), expires_at: int() } as const;
 /** A raw 32-byte Ed25519 public key as base64: 43 characters and one `=`. */
@@ -187,6 +188,14 @@ export function createMetaStore(db: DatabaseSync, clock: Clock, hub: EventSignal
       write(() => {
         db.prepare('INSERT OR IGNORE INTO grants (keyref, machine) VALUES (?, ?)').run(g.keyref, g.machine);
         keyChanged(g.keyref);
+      });
+    },
+
+    putAllowRule(keyref: string, ruleId: string): void {
+      const r = closed(parseObject(ALLOW_RULE_SCHEMA, { keyref, rule_id: ruleId }));
+      write(() => {
+        db.prepare('INSERT OR IGNORE INTO allow_rules (keyref, rule_id) VALUES (?, ?)').run(r.keyref, r.rule_id);
+        keyChanged(r.keyref);
       });
     },
 
