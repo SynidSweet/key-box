@@ -83,6 +83,8 @@ export interface RelayReply {
   readonly body: Buffer;
   /** False when the relay cut the stream (the body ended without its framing end). */
   readonly complete: boolean;
+  /** Response trailers as the caller received them. */
+  readonly trailers: Readonly<Record<string, string | undefined>>;
 }
 
 export interface CallOptions {
@@ -95,6 +97,8 @@ export interface CallOptions {
   readonly body?: Uint8Array;
   /** Request trailers (the body is sent chunked). */
   readonly trailers?: Readonly<Record<string, string>>;
+  /** Called with the running count of body bytes received, after each piece. */
+  readonly onBody?: (received: number) => void;
 }
 
 export interface RelayWorld {
@@ -152,10 +156,15 @@ export async function relayWorld(t: TestContext, options: RelayWorldOptions = {}
       const req = request({ socketPath: socket, method: call.method ?? 'GET', path, headers }, (res) => {
         const chunks: Buffer[] = [];
         let finished = false;
-        res.on('data', (d: Buffer) => chunks.push(d));
+        let received = 0;
+        res.on('data', (d: Buffer) => {
+          chunks.push(d);
+          received += d.length;
+          call.onBody?.(received);
+        });
         res.on('end', () => (finished = res.complete));
         res.on('error', () => void (finished = false));
-        res.on('close', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks), complete: finished }));
+        res.on('close', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks), complete: finished, trailers: res.trailers }));
       });
       req.on('error', reject);
       if (call.body !== undefined) req.write(call.body);

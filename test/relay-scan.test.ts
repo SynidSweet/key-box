@@ -7,8 +7,12 @@ import { scanForms } from '../src/pure/forms.ts';
 import type { Form } from '../src/pure/forms.ts';
 import { createResponseScanner, parseCredentialShapes } from '../src/pure/scanner.ts';
 import type { CredentialShapes, ResponseScanner } from '../src/pure/scanner.ts';
-import { checkProperty, seedFor } from './kit/index.ts';
+import type { AuditRow } from '../src/ports/audit.ts';
+import { relayErrorBody, upstreamRefusedBody } from '../src/pure/relay-errors.ts';
+import { checkProperty, seedFor, waitUntil } from './kit/index.ts';
 import type { SeededRandom } from './kit/index.ts';
+import { relayWorld } from './support/relay-world.ts';
+import type { RelayReply, RelayWorld } from './support/relay-world.ts';
 
 const shapesParsed = parseCredentialShapes(JSON.parse(readFileSync(new URL('../src/data/credential-shapes.json', import.meta.url), 'utf8')) as unknown);
 if (!shapesParsed.ok) throw new Error('src/data/credential-shapes.json does not parse');
@@ -237,4 +241,211 @@ test('KBOX-14 property: random JSON with one planted copy of a held value at a r
     const body = bytes(`{${parts.join(',')}}`);
     assert.notEqual(run(scannerFor(), randomChunks(body, rng)).hit, undefined);
   });
+});
+
+// ---------------------------------------------------------------- through the running relay
+
+const MODELS = '/r/adminkey1/v1/models';
+const heldText = (w: RelayWorld): string => Buffer.from(w.value).toString('utf8');
+/** The longest form of the held value minus 1: the stripped characters the scanner holds back at the end of a stream. */
+const holdOf = (w: RelayWorld): number => Math.max(...formsOf(heldText(w)).map((f) => f.bytes.length)) - 1;
+const WITHHELD = relayErrorBody('withheld');
+const relayRows = (w: RelayWorld): readonly AuditRow[] => w.lend.core.audit.read(0).entries.filter((r) => r.action === 'relay.request');
+const settledRow = async (w: RelayWorld, count = 1): Promise<AuditRow> => {
+  await waitUntil(() => relayRows(w).length >= count, 'the relay audit row');
+  const row = relayRows(w)[count - 1];
+  if (row === undefined) throw new Error('no row');
+  return row;
+};
+const notices = (w: RelayWorld): readonly unknown[] => w.lend.core.events.after(0).filter((e) => e.kind === 'box.notice').map((e) => e.data);
+/** Header names the HTTP layer itself adds to every answer, not chosen by the relay. */
+const FRAMING = new Set(['date', 'connection', 'keep-alive', 'transfer-encoding']);
+const chosenHeaders = (headers: RelayReply['headers']): string[] => Object.keys(headers).filter((h) => !FRAMING.has(h)).sort();
+const FORCED = ['content-disposition', 'content-security-policy', 'x-content-type-options'];
+
+test('KBOX-14 a 206, and a 200 carrying Content-Range, are 502 withheld with zero body bytes sent, audit reason partial and no owner notice', async (t) => {
+  const w = await relayWorld(t);
+  w.upstream.respond((_req, res) => {
+    res.writeHead(206, { 'content-type': 'text/plain', 'content-range': 'bytes 0-9/100' });
+    res.end('0123456789');
+  });
+  const partial = await w.call(MODELS);
+  assert.deepEqual([partial.status, partial.body.toString()], [502, WITHHELD]);
+  assert.equal((await settledRow(w)).detail['reason'], 'partial');
+  w.upstream.respond((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain', 'content-range': 'bytes 0-9/100' });
+    res.end('0123456789');
+  });
+  const ranged = await w.call(MODELS);
+  assert.deepEqual([ranged.status, ranged.body.toString()], [502, WITHHELD]);
+  assert.equal((await settledRow(w, 2)).detail['reason'], 'partial');
+  assert.deepEqual(notices(w), []);
+});
+
+test('KBOX-14 Content-Encoding: gzip (body holding the value) and "gzip, identity" are 502 withheld with zero body bytes; identity passes', async (t) => {
+  const w = await relayWorld(t);
+  for (const encoding of ['gzip', 'gzip, identity', 'br']) {
+    w.upstream.respond((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': encoding });
+      res.end(`{"k":"${heldText(w)}"}`);
+    });
+    const reply = await w.call(MODELS);
+    assert.deepEqual([reply.status, reply.body.toString()], [502, WITHHELD], encoding);
+  }
+  assert.equal((await settledRow(w, 3)).detail['reason'], 'encoded');
+  w.upstream.respond((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'identity' });
+    res.end('{"ok":true}');
+  });
+  const plain = await w.call(MODELS);
+  assert.deepEqual([plain.status, plain.body.toString()], [200, '{"ok":true}']);
+});
+
+test('KBOX-14 an upstream 401 or 403 whose body quotes a key hint keeps its status and gets the fixed body, without WWW-Authenticate', async (t) => {
+  const w = await relayWorld(t);
+  const held = heldText(w);
+  for (const status of [401, 403]) {
+    w.upstream.respond((_req, res) => {
+      res.writeHead(status, { 'content-type': 'application/json', 'www-authenticate': `Bearer realm="${held}"` });
+      res.end(`{"error":{"message":"Incorrect API key provided: ${held.slice(0, 6)}...${held.slice(-4)}"}}`);
+    });
+    const reply = await w.call(MODELS);
+    assert.deepEqual([reply.status, reply.body.toString(), reply.headers['www-authenticate']], [status, upstreamRefusedBody(), undefined]);
+  }
+});
+
+test('KBOX-14 response headers are exactly the allow-list plus the three forced ones: Set-Cookie, Server and unlisted headers are dropped', async (t) => {
+  const w = await relayWorld(t);
+  w.upstream.respond((_req, res) => {
+    res.writeHead(200, {
+      'content-type': 'application/json',
+      'content-length': '11',
+      'x-request-id': 'req_123',
+      'x-ratelimit-remaining': '99',
+      'retry-after': '3',
+      'set-cookie': 'sid=1; Secure',
+      server: 'upstream/1.0',
+      'x-powered-by': 'php',
+      'access-control-allow-origin': '*',
+      'x-other': 'x',
+    });
+    res.end('{"ok":true}');
+  });
+  const reply = await w.call(MODELS);
+  assert.deepEqual(chosenHeaders(reply.headers), [...FORCED, 'content-length', 'content-type', 'retry-after', 'x-ratelimit-remaining', 'x-request-id'].sort());
+  assert.deepEqual([reply.headers['x-content-type-options'], reply.headers['content-security-policy'], reply.headers['content-disposition']], ['nosniff', "sandbox; default-src 'none'", 'attachment']);
+  assert.equal(reply.body.toString(), '{"ok":true}');
+  const refused = await w.call('/r/adminkey1/v1/organization/admin_api_keys', { method: 'POST' });
+  assert.deepEqual([refused.status, ...FORCED.map((h) => refused.headers[h] !== undefined)], [403, true, true, true]);
+});
+
+test('KBOX-14 a held value in an allowed header, or split across the last header and the body, is 502 withheld; the audit row and an owner notice follow', async (t) => {
+  const w = await relayWorld(t);
+  const held = heldText(w);
+  w.upstream.respond((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json', 'x-request-id': held });
+    res.end('{}');
+  });
+  const inHeader = await w.call(MODELS);
+  assert.deepEqual([inHeader.status, inHeader.body.toString()], [502, WITHHELD]);
+  w.upstream.respond((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json', 'x-request-id': held.slice(0, 16) });
+    res.end(held.slice(16));
+  });
+  const split = await w.call(MODELS);
+  assert.deepEqual([split.status, split.body.toString()], [502, WITHHELD]);
+  const row = await settledRow(w, 2);
+  assert.deepEqual([row.detail['code'], row.detail['reason'], row.detail['status']], ['withheld', 'value', 502]);
+  await waitUntil(() => notices(w).length === 2, 'two notices');
+  w.canary.assertAbsent(w.journal.join('\n'), 'relay journal');
+});
+
+test('KBOX-14 a credential shape in the body is withheld with audit reason credential', async (t) => {
+  const w = await relayWorld(t);
+  w.upstream.respond((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(`{"key":"sk-${'A1b2'.repeat(10)}"}`);
+  });
+  const reply = await w.call(MODELS);
+  assert.deepEqual([reply.status, reply.body.toString()], [502, WITHHELD]);
+  assert.equal((await settledRow(w)).detail['reason'], 'credential');
+});
+
+test('KBOX-14 a hit after the head was sent cuts the stream: the caller gets no byte of the copy and upstream is disconnected', async (t) => {
+  const w = await relayWorld(t);
+  const lead = Buffer.from(`{"pad":"${'p'.repeat(256 * 1024)}","k":"`);
+  let headSeen: () => void = () => undefined;
+  const seen = new Promise<void>((resolve) => (headSeen = resolve));
+  let upstreamClosed = false;
+  w.upstream.respond(async (_req, res) => {
+    res.socket?.once('close', () => (upstreamClosed = true));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.write(lead);
+    await seen;
+    res.write(`${heldText(w)}"}`);
+    for (let i = 0; i < 64 && !upstreamClosed; i += 1) {
+      await new Promise<void>((resolve) => res.write('x'.repeat(64 * 1024), () => resolve()));
+    }
+    res.end();
+  });
+  const reply = await w.call(MODELS, { onBody: () => headSeen() });
+  assert.deepEqual([reply.status, reply.complete], [200, false]);
+  assert.ok(reply.body.length <= lead.length, `sent ${reply.body.length} > copy start ${lead.length}`);
+  assert.ok(lead.subarray(0, reply.body.length).equals(reply.body), 'what was sent is a prefix of the clean lead');
+  await waitUntil(() => upstreamClosed, 'the upstream connection to close');
+  assert.equal((await settledRow(w)).detail['reason'], 'value');
+});
+
+type Cut = 'reset' | 'close without terminal chunk' | 'fewer bytes than Content-Length';
+const CUTS: readonly Cut[] = ['reset', 'close without terminal chunk', 'fewer bytes than Content-Length'];
+
+test('KBOX-14 a cut stream ends with no tail: after a prefix of the held value and a reset, early close or short body, no held byte reaches the caller, in each form', async (t) => {
+  const w = await relayWorld(t);
+  const held = heldText(w);
+  const lead = Buffer.from(`{"pad":"${'p'.repeat(4096)}","k":"`);
+  for (const [name, encode] of Object.entries(ENCODINGS)) {
+    const form = encode(held);
+    const prefix = Buffer.from(form.slice(0, Math.floor(form.length / 2)));
+    const sent = Buffer.concat([lead, prefix]);
+    for (const cut of CUTS) {
+      let bodySeen: () => void = () => undefined;
+      const seen = new Promise<void>((resolve) => (bodySeen = resolve));
+      w.upstream.respond(async (_req, res) => {
+        res.writeHead(200, cut === 'fewer bytes than Content-Length' ? { 'content-type': 'application/json', 'content-length': String(sent.length + 100) } : { 'content-type': 'application/json' });
+        res.write(lead);
+        await seen;
+        res.write(prefix, () => {
+          if (cut === 'reset') res.socket?.resetAndDestroy();
+          else res.socket?.end();
+        });
+      });
+      const reply = await w.call(MODELS, { onBody: () => bodySeen() });
+      assert.deepEqual([reply.status, reply.complete], [200, false], `${name}, ${cut}: the caller sees a cut, not a clean end`);
+      assert.ok(reply.body.length <= sent.length - holdOf(w), `${name}, ${cut}: ${reply.body.length} bytes reached the caller, past ${sent.length - holdOf(w)}`);
+      assert.ok(sent.subarray(0, reply.body.length).equals(reply.body), `${name}, ${cut}: a prefix of what upstream sent`);
+    }
+  }
+});
+
+test('KBOX-14 a clean end releases the held tail: a prefix of the held value and a decoy candidate at the very end arrive whole', async (t) => {
+  const w = await relayWorld(t);
+  const body = `{"pad":"${'p'.repeat(4096)}","k":"${heldText(w).slice(0, 20)}","d":"sk-short`;
+  w.upstream.respond((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(body);
+  });
+  const reply = await w.call(MODELS);
+  assert.deepEqual([reply.status, reply.complete, reply.body.toString()], [200, true, body]);
+});
+
+test('KBOX-14 a response trailer carrying the held value is not passed; the body arrives whole', async (t) => {
+  const w = await relayWorld(t);
+  w.upstream.respond((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json', trailer: 'x-trail' });
+    res.write('{"ok":');
+    res.addTrailers({ 'x-trail': heldText(w) });
+    res.end('true}');
+  });
+  const reply = await w.call(MODELS);
+  assert.deepEqual([reply.status, reply.complete, reply.body.toString(), reply.trailers, reply.headers['trailer']], [200, true, '{"ok":true}', {}, undefined]);
 });

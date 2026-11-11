@@ -97,7 +97,8 @@ export function createLendHandler(deps: LendCoreDeps): LendHandler {
   const writeAudit = (row: RelayAuditRow): void => {
     const { label, keyref, route, ...detail } = row;
     deps.audit.append({ action: 'relay.request', subject: keyref ?? (route === 'grants' ? '/r/_/grants' : 'unmatched'), actor: label ?? 'box', at: deps.clock.now(), detail: { route, ...detail } });
-    if (row.code === 'withheld') deps.events.append('box.notice', NOTICE);
+    // KBOX-14: the owner notice follows a hit (a value or a credential shape), not a refused partial or encoded answer.
+    if (row.code === 'withheld' && (row.reason === 'value' || row.reason === 'credential')) deps.events.append('box.notice', NOTICE);
   };
 
   const handle = async (session: LendSession, request: LendRequest): Promise<void> => {
