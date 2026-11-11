@@ -118,6 +118,11 @@ export function createMetaStore(db: DatabaseSync, clock: Clock, hub: EventSignal
   return {
     epoch: () => (db.prepare('SELECT epoch FROM box_info').get() as { epoch: string }).epoch,
 
+    setRelease(release) {
+      if (!/^[0-9a-f]{64}$/.test(release)) throw new RangeError('a release is a 64-hex content hash');
+      db.prepare('UPDATE box_info SET release = ?').run(release);
+    },
+
     snapshot: () => inReadTransaction(db, () => readSnapshot(db)),
 
     putKey(key: KeyRow): void {

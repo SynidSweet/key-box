@@ -35,17 +35,24 @@ export interface UpdaterDeps {
 export interface Updater {
   readonly routes: readonly Route[];
   readonly executor: Executor;
-  /** H0: the release `current` points at. */
+  /** H0: the release `current` points at; throws when `current` is not a release. */
   release(): string;
+  /** H0, or undefined when `current` is missing or not a release (a development run). */
+  running(): string | undefined;
   /** Reads root's answers to the installs it waits for; emits `update.state` and ends each approval. */
   settle(): void;
 }
 
 export function createUpdater(deps: UpdaterDeps): Updater {
-  const release = (): string => {
+  const running = (): string | undefined => {
+    if (!existsSync(deps.currentLink)) return undefined;
     const target = realpathSync(deps.currentLink);
     const h0 = basename(target);
-    if (!RELEASE_HASH.test(h0) || basename(dirname(target)) !== 'releases') throw new Error('current is not a release');
+    return RELEASE_HASH.test(h0) && basename(dirname(target)) === 'releases' ? h0 : undefined;
+  };
+  const release = (): string => {
+    const h0 = running();
+    if (h0 === undefined) throw new Error('current is not a release');
     return h0;
   };
 
@@ -111,5 +118,5 @@ export function createUpdater(deps: UpdaterDeps): Updater {
     }
   };
 
-  return { routes: [intakeRoute], executor, release, settle };
+  return { routes: [intakeRoute], executor, release, running, settle };
 }

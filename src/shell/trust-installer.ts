@@ -40,6 +40,8 @@ export function writeRootRequest(stagingDir: string, name: string, request: obje
 export function createTrustInstaller(deps: TrustInstallerDeps): TrustPort {
   return {
     async apply(request: TrustRequest): Promise<TrustResult> {
+      // The bootstrap's tmpfiles line makes the results directory together with kb-install; without it no root answers.
+      if (!existsSync(deps.resultsDir)) return { result: 'refused', code: 'no_installer' };
       const name = `trust-${Buffer.from(deps.random.bytes(12)).toString('base64url')}`;
       writeRootRequest(deps.stagingDir, name, request);
       const resultFile = join(deps.resultsDir, `${name}.result`);

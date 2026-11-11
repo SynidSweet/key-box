@@ -84,6 +84,8 @@ export interface NewMachine {
 export interface MetaStore {
   /** The epoch chosen when meta.db was created. */
   epoch(): string;
+  /** Records the running release H (KBOX-6): `/healthz` and `GET /api/meta` show it. Core sets it at every start. */
+  setRelease(release: string): void;
   /** Everything GET /api/meta shows, read in one transaction, with the event cursor of that same moment. */
   snapshot(): MetaSnapshot;
   putKey(key: KeyRow): void;

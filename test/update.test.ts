@@ -2,7 +2,8 @@
 // install_update executor and the trust requests core sends to root. kb-install itself is tested in install-helper.test.ts.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
@@ -10,8 +11,9 @@ import { parseTar } from '../src/pure/tar.ts';
 import { releaseHash, releaseText } from '../src/pure/release-hash.ts';
 import { createTrustInstaller } from '../src/shell/trust-installer.ts';
 import { createUpdater } from '../src/shell/updater.ts';
+import { systemdUnits } from '../src/shell/systemd.ts';
 import { softApprover } from './kit/approver.ts';
-import { FakeClock, drive, seededRandom } from './kit/index.ts';
+import { FakeClock, drive, seededRandom, tempDir } from './kit/index.ts';
 import { approveWorld } from './support/approve-world.ts';
 import type { World } from './support/approve-world.ts';
 import { CADDY_BIN, NODE_BIN, installWorld, lockFor } from './support/install-world.ts';
@@ -253,4 +255,39 @@ test('KBOX-6 the real TrustPort writes a trust request root answers: applied cha
   assert.deepEqual(refused, { result: 'refused', code: 'bad_proof' });
   const silent = createTrustInstaller({ stagingDir: iw.paths.staging, resultsDir: iw.paths.results, random: seededRandom(4), clock, wait: (ms) => Promise.resolve(clock.advance(ms)), timeoutMs: 2_000 });
   assert.deepEqual(await silent.apply({ kind: 'trust', change: 'approver_add', approval: iw.proof({ kind: 'approver_add' }), approver: iw.trusted('ap-third-00003', softApprover()) }), { result: 'refused', code: 'timeout' });
+});
+
+test('KBOX-6 core records the running release, and /healthz answers it; a value that is not a content hash is refused', async (t) => {
+  const { iw, w, updater } = await updateWorld(t);
+  w.parts.meta.setRelease(updater.release());
+  const reply = await w.call('/healthz');
+  assert.deepEqual(reply.json(), { release: iw.h0 });
+  assert.throws(() => w.parts.meta.setRelease('unreleased'), RangeError);
+});
+
+test('KBOX-6 with no results directory (no kb-install on this machine) the real TrustPort refuses at once and writes no request', async (t) => {
+  const iw = await installWorld(t);
+  const port = createTrustInstaller({ stagingDir: iw.paths.staging, resultsDir: join(iw.root, 'absent'), random: seededRandom(5), clock: new FakeClock(0), wait: () => Promise.reject(new Error('must not wait')) });
+  assert.deepEqual(await port.apply({ kind: 'trust', change: 'approver_add', approval: iw.proof({ kind: 'approver_add' }), approver: iw.trusted('ap-third-00003', softApprover()) }), { result: 'refused', code: 'no_installer' });
+  assert.deepEqual(readdirSync(iw.paths.staging), []);
+});
+
+test('KBOX-6 the health check passes only when core and relay both answer /healthz with the new release, and gives up after 60 s', async (t) => {
+  const dir = await tempDir(t);
+  const answer = { core: 'a'.repeat(64), relay: 'b'.repeat(64) };
+  const servers = (['core', 'relay'] as const).map((name) => {
+    const server = createServer((_req, res) => void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ release: answer[name] })));
+    server.listen(join(dir, `${name}.sock`));
+    return server;
+  });
+  t.after(() => servers.forEach((s) => s.close()));
+  await Promise.all(servers.map((s) => new Promise((r) => (s.listening ? r(undefined) : s.once('listening', r)))));
+  const clock = new FakeClock(0);
+  const units = systemdUnits({ systemctl: '/bin/true', units: [], healthSockets: [join(dir, 'core.sock'), join(dir, 'relay.sock')], clock, wait: (ms) => Promise.resolve(clock.advance(ms)) });
+  assert.equal(await units.healthCheck('a'.repeat(64)), false, 'the relay still answers another release');
+  assert.equal(clock.now() >= 60_000, true, 'it asked until the 60 s were up');
+  answer.relay = 'a'.repeat(64);
+  assert.equal(await units.healthCheck('a'.repeat(64)), true);
+  const gone = systemdUnits({ systemctl: '/bin/true', units: [], healthSockets: [join(dir, 'none.sock')], clock, wait: (ms) => Promise.resolve(clock.advance(ms)) });
+  assert.equal(await gone.healthCheck('a'.repeat(64)), false, 'no socket is no answer');
 });
