@@ -1,0 +1,25 @@
+[Unit]
+Description=Key box recovery code (KBOX-20): a fresh code on the console at every host boot
+DefaultDependencies=no
+After=local-fs.target
+Before=keybox.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/keybox/current/bin/node /opt/keybox/current/src/cli/kb-code.ts recovery
+# The console device is UNVERIFIED on the A1 instance (KBOX-20, design section 12); its path is console_device in
+# deploy/runtime.config.json and is probed by the update unit. This is the only unit with device access.
+SupplementaryGroups=tty
+DeviceAllow=/dev/ttyAMA0 w
+PrivateDevices=no
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+PrivateNetwork=yes
+# /etc/keybox/codes (0700) is made by kb-code itself, so the tmpfiles file keeps only the spec directories.
+ReadWritePaths=/etc/keybox
+
+[Install]
+WantedBy=multi-user.target
