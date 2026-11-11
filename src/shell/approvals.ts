@@ -145,7 +145,7 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
     if (stale.length === 0) return;
     write(() => {
       for (const { approval_id } of stale) {
-        db.prepare("UPDATE approvals SET status = 'expired', decided_at = ? WHERE approval_id = ?").run(now, approval_id);
+        db.prepare("UPDATE approvals SET status = 'expired', decided_at = ?, proof_json = NULL WHERE approval_id = ?").run(now, approval_id);
         insertEvent(db, now, 'approval.decided', { approval_id, decision: 'expired' });
       }
     });
@@ -223,31 +223,38 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
     return update === undefined ? {} : { update };
   };
 
+  /** An approver_add page is shown, and can be approved, only while the device it names waits (KBOX-7: box-originated). */
+  const decidable = (action: Action): boolean => action.kind !== 'approver_add' || deps.approvers.awaits(action);
+
   const queue = (): readonly QueueItem[] => {
     sweep();
     enrolPushUnseen = false;
-    return pendingRows().map((r) => {
+    return pendingRows().flatMap((r) => {
       const action = actionOf(r);
+      if (!decidable(action)) return [];
       const reason = r.reason_json === null ? undefined : (JSON.parse(r.reason_json) as Reason);
       const cov = coverage(action);
       const page = renderPage(action, { requester: requesterOf(r), ...(reason === undefined ? {} : { reason }), ...(cov === undefined ? {} : { coverage: cov }), ...pageFacts(action) });
       const nonce = deps.approvers.nonce({ kind: 'decide', approvalId: r.approval_id, revision: r.revision });
-      return {
-        approval_id: r.approval_id,
-        revision: r.revision,
-        kind: action.kind,
-        title: page.title,
-        lines: page.lines,
-        digest_b64: Buffer.from(r.digest_hex, 'hex').toString('base64url'),
-        nonce_b64: Buffer.from(nonce).toString('base64url'),
-        expires_at: r.expires_at,
-      };
+      return [
+        {
+          approval_id: r.approval_id,
+          revision: r.revision,
+          kind: action.kind,
+          title: page.title,
+          lines: page.lines,
+          digest_b64: Buffer.from(r.digest_hex, 'hex').toString('base64url'),
+          nonce_b64: Buffer.from(nonce).toString('base64url'),
+          expires_at: r.expires_at,
+        },
+      ];
     });
   };
 
+  /** An approval that ends without being executed keeps no proof: root never spent it, so it must not outlive the approval. */
   const executed = (approvalId: string, result: 'done' | 'failed', reason: string): void => {
     write(() => {
-      db.prepare('UPDATE approvals SET result = ?, result_code = ? WHERE approval_id = ?').run(result, reason, approvalId);
+      db.prepare("UPDATE approvals SET result = ?, result_code = ?, proof_json = CASE WHEN ? = 'failed' THEN NULL ELSE proof_json END WHERE approval_id = ?").run(result, reason, result, approvalId);
       insertEvent(db, deps.clock.now(), 'approval.executed', { approval_id: approvalId, result, reason_code: reason });
     });
     audit('approval.executed', approvalId, { result, reason_code: reason });
@@ -258,6 +265,7 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
     const held = row(approvalId);
     if (held === undefined) throw new ApiError('not_found');
     if (held.status !== 'pending') throw new ApiError('conflict', 'not_pending');
+    if (decision === 'approve' && !decidable(actionOf(held))) throw new ApiError('conflict', 'no_registration');
     const digest = Uint8Array.from(Buffer.from(held.digest_hex, 'hex'));
     const challenge = decision === 'approve' ? approvalChallenge : denialChallenge;
     const verdict = deps.approvers.check({ kind: 'decide', approvalId, revision: held.revision }, (nonce) => challenge(approvalId, digest, nonce), proof);

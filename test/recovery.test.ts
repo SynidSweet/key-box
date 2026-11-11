@@ -401,6 +401,39 @@ test('KBOX-53 a recovery drops a pending device: approving its approver_add afte
   assert.equal(w.core.approvers.ids().length, 1);
 });
 
+test('KBOX-7 an approver_add with no matching pending device (dropped by a recovery) is neither shown nor approvable, and no proof of it is kept', async (t) => {
+  const w = await approveWorld(t);
+  const add = await approvedAdd(w);
+  const rendered = (await w.queue()).find((q) => q.approval_id === add.id);
+  assert.ok(rendered);
+  const proof = w.proofFor(rendered); // signed while the page was still shown
+  const newcomer = softApprover();
+  assert.equal((await registerAt(w, '/recover', w.recoveryCode(), newcomer)).status, 201);
+  assert.equal((await w.queue(newcomer)).some((q) => q.kind === 'approver_add'), false, 'the page is not rendered');
+  const reply = await w.decide(add.id, 'approve', proof);
+  assert.equal(reply.status, 409, reply.body);
+  assert.equal(w.core.approvals.storedProof(add.id), undefined, 'no proof of it is kept');
+  assert.equal(addCalls(w), 0, 'root was not asked');
+});
+
+test('KBOX-7 an approval that ends without being executed keeps no proof: an approver_add root refused, one whose device is gone, an expired one', async (t) => {
+  const w = await approveWorld(t);
+  const refused = await approvedAdd(w);
+  w.trust.refuseNext('io_error');
+  assert.equal(await approveAdd(w, refused.id), 'failed');
+  assert.equal(w.core.approvals.storedProof(refused.id), undefined, 'failed root_refused');
+  // An approval left until it expires, its device with it.
+  const gone = await approvedAdd(w);
+  const page = (await w.queue()).find((q) => q.approval_id === gone.id);
+  assert.ok(page);
+  w.clock.advance(14 * 24 * 60 * MINUTE + 1);
+  assert.notEqual((await w.decide(gone.id, 'approve', w.proofFor(page))).status, 200, 'expired with its device');
+  assert.equal(w.core.approvals.storedProof(gone.id), undefined, 'expired');
+  const good = await approvedAdd(w);
+  assert.equal(await approveAdd(w, good.id), 'done');
+  assert.ok(w.core.approvals.storedProof(good.id), 'control: an executed approval keeps the proof root spent');
+});
+
 test('KBOX-53 removing some other approver leaves the registration code alone', async (t) => {
   const w = await approveWorld(t);
   const second = await w.addApprover();

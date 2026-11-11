@@ -243,6 +243,37 @@ test('KBOX-6 settle ignores a result older than the approval (an earlier try of 
   assert.deepEqual(events('update.state'), [{ approval_id, state: 'pending' }]);
 });
 
+test('KBOX-7 an install approval that ends failed (rolled back, refused by root, base moved) keeps no proof; an installed one keeps the proof root spent', async (t) => {
+  const { iw, w, post, updater } = await updateWorld(t);
+  const approve = async (beforeDecision?: () => void): Promise<string> => {
+    const { approval_id } = (await post(tarOf(BUNDLE))).json() as { approval_id: string };
+    const item = (await w.queue()).find((q) => q.approval_id === approval_id);
+    assert.ok(item);
+    beforeDecision?.();
+    assert.equal((await w.decide(approval_id, 'approve', w.proofFor(item))).status, 200);
+    return approval_id;
+  };
+  for (const answer of ['rolled_back', 'refused:bad_proof', 'failed:interrupted']) {
+    const id = await approve();
+    assert.ok(w.core.approvals.storedProof(id), `${answer}: kept while root has not answered`);
+    writeFileSync(join(iw.paths.results, `${BUNDLE_H}.result`), answer);
+    updater.settle();
+    assert.equal(w.core.approvals.storedProof(id), undefined, answer);
+  }
+  const moveCurrentTo = (h: string): void => {
+    mkdirSync(join(iw.paths.releases, h), { recursive: true });
+    rmSync(iw.paths.current);
+    symlinkSync(join(iw.paths.releases, h), iw.paths.current);
+  };
+  const moved = await approve(() => moveCurrentTo('f'.repeat(64)));
+  assert.equal(w.core.approvals.storedProof(moved), undefined, 'base_moved');
+  moveCurrentTo(iw.h0);
+  const done = await approve();
+  writeFileSync(join(iw.paths.results, `${BUNDLE_H}.result`), 'installed');
+  updater.settle();
+  assert.ok(w.core.approvals.storedProof(done), 'control: installed');
+});
+
 test('KBOX-6 the real TrustPort writes a trust request root answers: applied changes trust.json, a refusal comes back with its code, no answer is timeout', async (t) => {
   const iw = await installWorld(t);
   const clock = new FakeClock(1_700_000_000_000);
