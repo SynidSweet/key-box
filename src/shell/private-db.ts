@@ -11,7 +11,8 @@ export function openPrivateDatabase(path: string): PrivateStore {
     CREATE TABLE IF NOT EXISTS push_subscriptions (
       endpoint TEXT PRIMARY KEY,
       p256dh TEXT NOT NULL,
-      auth TEXT NOT NULL
+      auth TEXT NOT NULL,
+      approver_id TEXT
     ) STRICT;
     CREATE TABLE IF NOT EXISTS approvers (
       approver_id TEXT PRIMARY KEY,
@@ -22,7 +23,10 @@ export function openPrivateDatabase(path: string): PrivateStore {
       sign_count INTEGER NOT NULL DEFAULT 0
     ) STRICT;
   `);
-  const putApprover = (r: ApproverRecord): void => {
+  // A private.db from before subscriptions belonged to approvers has no owner column: add it; such rows stay ownerless.
+  const columns = db.prepare('PRAGMA table_info(push_subscriptions)').all() as unknown as { name: string }[];
+  if (!columns.some((c) => c.name === 'approver_id')) db.exec('ALTER TABLE push_subscriptions ADD COLUMN approver_id TEXT');
+  const putApprover =(r: ApproverRecord): void => {
     db.prepare('INSERT OR REPLACE INTO approvers (approver_id, credential_id, public_key, device_public_key, phrase, sign_count) VALUES (?, ?, ?, ?, ?, ?)').run(r.approverId, r.credentialId, r.coseKey, r.devicePublicKey, r.phrase, r.signCount);
   };
   const inTransaction = (work: () => void): void => {
@@ -44,8 +48,8 @@ export function openPrivateDatabase(path: string): PrivateStore {
     ) STRICT;
   `);
   return {
-    addPushSubscription(row: PushSubscriptionRow): void {
-      db.prepare('INSERT OR REPLACE INTO push_subscriptions (endpoint, p256dh, auth) VALUES (?, ?, ?)').run(row.endpoint, row.p256dh, row.auth);
+    addPushSubscription(row: PushSubscriptionRow, approverId?: string): void {
+      db.prepare('INSERT OR REPLACE INTO push_subscriptions (endpoint, p256dh, auth, approver_id) VALUES (?, ?, ?, ?)').run(row.endpoint, row.p256dh, row.auth, approverId ?? null);
     },
     addApprover(row: ApproverRow): void {
       db.prepare('INSERT OR REPLACE INTO approvers (approver_id, credential_id, public_key) VALUES (?, ?, ?)').run(row.approverId, row.credentialId, row.publicKey);
@@ -57,7 +61,13 @@ export function openPrivateDatabase(path: string): PrivateStore {
     removePushSubscription(endpoint: string): void {
       db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(endpoint);
     },
-    getVapidKeyPair(): VapidKeyPairRow | undefined {
+    removePushSubscriptionsOf(approverId: string): void {
+      db.prepare('DELETE FROM push_subscriptions WHERE approver_id = ?').run(approverId);
+    },
+    retainPushSubscriptionsOf(approverIds: readonly string[]): void {
+      db.prepare(`DELETE FROM push_subscriptions WHERE approver_id IS NULL OR approver_id NOT IN (${approverIds.map(() => '?').join(', ')})`).run(...approverIds);
+    },
+    getVapidKeyPair():VapidKeyPairRow | undefined {
       const row = db.prepare('SELECT private_key, public_key FROM vapid_key WHERE id = 1').get() as { private_key: string; public_key: string } | undefined;
       return row === undefined ? undefined : { privateKey: row.private_key, publicKey: row.public_key };
     },

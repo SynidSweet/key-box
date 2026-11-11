@@ -26,7 +26,10 @@ import { openCore } from '../../src/shell/core.ts';
 import type { CoreParts } from '../../src/shell/core.ts';
 import { createApiServer } from '../../src/shell/http.ts';
 import { openPrivateDatabase } from '../../src/shell/private-db.ts';
+import type { Audit } from '../../src/ports/audit.ts';
 import type { PrivateStore } from '../../src/ports/private.ts';
+import type { Push, PushSubscriptionInput, PushSubscriptions } from '../../src/ports/push.ts';
+import type { Random } from '../../src/ports/random.ts';
 import type { Route } from '../../src/shell/http.ts';
 
 export const DOMAIN = 'box.example';
@@ -115,7 +118,9 @@ export interface World {
   /** Proposes through the service (no route), as a token, the box or an enrol would. */
   propose(action: Action, requester?: string | 'box'): ReturnType<ApproveCore['approvals']['propose']>;
   /** Adds a second approver through the real approver_add approval and the registration step. */
-  addApprover(): Promise<{ readonly approver: SoftApprover; readonly approverId: string }>;
+  addApprover(subscription?: PushSubscriptionInput): Promise<{ readonly approver: SoftApprover; readonly approverId: string }>;
+  /** Recovery through the real route with a fresh recovery code: the new approver registers (with a subscription, if given) and every other is replaced. */
+  recover(subscription?: PushSubscriptionInput): Promise<{ readonly approver: SoftApprover; readonly approverId: string }>;
   /** Writes a fresh recovery code for this boot through root's code store and returns it. */
   recoveryCode(): string;
 }
@@ -131,6 +136,10 @@ export interface WorldOptions {
   readonly executors?: Parameters<typeof openApproveCore>[0]['executors'];
   /** install_update: what the page counts against the running release (the updater's count). */
   readonly updateChanges?: Parameters<typeof openApproveCore>[0]['updateChanges'];
+  /** The push the core gets in place of the recording fake (the real one over the private store, for the tests of subscriptions). */
+  readonly pushFor?: (deps: { readonly store: PrivateStore; readonly audit: Audit; readonly clock: TimedClock; readonly random: Random }) => Push & PushSubscriptions;
+  /** The first approver registers with this subscription. */
+  readonly ownerSubscription?: PushSubscriptionInput;
   /** Root's code directory and boot id, when a journey shares them with a real kb-code process. */
   readonly codes?: { readonly dir: string; readonly bootId: () => string };
 }
@@ -147,7 +156,7 @@ export async function approveWorld(t: TestContext, options: WorldOptions = {}): 
   const journalLines: string[] = [];
   const codes = createCodeRoot({ dir: options.codes?.dir ?? join(dir, 'codes'), sink: (line) => void consoleLines.push(line), random, clock, wordlist: WORDLIST });
   const trust = new FakeTrust(codes, options.codes?.bootId ?? (() => BOOT));
-  const core = openApproveCore({ parts, approverStore: priv, trust, push, clock, random, domain: DOMAIN, wordlist: WORDLIST, vet: options.vet ?? (() => 'ok'), ...(options.executors === undefined ? {} : { executors: options.executors }), ...(options.updateChanges === undefined ? {} : { updateChanges: options.updateChanges }) });
+  const core = openApproveCore({ parts, approverStore: priv, trust, push: options.pushFor?.({ store: priv, audit: parts.audit, clock, random }) ?? push, clock, random, domain: DOMAIN, wordlist: WORDLIST, vet: options.vet ?? (() => 'ok'), ...(options.executors === undefined ? {} : { executors: options.executors }), ...(options.updateChanges === undefined ? {} : { updateChanges: options.updateChanges }) });
   const server = createApiServer({ routes: [...parts.routes, ...core.routes, ...(options.routes ?? [])], tokens: core.tokens.tokenStore, audit: parts.audit, random, clock, journal: (code) => void journalLines.push(code) });
   const socket = join(dir, 'http.sock');
   await server.listen(socket);
@@ -172,16 +181,16 @@ export async function approveWorld(t: TestContext, options: WorldOptions = {}): 
     return Uint8Array.from(Buffer.from((reply.json() as { nonce_b64: string }).nonce_b64, 'base64url'));
   };
 
-  const register = async (path: '/setup' | '/recover' | '/recover/register', code: string, approver: SoftApprover): Promise<DriveReply> => {
+  const register = async (path: '/setup' | '/recover' | '/recover/register', code: string, approver: SoftApprover, subscription?: PushSubscriptionInput): Promise<DriveReply> => {
     const n = await nonce('register');
-    return call(path, { json: { code, approver: newApproverBody(approver), proof: wire(n, approver.prove(challenges.register(n), RP)), phrase: 'blue kettle' } });
+    return call(path, { json: { code, approver: newApproverBody(approver), proof: wire(n, approver.prove(challenges.register(n), RP)), phrase: 'blue kettle', ...(subscription === undefined ? {} : { subscription }) } });
   };
 
   const owner = softApprover();
   let ownerId = '';
   if (options.noSetup !== true) {
     codes.writeSetupCode(false);
-    const reply = await register('/setup', lastCode(), owner);
+    const reply = await register('/setup', lastCode(), owner, options.ownerSubscription);
     assert.equal(reply.status, 201, reply.body);
     ownerId = (reply.json() as { approver_id: string }).approver_id;
   }
@@ -235,14 +244,14 @@ export async function approveWorld(t: TestContext, options: WorldOptions = {}): 
     propose: (action, requester = 'ctl-1') => core.approvals.propose({ action, requester: requesterOf(requester) }),
     // FORCED-FLIP: as of the spec revision 4 the new phone registers first (pending, trusted by nothing) and the box then
     // proposes the approver_add that names its keys; the owner approves it after comparing the fingerprint.
-    async addApprover() {
+    async addApprover(subscription) {
       const cookie = await view();
       // FORCED-FLIP: as of the spec revision 4 the route answers the code; the add is approved after the registration, below.
       const asked = await call('/app/propose-approver-add', { method: 'POST', cookie });
       assert.equal(asked.status, 201, asked.body);
       const code = (asked.json() as { registration_code: string }).registration_code;
       const approver = softApprover();
-      const reply = await register('/recover/register', code, approver);
+      const reply = await register('/recover/register', code, approver, subscription);
       assert.equal(reply.status, 201, reply.body);
       const item = (await queue()).find((q) => q.kind === 'approver_add');
       assert.ok(item);
@@ -253,6 +262,14 @@ export async function approveWorld(t: TestContext, options: WorldOptions = {}): 
       const approverId = core.approvers.ids().find((id) => !before.includes(id));
       assert.ok(approverId !== undefined);
       return { approver, approverId };
+    },
+    async recover(subscription) {
+      codes.consume('recovery');
+      codes.writeRecoveryCode(BOOT);
+      const approver = softApprover();
+      const reply = await register('/recover', lastCode(), approver, subscription);
+      assert.equal(reply.status, 201, reply.body);
+      return { approver, approverId: (reply.json() as { approver_id: string }).approver_id };
     },
     recoveryCode() {
       codes.consume('recovery');

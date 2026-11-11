@@ -253,8 +253,8 @@ export function createApprovers(deps: ApproversDeps): Approvers {
     throw new ApiError('forbidden', 'root_refused');
   };
 
-  const subscribe = (subscription: PushSubscriptionInput | undefined): void => {
-    if (subscription !== undefined && !deps.push.subscribe(subscription).ok) throw new ApiError('rejected', 'bad_subscription');
+  const subscribe = (subscription: PushSubscriptionInput | undefined, approverId: string): void => {
+    if (subscription !== undefined && !deps.push.subscribe(subscription, approverId).ok) throw new ApiError('rejected', 'bad_subscription');
   };
   const fingerprint = (action: ApproverAdd): string => approverFingerprint(action.cose_sha256, action.device_sha256, deps.wordlist);
   const awaits = (action: ApproverAdd): boolean => {
@@ -297,7 +297,7 @@ export function createApprovers(deps: ApproversDeps): Approvers {
       const record = admit(reg);
       await askRoot({ kind: 'trust', change: 'setup', code, domain: deps.domain, approvers: [trusted(record)] });
       deps.store.putApprover(record);
-      subscribe(reg.subscription);
+      subscribe(reg.subscription, record.approverId);
       deps.audit.append({ action: 'approver.registered', subject: record.approverId, at: deps.clock.now(), detail: { via: 'setup' } });
       return record.approverId;
     },
@@ -309,7 +309,8 @@ export function createApprovers(deps: ApproversDeps): Approvers {
       deps.push.send({ title: 'Recovery: every other approver of the key box is being removed', kind: 'recovery' });
       deps.store.replaceApprovers([record]);
       cancelAdds();
-      subscribe(reg.subscription);
+      deps.push.retainApprovers([record.approverId]);
+      subscribe(reg.subscription, record.approverId);
       for (const r of others) deps.audit.append({ action: 'approver.removed', subject: r.approverId, at: deps.clock.now(), detail: { via: 'recovery' } });
       deps.audit.append({ action: 'recovery.used', subject: record.approverId, at: deps.clock.now() });
       deps.audit.append({ action: 'approver.registered', subject: record.approverId, at: deps.clock.now(), detail: { via: 'recovery' } });
@@ -350,7 +351,7 @@ export function createApprovers(deps: ApproversDeps): Approvers {
         throw error;
       }
       deps.store.putApprover(device.record);
-      subscribe(device.subscription);
+      subscribe(device.subscription, device.record.approverId);
       deps.audit.append({ action: 'approver.registered', subject: device.record.approverId, at: deps.clock.now(), detail: { via: 'approver_add' } });
       return 'done';
     },
@@ -364,6 +365,7 @@ export function createApprovers(deps: ApproversDeps): Approvers {
         throw error;
       }
       deps.store.removeApprover(approverId);
+      deps.push.forgetApprover(approverId);
       if (addCode?.issuer === approverId) addCode = undefined;
       deps.audit.append({ action: 'approver.removed', subject: approverId, at: deps.clock.now(), detail: { via: 'approver_remove' } });
       return 'done';

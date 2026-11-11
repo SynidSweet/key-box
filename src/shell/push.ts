@@ -111,11 +111,19 @@ export function createPush(deps: PushDeps): Push & PushSubscriptions {
   }
 
   return {
-    subscribe(input: PushSubscriptionInput): SubscribeResult {
+    subscribe(input: PushSubscriptionInput, approverId?: string): SubscribeResult {
       const parsed = parseSubscription(input, hosts);
       if (!parsed.ok) return { ok: false, code: parsed.code };
-      deps.store.addPushSubscription({ endpoint: parsed.endpoint.href, p256dh: input.p256dh, auth: input.auth });
+      deps.store.addPushSubscription({ endpoint: parsed.endpoint.href, p256dh: input.p256dh, auth: input.auth }, approverId);
       return { ok: true };
+    },
+
+    forgetApprover(approverId: string): void {
+      deps.store.removePushSubscriptionsOf(approverId);
+    },
+
+    retainApprovers(approverIds: readonly string[]): void {
+      deps.store.retainPushSubscriptionsOf(approverIds);
     },
 
     applicationServerKey(): string {

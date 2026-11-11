@@ -26,7 +26,11 @@ export type SubscribeResult = { readonly ok: true } | { readonly ok: false; read
 
 export interface PushSubscriptions {
   /** Accepts an endpoint only over https with a host in `src/data/push-hosts.json`, and only well-formed keys. */
-  subscribe(input: PushSubscriptionInput): SubscribeResult;
+  subscribe(input: PushSubscriptionInput, approverId?: string): SubscribeResult;
+  /** An approver was removed: their subscriptions go, so their phone gets no more notices. */
+  forgetApprover(approverId: string): void;
+  /** Recovery replaced the approvers: every subscription but those of `approverIds` goes. */
+  retainApprovers(approverIds: readonly string[]): void;
   /** The box's VAPID public key (base64url, 65-byte uncompressed point): the applicationServerKey the phone subscribes with. */
   applicationServerKey(): string;
 }
