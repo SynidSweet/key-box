@@ -16,7 +16,7 @@ import { softApprover } from './kit/approver.ts';
 import { FakeClock, drive, seededRandom, tempDir } from './kit/index.ts';
 import { approveWorld } from './support/approve-world.ts';
 import type { World } from './support/approve-world.ts';
-import { CADDY_BIN, NODE_BIN, installWorld, lockFor } from './support/install-world.ts';
+import { CADDY_BIN, NODE_BIN, addActionOf, installWorld, lockFor } from './support/install-world.ts';
 import { gitGlobalHeader, tarOf } from './support/tar.ts';
 import type { TarEntrySpec } from './support/tar.ts';
 
@@ -248,7 +248,8 @@ test('KBOX-6 the real TrustPort writes a trust request root answers: applied cha
   const clock = new FakeClock(1_700_000_000_000);
   const port = createTrustInstaller({ stagingDir: iw.paths.staging, resultsDir: iw.paths.results, random: seededRandom(3), clock, wait: () => iw.run() });
   const added = iw.trusted('ap-second-0002', softApprover());
-  assert.deepEqual(await port.apply({ kind: 'trust', change: 'approver_add', approval: iw.proof({ kind: 'approver_add' }), approver: added }), { result: 'applied' });
+  // FORCED-FLIP: as of the spec revision 4 the signed approver_add names the new keys by hash, so the proof is over them.
+  assert.deepEqual(await port.apply({ kind: 'trust', change: 'approver_add', approval: iw.proof(addActionOf(added)), approver: added }), { result: 'applied' });
   assert.deepEqual(iw.trust()?.approvers.map((a) => a.id), [iw.ownerId, 'ap-second-0002']);
   const stranger = softApprover();
   const refused = await port.apply({ kind: 'trust', change: 'approver_remove', approval: iw.proof({ kind: 'approver_remove', approver_id: iw.ownerId }, { approver: stranger }), approver_id: iw.ownerId });

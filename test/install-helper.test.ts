@@ -8,7 +8,7 @@ import { appendFileSync, closeSync, constants, existsSync, linkSync, mkdirSync, 
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { softApprover } from './kit/approver.ts';
-import { COMMIT, NODE_BIN, CADDY_BIN, hashOf, installWorld, lockFor, sha256Hex } from './support/install-world.ts';
+import { COMMIT, NODE_BIN, CADDY_BIN, addActionOf, hashOf, installWorld, lockFor, sha256Hex } from './support/install-world.ts';
 import type { InstallWorld, Tree } from './support/install-world.ts';
 
 const RELEASE_1: Tree = { 'runtime.lock': lockFor(NODE_BIN, CADDY_BIN), 'src/main-core.ts': 'new core\n', 'src/cli/kb-install.ts': 'installer\n', 'README.md': 'v1\n', 'run.sh': { body: '#!/bin/sh\n', exec: true } };
@@ -458,8 +458,9 @@ const newApprover = (w: InstallWorld, id: string) => w.trusted(id, softApprover(
 
 test('KBOX-6 approver_add with a proof by an approver in trust.json adds the approver; the same proof again is refused', async (t) => {
   const w = await installWorld(t);
-  const proof = w.proof({ kind: 'approver_add' });
   const added = newApprover(w, 'ap-second-0002');
+  // FORCED-FLIP: as of the spec revision 4 the signed approver_add names the new keys by hash, so the proof is over them.
+  const proof = w.proof(addActionOf(added));
   w.request('trust-a', { kind: 'trust', change: 'approver_add', approval: proof, approver: added });
   await w.run();
   assert.equal(w.result('trust-a'), 'applied');
@@ -470,11 +471,35 @@ test('KBOX-6 approver_add with a proof by an approver in trust.json adds the app
   assert.equal(w.trust()?.approvers.length, 2);
 });
 
+test('KBOX-53 a kept approved approver_add presented with other keys is refused by root: another passkey, another device key or both', async (t) => {
+  const w = await installWorld(t);
+  const approved = newApprover(w, 'ap-approved-01');
+  const other = newApprover(w, 'ap-other-00001');
+  const before = readFileSync(w.paths.trustFile, 'utf8');
+  const presented = [
+    ['other keys', { ...other, id: 'ap-swapped-001' }],
+    ['another passkey', { ...approved, id: 'ap-swapped-002', cose_b64: other.cose_b64 }],
+    ['another device key', { ...approved, id: 'ap-swapped-003', device_pub_b64: other.device_pub_b64 }],
+  ] as const;
+  for (const [what, approver] of presented) {
+    w.request(`x-${approver.id}`, { kind: 'trust', change: 'approver_add', approval: w.proof(addActionOf(approved)), approver });
+    await w.run();
+    assert.equal(w.result(`x-${approver.id}`), 'refused:bad_proof', what);
+  }
+  assert.equal(readFileSync(w.paths.trustFile, 'utf8'), before, 'trust.json is unchanged');
+  w.request('x-good', { kind: 'trust', change: 'approver_add', approval: w.proof(addActionOf(approved)), approver: approved });
+  await w.run();
+  assert.equal(w.result('x-good'), 'applied', 'control: the keys the owner approved are added');
+  assert.deepEqual(w.trust()?.approvers.at(-1), approved);
+});
+
 test('KBOX-6 approver_add or approver_remove with a proof by an approver not in trust.json, or for another action, changes nothing', async (t) => {
   const w = await installWorld(t);
   const before = readFileSync(w.paths.trustFile, 'utf8');
   const stranger = softApprover();
-  w.request('t1', { kind: 'trust', change: 'approver_add', approval: w.proof({ kind: 'approver_add' }, { approver: stranger, approverId: 'ap-stranger-01' }), approver: newApprover(w, 'ap-new-000001') });
+  const fresh = newApprover(w, 'ap-new-000001');
+  // FORCED-FLIP: as of the spec revision 4 the signed approver_add names the new keys by hash.
+  w.request('t1', { kind: 'trust', change: 'approver_add', approval: w.proof(addActionOf(fresh), { approver: stranger, approverId: 'ap-stranger-01' }), approver: fresh });
   w.request('t2', { kind: 'trust', change: 'approver_remove', approval: w.proof({ kind: 'approver_remove', approver_id: 'ap-xxxxxxxx' }), approver_id: w.ownerId });
   w.request('t3', { kind: 'trust', change: 'approver_add', approver: newApprover(w, 'ap-new-000002') });
   await w.run();
@@ -561,7 +586,9 @@ test('KBOX-20 recovery replaces every approver with root checking the code: wron
 test('KBOX-6 a trust request with keys that do not decode is refused bad_request and changes nothing', async (t) => {
   const w = await installWorld(t);
   const before = readFileSync(w.paths.trustFile, 'utf8');
-  w.request('k', { kind: 'trust', change: 'approver_add', approval: w.proof({ kind: 'approver_add' }), approver: { id: 'ap-broken-0001', cose_b64: 'AAAA', device_pub_b64: 'AAAA' } });
+  const broken = { id: 'ap-broken-0001', cose_b64: 'AAAA', device_pub_b64: 'AAAA' };
+  // FORCED-FLIP: as of the spec revision 4 the signed approver_add names the new keys by hash.
+  w.request('k', { kind: 'trust', change: 'approver_add', approval: w.proof(addActionOf(broken)), approver: broken });
   await w.run();
   assert.equal(w.result('k'), 'refused:bad_request');
   assert.equal(readFileSync(w.paths.trustFile, 'utf8'), before);

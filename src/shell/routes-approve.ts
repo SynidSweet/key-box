@@ -228,9 +228,12 @@ export function approveRoutes(deps: ApproveRouteDeps): Route[] {
       path: '/recover/register',
       surface: 'phone',
       parse: parseRegistration,
-      handle: async ({ body }) => {
-        const added = await approvers.finishAdd(body.code, body.registration);
-        return { status: 201, json: { approver_id: added.approverId } };
+      // Spec revision 4: the new device registers first and is held as pending, trusted by nothing; the box then opens the
+      // approver_add that names its keys, and the device shows the fingerprint the approving phone will show beside it.
+      handle: ({ body }) => {
+        const pending = approvers.register(body.code, body.registration);
+        approvals.propose({ action: pending.action, requester: { kind: 'box' } });
+        return { status: 201, json: { status: 'pending', fingerprint: pending.fingerprint } };
       },
     }),
 
@@ -253,7 +256,9 @@ export function approveRoutes(deps: ApproveRouteDeps): Route[] {
       method: 'POST',
       path: '/app/propose-approver-add',
       surface: 'phone',
-      handle: ({ cookie }) => ({ status: 201, json: approvals.propose({ action: { kind: 'approver_add' }, requester: { kind: 'approver', approverId: viewerOf(cookie) } }) }),
+      // Spec revision 4: an approver in a view session asks for the new device's one-time registration code; the proposal
+      // comes later, from the box, once the device has registered its keys.
+      handle: ({ cookie }) => ({ status: 201, json: { registration_code: approvers.startAdd(viewerOf(cookie)) } }),
     }),
 
     // --- phone: decisions and signed operations (assertion plus device signature, never the cookie alone) -----------------
@@ -266,7 +271,7 @@ export function approveRoutes(deps: ApproveRouteDeps): Route[] {
         handle: async ({ body, params }) => {
           const outcome = await approvals.decide(params['id'] ?? '', decision, body.proof);
           if (outcome.decision === 'denied') return { json: { decision: 'denied' } };
-          return { json: { decision: 'approved', result: outcome.execution.result, ...(outcome.registrationCode === undefined ? {} : { registration_code: outcome.registrationCode }) } };
+          return { json: { decision: 'approved', result: outcome.execution.result } };
         },
       }),
     ),

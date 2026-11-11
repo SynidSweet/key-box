@@ -190,7 +190,16 @@ export async function prove(nonce, challenge) {
  * @param {string} path @param {unknown} [body] @returns {Promise<unknown>}
  */
 export async function call(path, body) {
-  const reply = await fetch(path, body === undefined ? { credentials: 'same-origin' } : { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  return answerOf(await fetch(path, body === undefined ? { credentials: 'same-origin' } : { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+}
+
+/** A POST with no body (a route that takes none, such as asking for a registration code). @param {string} path @returns {Promise<unknown>} */
+export async function post(path) {
+  return answerOf(await fetch(path, { method: 'POST', credentials: 'same-origin' }));
+}
+
+/** The answer's JSON body, or the box's error as a rejection. @param {Response} reply @returns {Promise<unknown>} */
+async function answerOf(reply) {
   const json = /** @type {unknown} */ (await reply.json());
   if (reply.ok) return json;
   const error = /** @type {{ error?: { message?: unknown } }} */ (typeof json === 'object' && json !== null ? json : {}).error;

@@ -2,6 +2,7 @@
 // code store (src/shell/console.ts) and consumed on use; approver_add and approver_remove proofs are verified again against
 // the copy as it stands, with the one verifier, as kb-install does (KBOX-6). A test can make root refuse the next request.
 import type { TrustApprover, TrustPort, TrustRequest, TrustResult } from '../../src/ports/trust.ts';
+import { approverAddOf } from '../../src/pure/actions.ts';
 import { actionDigest, approvalChallenge, relyingParty, verifyProof } from '../../src/pure/challenge.ts';
 import { decodeCoseEs256, parseRawPoint } from '../../src/pure/cose.ts';
 import type { CodeRoot } from '../../src/shell/console.ts';
@@ -62,7 +63,8 @@ export class FakeTrust implements TrustPort {
       case 'approver_add':
       case 'approver_remove': {
         if (this.copy === undefined) return refused('no_trust');
-        const action = request.change === 'approver_add' ? { kind: 'approver_add' } : { kind: 'approver_remove', approver_id: request.approver_id };
+        // FORCED-FLIP: as of the spec revision 4 the signed approver_add names the new keys by hash, rebuilt from the keys sent.
+        const action = request.change === 'approver_add' ? approverAddOf(bytes(request.approver.cose_b64), bytes(request.approver.device_pub_b64)) : { kind: 'approver_remove', approver_id: request.approver_id };
         const p = request.approval;
         const signer = this.copy.approvers.find((a) => a.id === p.approver_id);
         const passkey = signer === undefined ? undefined : decodeCoseEs256(bytes(signer.cose_b64));

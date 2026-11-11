@@ -24,7 +24,8 @@ const TABLE: readonly [fixture: Record<string, unknown>, title: string, sentence
   [{ kind: 'demote', keyref: 'stripe' }, 'Lower the class of stripe', ['Lower the class of the key stripe, so it changes without asking you.']],
   [{ kind: 'vercel_set_domain', project: 'shop', op: 'add', domain: 'shop.example.com' }, 'Vercel domain change on shop', ['Add the domain shop.example.com to the Vercel project shop.']],
   [{ kind: 'vercel_set_team_setting', setting: 'sensitive', value: 'on' }, 'Vercel team setting sensitive', ['Set the Vercel team setting sensitive to "on".']],
-  [{ kind: 'approver_add' }, 'Add an approver', ['Add another approver: a new phone with its own passkey and device key.']],
+  // FORCED-FLIP: as of the spec revision 4 approver_add names the new keys by hash and its page carries the fingerprint line.
+  [{ kind: 'approver_add', cose_sha256: H('e'), device_sha256: H('f') }, 'Add an approver', ['Add another approver: a new phone with its own passkey and device key.', 'The new phone\'s fingerprint could not be made here: do not approve.']],
   [{ kind: 'approver_remove', approver_id: 'ap-AAAAAAAAAA' }, 'Remove an approver', ['Remove the approver ap-AAAAAAAAAA.']],
   [
     { kind: 'install_update', install: H('a'), commit: 'b'.repeat(40), base: H('c') },
@@ -84,7 +85,7 @@ test('KBOX-8 a page for a key without watch coverage says so; a covered key\'s p
 });
 
 test('KBOX-8 the requester line for the box, an enrol request and an approver', () => {
-  const a = action({ kind: 'approver_add' });
+  const a = action({ kind: 'approver_add', cose_sha256: H('e'), device_sha256: H('f') }); // FORCED-FLIP: as of the spec revision 4
   assert.equal(renderPage(a, { requester: { kind: 'approver', approverId: 'ap-BBBBBBBBBB' } }).lines.at(-1), 'Asked for in the app by the approver ap-BBBBBBBBBB.');
   assert.equal(renderPage(a, { requester: { kind: 'enrol', address: '198.51.100.7' } }).lines.at(-1), 'Asked for by an enrol request that carried no token.');
 });

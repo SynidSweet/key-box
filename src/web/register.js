@@ -21,8 +21,10 @@ export async function register(path, button, done) {
     } catch (error) {
       notifier.say(`Notifications are off on this phone (${error instanceof Error ? error.message : 'refused'}); open the app to see what waits.`);
     }
-    await call(path, { code, approver, proof, phrase, ...(subscription === undefined ? {} : { subscription }) });
-    notifier.say(done);
+    const answer = await call(path, { code, approver, proof, phrase, ...(subscription === undefined ? {} : { subscription }) });
+    // Adding a phone (spec revision 4): the box holds this phone as pending and names it by a fingerprint the approving phone shows too.
+    const fingerprint = typeof answer === 'object' && answer !== null && 'fingerprint' in answer && typeof answer.fingerprint === 'string' ? answer.fingerprint : undefined;
+    notifier.say(fingerprint === undefined ? done : `${done} Fingerprint: ${fingerprint}`);
   } catch (error) {
     notifier.failed(error);
   } finally {

@@ -18,7 +18,7 @@ import { approverKeys, keptProofHolds } from '../pure/kept-proof.ts';
 import type { TrustCopy } from '../pure/kept-proof.ts';
 import { RELEASE_HASH, RELEASE_LIMITS, checkSegment, fileSha256, releaseHash } from '../pure/release-hash.ts';
 import { parseRuntimeLock } from '../pure/runtime-lock.ts';
-import { DOMAIN_NAME } from '../pure/actions.ts';
+import { DOMAIN_NAME, approverAddOf } from '../pure/actions.ts';
 import { decodeJsonBody } from '../pure/schemas.ts';
 import { createCodeRoot, readBootId } from './console.ts';
 import { closeFd, listAt, openAt, openDirectory, readThrough, removeAt } from './safe-open.ts';
@@ -86,6 +86,8 @@ interface Copy {
   readonly dirs: readonly string[];
   readonly files: readonly CopiedFile[];
 }
+
+const keyBytes = (b64: string): Uint8Array => Uint8Array.from(Buffer.from(b64, 'base64url'));
 
 const REQUEST_SUFFIX = Buffer.from('.request');
 const isRequestName = (name: Buffer): boolean => name.length > REQUEST_SUFFIX.length && name.subarray(name.length - REQUEST_SUFFIX.length).equals(REQUEST_SUFFIX);
@@ -325,8 +327,9 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
       case 'approver_remove': {
         if (current === undefined) return 'refused:no_trust';
         if (spent(req.approval.approval_id)) return 'refused:spent';
-        const action = req.change === 'approver_add' ? { kind: 'approver_add' } : { kind: 'approver_remove', approver_id: req.approver_id };
         if (req.change === 'approver_add' && (!keysDecode([req.approver]) || current.approvers.some((a) => a.id === req.approver.id))) return 'refused:bad_request';
+        // The signed approver_add names the keys by hash, rebuilt here from the keys presented: other keys, other digest.
+        const action = req.change === 'approver_add' ? approverAddOf(keyBytes(req.approver.cose_b64), keyBytes(req.approver.device_pub_b64)) : { kind: 'approver_remove', approver_id: req.approver_id };
         if (!keptProofHolds(current, req.approval, action)) return 'refused:bad_proof';
         if (req.change === 'approver_remove') {
           if (!current.approvers.some((a) => a.id === req.approver_id)) return 'refused:unknown_approver';

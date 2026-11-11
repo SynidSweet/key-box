@@ -200,4 +200,11 @@ export async function installWorld(t: TestContext, options: { readonly trust?: f
   return world;
 }
 
+/** The signed approver_add for a new approver's keys (spec revision 4): lowercase hex SHA-256 of each public key's bytes. */
+export const addActionOf = (a: TrustApprover): { readonly kind: 'approver_add'; readonly cose_sha256: string; readonly device_sha256: string } => ({
+  kind: 'approver_add',
+  cose_sha256: hex(Buffer.from(a.cose_b64, 'base64url')),
+  device_sha256: hex(Buffer.from(a.device_pub_b64, 'base64url')),
+});
+
 export { hex as sha256Hex };

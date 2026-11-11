@@ -65,7 +65,7 @@ export function titleOf(action: Action): string {
   }
 }
 
-function sentences(action: Action): string[] {
+function sentences(action: Action, ctx: PageContext): string[] {
   switch (action.kind) {
     case 'add_key':
       return [`Add the ${action.platform} key ${action.name} for ${action.projects.join(', ')}.`, `Scope: ${action.scope.items.length === 0 ? 'none' : action.scope.items.join(', ')}.`];
@@ -101,11 +101,11 @@ function sentences(action: Action): string[] {
     case 'vercel_set_team_setting':
       return [`Set the Vercel team setting ${action.setting} to "${action.value}".`];
     case 'approver_add':
-      return ['Add another approver: a new phone with its own passkey and device key.'];
+      return ['Add another approver: a new phone with its own passkey and device key.', compareLine(ctx.fingerprint)];
     case 'approver_remove':
       return [`Remove the approver ${action.approver_id}.`];
     case 'install_update':
-      return [`Install key box version ${short(action.install)} (commit ${short(action.commit)}) over version ${short(action.base)}`, FIXED.update, FIXED.egressLimits];
+      return [`Install key box version ${short(action.install)} (commit ${short(action.commit)}) over version ${short(action.base)}`, ...changeLines(ctx.update), FIXED.update, FIXED.egressLimits];
     case 'enrol':
       return [enrolSentence(action.label, action.address)];
   }
@@ -129,11 +129,35 @@ export interface Reason {
   readonly text: string;
 }
 
+/** What an update changes against the running release (KBOX-6): file counts and each pinned binary whose hash changes. */
+export interface UpdateChanges {
+  readonly added: number;
+  readonly changed: number;
+  readonly removed: number;
+  readonly binaries: readonly { readonly name: string; readonly version: string; readonly sha256: string; readonly url: string }[];
+}
+
 export interface PageContext {
   readonly requester: Requester;
   readonly reason?: Reason;
   /** The coverage of the key the action is about; `null` until measured. Leave it out for an action about no stored key. */
   readonly coverage?: 'windowed' | 'anchored' | 'none' | null;
+  /** approver_add: the 6-word fingerprint of the keys it names, the one the new phone shows (spec revision 4). */
+  readonly fingerprint?: string;
+  /** install_update: what it changes, counted against the running release. */
+  readonly update?: UpdateChanges;
+}
+
+/** The approving phone compares this line with the new phone; without a fingerprint the page says not to approve. */
+const compareLine = (fingerprint: string | undefined): string =>
+  fingerprint === undefined ? 'The new phone\'s fingerprint could not be made here: do not approve.' : `Compare with the new phone: ${fingerprint}`;
+
+/** The file counts and the binary changes of an update; nothing when they were not counted. */
+function changeLines(update: UpdateChanges | undefined): string[] {
+  if (update === undefined) return [];
+  const files = `Files: ${update.added} added, ${update.changed} changed, ${update.removed} removed.`;
+  if (update.binaries.length === 0) return [files, 'The Node and Caddy binaries stay as they are.'];
+  return [files, ...update.binaries.map((b) => `New ${b.name} binary ${b.version} (sha256 ${short(b.sha256)}), official download ${b.url}`)];
 }
 
 export interface Page {
@@ -143,7 +167,7 @@ export interface Page {
 
 /** The page of one approval: title, the kind's sentences, who asked, the coverage warning, and the reason set apart. */
 export function renderPage(action: Action, ctx: PageContext): Page {
-  const lines = [...sentences(action), requesterLine(ctx.requester)];
+  const lines = [...sentences(action, ctx), requesterLine(ctx.requester)];
   if (ctx.coverage === 'none' || ctx.coverage === null) lines.push(FIXED.noCoverage);
   if (ctx.reason !== undefined) {
     const r = ctx.requester;

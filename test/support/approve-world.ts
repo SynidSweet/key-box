@@ -19,8 +19,6 @@ import { parseWordlist } from '../../src/pure/codes.ts';
 import { hashToken, newToken } from '../../src/pure/tokens.ts';
 import { openApproveCore } from '../../src/shell/approve-core.ts';
 import type { ApproveCore } from '../../src/shell/approve-core.ts';
-import { openApproveCore as openBoxCore } from '../../src/shell/approve-core.ts';
-import type { ApproveCoreDeps } from '../../src/shell/approve-core.ts';
 import type { QueueItem } from '../../src/shell/approvals.ts';
 import { createCodeRoot } from '../../src/shell/console.ts';
 import type { CodeRoot } from '../../src/shell/console.ts';
@@ -147,9 +145,7 @@ export async function approveWorld(t: TestContext, options: WorldOptions = {}): 
   const journalLines: string[] = [];
   const codes = createCodeRoot({ dir: options.codes?.dir ?? join(dir, 'codes'), sink: (line) => void consoleLines.push(line), random, clock, wordlist: WORDLIST });
   const trust = new FakeTrust(codes, options.codes?.bootId ?? (() => BOOT));
-  // The box's own core, with the executors of kinds other units own (the update unit's install_update) beside its own.
-  const openApproveCore = (deps: ApproveCoreDeps): ApproveCore => openBoxCore(options.executors === undefined ? deps : { ...deps, executors: options.executors });
-  const core = openApproveCore({ parts, approverStore: priv, trust, push, clock, random, domain: DOMAIN, wordlist: WORDLIST, vet: options.vet ?? (() => 'ok') });
+  const core = openApproveCore({ parts, approverStore: priv, trust, push, clock, random, domain: DOMAIN, wordlist: WORDLIST, vet: options.vet ?? (() => 'ok'), ...(options.executors === undefined ? {} : { executors: options.executors }) });
   const server = createApiServer({ routes: [...parts.routes, ...core.routes, ...(options.routes ?? [])], tokens: core.tokens.tokenStore, audit: parts.audit, random, clock, journal: (code) => void journalLines.push(code) });
   const socket = join(dir, 'http.sock');
   await server.listen(socket);
@@ -235,20 +231,25 @@ export async function approveWorld(t: TestContext, options: WorldOptions = {}): 
     proofFor,
     decide,
     propose: (action, requester = 'ctl-1') => core.approvals.propose({ action, requester: requesterOf(requester) }),
+    // FORCED-FLIP: as of the spec revision 4 the new phone registers first (pending, trusted by nothing) and the box then
+    // proposes the approver_add that names its keys; the owner approves it after comparing the fingerprint.
     async addApprover() {
       const cookie = await view();
-      const opened = await call('/app/propose-approver-add', { method: 'POST', cookie });
-      assert.equal(opened.status, 201, opened.body);
-      const id = (opened.json() as { approval_id: string }).approval_id;
-      const item = (await queue()).find((q) => q.approval_id === id);
-      assert.ok(item);
-      const approved = await decide(id, 'approve', proofFor(item));
-      assert.equal(approved.status, 200, approved.body);
-      const code = (approved.json() as { registration_code: string }).registration_code;
+      const asked = await call('/app/propose-approver-add', { method: 'POST', cookie });
+      assert.equal(asked.status, 201, asked.body);
+      const code = (asked.json() as { registration_code: string }).registration_code;
       const approver = softApprover();
       const reply = await register('/recover/register', code, approver);
       assert.equal(reply.status, 201, reply.body);
-      return { approver, approverId: (reply.json() as { approver_id: string }).approver_id };
+      const item = (await queue()).find((q) => q.kind === 'approver_add');
+      assert.ok(item);
+      const before = core.approvers.ids();
+      const approved = await decide(item.approval_id, 'approve', proofFor(item));
+      assert.equal(approved.status, 200, approved.body);
+      assert.equal((approved.json() as { result: string }).result, 'done', approved.body);
+      const approverId = core.approvers.ids().find((id) => !before.includes(id));
+      assert.ok(approverId !== undefined);
+      return { approver, approverId };
     },
     recoveryCode() {
       codes.consume('recovery');
