@@ -9,6 +9,8 @@ export class RecordingDestination implements Destination {
   readonly kind: DestinationKind = 'vercel-env';
   readonly #held = new Map<string, { bytes: string; version: number }>();
   readonly #refused = new Map<string, number>();
+  readonly #applyThenThrow = new Set<string>();
+  readonly #removeRefused = new Set<string>();
   readonly #trace: string[];
   #versions = 0;
   #runtime: boolean;
@@ -37,8 +39,19 @@ export class RecordingDestination implements Destination {
     this.#refused.set(target, pushes);
   }
 
+  /** The next push to this target changes what it holds and then answers an error (a timeout or a 5xx after the commit). */
+  applyThenThrow(target: string): void {
+    this.#applyThenThrow.add(target);
+  }
+
+  /** The destination answers an error for every removal at this target until `allow`. */
+  refuseRemove(target: string): void {
+    this.#removeRefused.add(target);
+  }
+
   allow(target: string): void {
     this.#refused.delete(target);
+    this.#removeRefused.delete(target);
   }
 
   async push(t: DestinationTarget, name: string, v: Lent, master: Lent): Promise<PushReceipt> {
@@ -49,14 +62,20 @@ export class RecordingDestination implements Destination {
     const bytes = await v.use((b) => Promise.resolve(Buffer.from(b).toString('utf8')));
     const existing = this.#held.get(place(t, name));
     this.#trace.push(`push:${t.id}`);
-    if (existing?.bytes === bytes) return { version: String(existing.version) };
+    if (existing?.bytes === bytes) {
+      if (this.#applyThenThrow.delete(t.id)) throw new Error(`timed out ${t.id}`);
+      return { version: String(existing.version) };
+    }
     this.#versions += 1;
     this.#held.set(place(t, name), { bytes, version: this.#versions });
+    if (this.#applyThenThrow.delete(t.id)) throw new Error(`timed out ${t.id}`);
     return { version: String(this.#versions) };
   }
 
   remove(t: DestinationTarget, name: string, master: Lent): Promise<void> {
     void master;
+    if (this.#removeRefused.has(t.id)) return Promise.reject(new Error(`refused ${t.id}`));
+    this.#trace.push(`remove:${t.id}`);
     this.#held.delete(place(t, name));
     return Promise.resolve();
   }

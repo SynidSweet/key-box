@@ -22,8 +22,11 @@ export interface DestinationKit {
   readonly redeployer?: Redeployer;
 }
 
-/** Where the process may be stopped in a test: after a key is created and before it is stored, after each step is persisted, after each receipt. */
-export type Point = 'issued' | 'receipt' | Step;
+/**
+ * Where the process may be stopped in a test: after a key is created and before it is stored (`issued`), after it is stored and before the
+ * step is persisted (`stored`), after a push and before its receipt (`pushed`), after each receipt, after each step is persisted.
+ */
+export type Point = 'issued' | 'stored' | 'pushed' | 'receipt' | Step;
 
 export interface PlatformSource {
   /** The adapters of a platform id, or undefined when none is registered. */

@@ -15,7 +15,10 @@ export type RunState = Step | 'rolling_back' | 'done' | 'failed' | 'abandoned';
 export type RunOrigin = 'schedule' | 'owner' | 'agent' | 'approval' | 'paste' | 'create' | 'reconcile';
 export type GenStatus = 'pending' | 'current' | 'grace' | 'retired' | 'failed';
 
-const RUN_STATES = "('issuing','verifying','pushing','redeploying','checking','promoting','grace','revoking','rolling_back','done','failed','abandoned')";
+/** `rotation_receipts.pushed`: the intent is written (the push may or may not have applied), or the push answered. */
+const PUSH_MAYBE = 1;
+const PUSH_DONE = 2;
+const RUN_STATES ="('issuing','verifying','pushing','redeploying','checking','promoting','grace','revoking','rolling_back','done','failed','abandoned')";
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS rotation_keys (
     keyref TEXT PRIMARY KEY REFERENCES keys (keyref),
@@ -56,7 +59,7 @@ const SCHEMA = `
     kind TEXT NOT NULL,
     target TEXT NOT NULL,
     version TEXT,
-    pushed INTEGER NOT NULL DEFAULT 0,
+    pushed INTEGER NOT NULL CHECK (pushed IN (1, 2)),
     redeployed INTEGER NOT NULL DEFAULT 0,
     rollback_notified INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (run_id, kind, target)
@@ -164,7 +167,8 @@ export interface Receipt {
   readonly kind: string;
   readonly target: string;
   readonly version: string | null;
-  readonly pushed: boolean;
+  /** `maybe` from the intent written before the push until the push answered; a rollback treats both as holding the new value. */
+  readonly pushed: 'maybe' | true;
   readonly redeployed: boolean;
   readonly rollbackNotified: boolean;
 }
@@ -278,6 +282,9 @@ export interface RotationStore {
   topGen(keyref: string): number;
   generationIdKnown(platformKeyId: string): boolean;
 
+  /** The intent written BEFORE a push: the destination may hold the new value from here on, whatever the push answers. */
+  intendPush(runId: string, kind: string, target: string): void;
+  /** Patches a receipt whose intent was written (`internal` otherwise). */
   putReceipt(runId: string, kind: string, target: string, patch: { readonly version?: string; readonly pushed?: true; readonly redeployed?: true; readonly rollbackNotified?: true }): void;
   receipts(runId: string): readonly Receipt[];
 
@@ -288,8 +295,6 @@ export interface RotationStore {
   deliveries(): readonly DeliveryRow[];
   delivery(deliveryId: string): DeliveryRow | undefined;
   ackDelivery(deliveryId: string, at: number): void;
-  /** Removes the deliveries of one generation that were never fetched and acknowledged. */
-  withdrawDeliveries(keyref: string, gen: number): void;
   markDeliveryNotified(deliveryId: string): void;
 }
 
@@ -413,17 +418,23 @@ export function createRotationStore(db: DatabaseSync, clock: Clock, hub: EventSi
     topGen: (keyref) => (db.prepare('SELECT coalesce(max(gen), 0) AS g FROM rotation_gens WHERE keyref = ?').get(keyref) as { g: number }).g,
     generationIdKnown: (id) => db.prepare('SELECT 1 AS one FROM rotation_gens WHERE platform_key_id = ?').get(id) !== undefined,
 
+    intendPush(runId, kind, target) {
+      write(() => void db.prepare(`INSERT OR IGNORE INTO rotation_receipts (run_id, kind, target, pushed) VALUES (?, ?, ?, ${PUSH_MAYBE})`).run(runId, kind, target));
+    },
     putReceipt(runId, kind, target, patch) {
       write(() => {
-        db.prepare('INSERT OR IGNORE INTO rotation_receipts (run_id, kind, target) VALUES (?, ?, ?)').run(runId, kind, target);
-        db.prepare(
-          'UPDATE rotation_receipts SET version = coalesce(?, version), pushed = max(pushed, ?), redeployed = max(redeployed, ?), rollback_notified = max(rollback_notified, ?) WHERE run_id = ? AND kind = ? AND target = ?',
-        ).run(patch.version ?? null, patch.pushed === true ? 1 : 0, patch.redeployed === true ? 1 : 0, patch.rollbackNotified === true ? 1 : 0, runId, kind, target);
+        const changed = db
+          .prepare(
+            'UPDATE rotation_receipts SET version = coalesce(?, version), pushed = max(pushed, ?), redeployed = max(redeployed, ?), rollback_notified = max(rollback_notified, ?) WHERE run_id = ? AND kind = ? AND target = ?',
+          )
+          .run(patch.version ?? null, patch.pushed === true ? PUSH_DONE : PUSH_MAYBE, patch.redeployed === true ? 1 : 0, patch.rollbackNotified === true ? 1 : 0, runId, kind, target).changes;
+        // A receipt exists only once its intent was written: a patch without one is a fault of the caller, not a row to invent.
+        if (changed === 0) throw new ApiError('internal', 'no_intent_receipt');
       });
     },
     receipts: (runId) =>
       (db.prepare('SELECT * FROM rotation_receipts WHERE run_id = ? ORDER BY kind, target').all(runId) as unknown as { run_id: string; kind: string; target: string; version: string | null; pushed: number; redeployed: number; rollback_notified: number }[]).map(
-        (r): Receipt => ({ runId: r.run_id, kind: r.kind, target: r.target, version: r.version, pushed: r.pushed === 1, redeployed: r.redeployed === 1, rollbackNotified: r.rollback_notified === 1 }),
+        (r): Receipt => ({ runId: r.run_id, kind: r.kind, target: r.target, version: r.version, pushed: r.pushed === PUSH_DONE ? true : 'maybe', redeployed: r.redeployed === 1, rollbackNotified: r.rollback_notified === 1 }),
       ),
 
     firstOrphanNotice: (id) => db.prepare('INSERT OR IGNORE INTO orphan_notices (platform_key_id) VALUES (?)').run(id).changes === 1,
@@ -438,9 +449,6 @@ export function createRotationStore(db: DatabaseSync, clock: Clock, hub: EventSi
     },
     ackDelivery(deliveryId, at) {
       write(() => void db.prepare('UPDATE deliveries SET acked_at = coalesce(acked_at, ?) WHERE delivery_id = ?').run(at, deliveryId));
-    },
-    withdrawDeliveries(keyref, gen) {
-      write(() => void db.prepare('DELETE FROM deliveries WHERE keyref = ? AND gen = ? AND acked_at IS NULL').run(keyref, gen));
     },
     markDeliveryNotified(deliveryId) {
       write(() => void db.prepare('UPDATE deliveries SET notified = 1 WHERE delivery_id = ?').run(deliveryId));

@@ -21,6 +21,8 @@ import type { DestinationKit, PlatformKit, PlatformSource, Point } from './rotat
 import type { DestinationRow, KeyHead, RotationStore, RunOrigin, RunRow } from './rotation-store.ts';
 
 const HOUR_MS = 3600_000;
+/** The destination kind that is a delivery to the workstation, not an adapter (KBOX-34). */
+const WORKSTATION = 'workstation';
 
 export interface NewKey {
   readonly keyref: string;
@@ -261,33 +263,40 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     const master = deps.master(head.platform);
     const value = lendOrUndefined(run.keyref, run.genNew);
     if (value === undefined) return fail(run, 'pushing', 'push_failed');
-    for (const row of store.destinationsOf(run.keyref)) {
-      if (row.kind === 'workstation') {
-        deliver(run, head);
-        store.putReceipt(run.runId, row.kind, row.target, { pushed: true });
-        continue;
-      }
+    const rows = store.destinationsOf(run.keyref);
+    // KBOX-16: every destination is admitted again before anything is pushed, because its properties can change at runtime. The workstation is
+    // a delivery that a control token fetches through the API, so it is `api`-readable: an ordinary key only (KBOX-34).
+    for (const row of rows) {
+      const readableBy = row.kind === WORKSTATION ? 'api' : kitFor(row)?.destination.properties().readableBy;
+      if (readableBy === undefined) return fail(run, 'pushing', 'push_failed');
+      if (!admitDestination(head.class, readableBy)) return fail(run, 'pushing', 'destination_not_allowed');
+    }
+    for (const row of rows) {
+      // The workstation is offered at promote (deliver), never a generation that may still be rolled back.
+      if (row.kind === WORKSTATION) continue;
       const kit = kitFor(row);
       if (kit === undefined) return fail(run, 'pushing', 'push_failed');
-      // KBOX-16: rechecked at push, because a destination's properties can change at runtime.
-      if (!admitDestination(head.class, kit.destination.properties().readableBy)) return fail(run, 'pushing', 'destination_not_allowed');
       const target = { kind: kit.destination.kind, id: row.target };
+      // The intent first: from here the destination may hold the new value, whether the push answers, throws or the process dies.
+      store.intendPush(run.runId, row.kind, row.target);
+      const made: { version?: string } = {};
       const done = await attempt(
         run,
         'pushing',
         async () => {
-          const receipt = await kit.destination.push(target, head.name, value, master);
-          store.putReceipt(run.runId, row.kind, row.target, { version: receipt.version, pushed: true });
+          made.version = (await kit.destination.push(target, head.name, value, master)).version;
         },
         'push_failed',
       );
-      if (!done.ok) return fail(run, 'pushing', 'push_failed');
+      if (!done.ok || made.version === undefined) return fail(run, 'pushing', 'push_failed');
+      await point('pushed');
+      store.putReceipt(run.runId, row.kind, row.target, { version: made.version, pushed: true });
       await point('receipt');
     }
     return advance(run, 'pushing');
   }
 
-  /** The workstation destination is a delivery (KBOX-34): one row per project, made once per run, the value fetched from the vault later. */
+  /** The workstation destination is a delivery (KBOX-34), offered once the generation is promoted: one row per project, made once per run, the value fetched from the vault later. */
   function deliver(run: RunRow, head: KeyHead): void {
     for (const [i, project] of head.projects.entries()) {
       const deliveryId = `dlv_${run.runId.slice(4)}_${i}`;
@@ -300,7 +309,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   async function redeployAll(run: RunRow, head: KeyHead): Promise<Next> {
     const master = deps.master(head.platform);
     for (const row of store.destinationsOf(run.keyref)) {
-      const kit = row.kind === 'workstation' ? undefined : kitFor(row);
+      const kit = row.kind === WORKSTATION ? undefined : kitFor(row);
       if (kit?.redeployer === undefined || !kit.destination.properties().needsRedeploy) continue;
       const redeployer = kit.redeployer;
       const target = { kind: kit.destination.kind, id: row.target };
@@ -327,6 +336,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     if (run.genOld > 0) store.setGenStatus(run.keyref, run.genOld, 'grace');
     store.setStatus(run.keyref, 'works', run.genNew);
     store.markRotated(run.keyref, now());
+    if (store.destinationsOf(run.keyref).some((row) => row.kind === WORKSTATION)) deliver(run, head);
     return advance(run, 'promoting', { revokeAt: now() + (overlap && run.genOld > 0 ? head.graceHours * HOUR_MS : 0) });
   }
 
@@ -392,7 +402,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     const old = run.genOld > 0 ? lendOrUndefined(run.keyref, run.genOld) : undefined;
     let held = 0;
     for (const receipt of store.receipts(run.runId)) {
-      if (!receipt.pushed || receipt.kind === 'workstation') continue;
+      // Every receipt, `maybe` included: a push that threw or never answered may have changed the destination.
       const dk = deps.destination(receipt.kind);
       if (old === undefined || dk === undefined) {
         held += 1;
@@ -425,8 +435,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       later(run.runId, retryDelayMs(attempts - 1));
       return 'wait';
     }
-    // A delivery of the failed generation that nobody fetched is withdrawn; the old value stays the one on offer.
-    store.withdrawDeliveries(run.keyref, run.genNew);
     const created = store.gen(run.keyref, run.genNew);
     const id = created?.platformKeyId ?? fresh?.id ?? null;
     // A key the box did not make (pasted) has nothing to revoke here; one it made is revoked and confirmed before the run ends.

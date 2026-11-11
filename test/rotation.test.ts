@@ -357,3 +357,75 @@ test('KBOX-51 a key that does not exist is not_found and opens no run', async (t
   assert.throws(() => w.orch.start({ keyref: 'fake/none/X', origin: 'owner' }), (e: unknown) => e instanceof ApiError && e.code === 'not_found');
   assert.equal(w.store.runs().length, 0);
 });
+
+// --- a push whose outcome is unknown (review B1) -----------------------------------------------------------------------------
+
+test('KBOX-17 a push that changed the destination and then threw is rolled back there too: the intent receipt names it, and the new key is revoked only after the old value is back', async (t) => {
+  const { w, keyref, oldValue, oldId } = await seeded(t);
+  w.destinations.a.applyThenThrow('app-b');
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.deepEqual(heldBy(w), [oldValue, oldValue], 'app-b, whose push applied and then threw, holds the old value again');
+  assert.deepEqual(await w.live(), [oldId], 'the new key is revoked; the old one still works');
+  assert.equal(w.events('rotation.failed').length, 1);
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+});
+
+test('KBOX-17 a crash between a push and its receipt leaves an intent receipt: a later rollback puts the old value back there before the new key is revoked', async (t) => {
+  const { w, keyref, oldValue, oldId } = await seeded(t);
+  w.checkpoints.arm('pushed', 1);
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  assert.equal(w.checkpoints.seen.at(-1), 'pushed', 'the process died after the first push and before its receipt');
+  const newValue = await w.valueOf(keyref, 2);
+  assert.equal(w.destinations.a.heldAt('app-a', NAME), newValue, 'app-a holds the new value');
+  w.checkpoints.crashAt = undefined;
+  w.destinations.a.refuse('app-a');
+  w.build();
+  await w.orch.resume();
+  assert.equal(w.destinations.a.heldAt('app-a', NAME), newValue, 'the push after the restart was refused, so app-a still holds the new value');
+  assert.equal((await w.live()).length, 2, 'the new key is not revoked while app-a may hold it');
+  w.destinations.a.allow('app-a');
+  await w.settle(MINUTE);
+  assert.deepEqual(heldBy(w), [oldValue, oldValue]);
+  assert.deepEqual(await w.live(), [oldId]);
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+});
+
+// --- deliveries to the workstation (review B2, M4) -----------------------------------------------------------------------------
+
+const WORKSTATION = { kind: 'workstation', target: 'workstation', readable_by: 'api' } as const;
+const deliveredGens = (w: RotationWorld): { rows: number[]; events: unknown[] } => ({
+  rows: w.store.deliveries().map((d) => d.gen),
+  events: w.events('delivery.ready').map((e) => e.data['gen']),
+});
+
+test('KBOX-34 a rotation that fails after its push offers no delivery of the new generation: no delivery row and no delivery.ready event for it', async (t) => {
+  const w = await rotationWorld(t);
+  const keyref = await w.seedKey({ destinations: [...w.newKey().destinations, WORKSTATION] });
+  assert.deepEqual(deliveredGens(w), { rows: [1], events: [1] }, 'the first generation was offered once it was promoted');
+  w.faults.verifyAt = 2;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+  assert.deepEqual(deliveredGens(w), { rows: [1], events: [1] }, 'nothing of generation 2 was ever offered');
+});
+
+test('KBOX-34 a successful rotation offers the new generation to the workstation once it is promoted', async (t) => {
+  const w = await rotationWorld(t);
+  const keyref = await w.seedKey({ destinations: [...w.newKey().destinations, WORKSTATION] });
+  let atCheck: { rows: number[]; events: unknown[] } | undefined;
+  w.checkpoints.hook = async (point) => {
+    if (point === 'checking') atCheck = deliveredGens(w);
+  };
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.deepEqual(atCheck, { rows: [1], events: [1] }, 'not offered before the check passed');
+  assert.deepEqual(deliveredGens(w), { rows: [1, 2], events: [1, 2] });
+});
+
+test('KBOX-16 KBOX-34 an admin key with a workstation destination gets no delivery row and no delivery.ready event', async (t) => {
+  const w = await rotationWorld(t, { klass: 'admin' });
+  await w.seedKey({ destinations: [WORKSTATION] });
+  assert.deepEqual(deliveredGens(w), { rows: [], events: [] });
+});
