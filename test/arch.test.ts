@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import {
   checkCatches,
   checkCycles,
+  checkInstallWrites,
   checkErasable,
   checkKitIndependence,
   checkLayers,
@@ -520,4 +521,47 @@ test('KBOX-6 a dynamic import() in a module a src/cli file reaches, two imports 
 
 test('KBOX-6 the repo\'s own src/cli loads only static imports', async () => {
   assert.deepEqual(await checkStaticCli(REPO_ROOT), []);
+});
+
+// ---------------------------------------------------------------- KBOX-6 (kb-install writes only where the spec lets it)
+
+/** A kb-install whose shell module holds `body`, with the installer's own paths in scope. */
+const installWriting = (body: string): Tree =>
+  withChanges({
+    'src/cli/kb-install.ts': "import { run } from '../shell/w.ts';\nrun({ releases: '/opt/keybox/releases', current: '/opt/keybox/current', trustFile: '/etc/keybox/trust.json', codesDir: '/etc/keybox/codes', results: '/var/lib/keybox-install', staging: '/var/lib/keybox/staging' });\n",
+    'src/shell/w.ts': `import { closeSync, constants, mkdirSync, openSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';\nimport { join } from 'node:path';\nexport interface P { releases: string; current: string; trustFile: string; codesDir: string; results: string; staging: string }\nconst at = (fd: number, name: string): string => \`/proc/self/fd/\${fd}/\${name}\`;\nexport function run(paths: P): void {\n${body}\n}\n`,
+  });
+
+test('KBOX-6 kb-install writing outside the spec\'s paths is refused: a literal path, another member of its paths, a parameter given one, a write-mode open', async (t) => {
+  await refuses(t, installWriting("  writeFileSync('/etc/passwd', 'x');"), checkInstallWrites, 'install-write-path');
+  await refuses(t, installWriting("  const other = { home: '/root' };\n  rmSync(join(other.home, 'x'), { recursive: true });"), checkInstallWrites, 'install-write-path');
+  await refuses(t, installWriting("  const put = (dir: string): void => mkdirSync(dir);\n  put(join(paths.releases, 'a'));\n  put('/usr/local/bin');"), checkInstallWrites, 'install-write-path');
+  await refuses(t, installWriting("  closeSync(openSync('/etc/shadow', constants.O_WRONLY | constants.O_APPEND));"), checkInstallWrites, 'install-write-path');
+  await refuses(t, installWriting("  renameSync(join(paths.results, 'a'), '/etc/cron.d/x');"), checkInstallWrites, 'install-write-path');
+});
+
+test('KBOX-6 kb-install writing under the spec\'s paths, through a held directory descriptor or in code it never calls is accepted', async (t) => {
+  await accepts(
+    t,
+    installWriting(
+      [
+        "  const temp = `${paths.trustFile}.tmp`;",
+        "  writeFileSync(temp, '{}');",
+        '  renameSync(temp, paths.trustFile);',
+        "  const put = (dir: string): void => mkdirSync(dir);",
+        "  put(join(paths.releases, 'h.tmp'));",
+        "  rmSync(join(paths.results, 'h.result'), { force: true });",
+        "  rmSync(`${paths.current}.tmp`, { force: true });",
+        "  mkdirSync(join(paths.codesDir, 'x'));",
+        "  unlinkSync(at(3, 'x.request'));",
+        "  closeSync(openSync('/etc/hostname', constants.O_RDONLY));",
+      ].join('\n'),
+    ),
+    checkInstallWrites,
+  );
+  await accepts(t, withChanges({ 'src/cli/kb-install.ts': 'export const x = 1;\n', 'src/shell/never.ts': "import { writeFileSync } from 'node:fs';\nexport const w = (): void => writeFileSync('/etc/passwd', 'x');\n" }), checkInstallWrites);
+});
+
+test('KBOX-6 the repo\'s own kb-install writes only under releases/, current, trust.json, /etc/keybox/codes, /var/lib/keybox-install and staging', async () => {
+  assert.deepEqual(await checkInstallWrites(REPO_ROOT), []);
 });
