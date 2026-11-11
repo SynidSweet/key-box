@@ -22,7 +22,10 @@ interface OneOfField<V extends readonly string[]> {
 interface TrueField {
   readonly kind: 'true';
 }
-type BaseField = TextField | IntField | OneOfField<readonly string[]> | TrueField;
+interface BoolField {
+  readonly kind: 'bool';
+}
+type BaseField = TextField | IntField | OneOfField<readonly string[]> | TrueField | BoolField;
 type OptionalOf<F extends BaseField> = F & { readonly optional: true };
 export type Field = BaseField | OptionalOf<BaseField>;
 export type Schema = Readonly<Record<string, Field>>;
@@ -31,9 +34,10 @@ export const text = (pattern: RegExp): TextField => ({ kind: 'text', pattern });
 export const int = (min = 0, max = Number.MAX_SAFE_INTEGER): IntField => ({ kind: 'int', min, max });
 export const oneOf = <const V extends readonly string[]>(...values: V): OneOfField<V> => ({ kind: 'oneOf', values });
 export const isTrue: TrueField = { kind: 'true' };
+export const isBool: BoolField = { kind: 'bool' };
 export const optional = <F extends BaseField>(field: F): OptionalOf<F> => ({ ...field, optional: true });
 
-type ValueOf<F> = F extends { kind: 'text' } ? string : F extends { kind: 'int' } ? number : F extends { kind: 'oneOf'; values: infer V extends readonly string[] } ? V[number] : F extends { kind: 'true' } ? true : never;
+type ValueOf<F> = F extends { kind: 'text' } ? string : F extends { kind: 'int' } ? number : F extends { kind: 'oneOf'; values: infer V extends readonly string[] } ? V[number] : F extends { kind: 'true' } ? true : F extends { kind: 'bool' } ? boolean : never;
 type RequiredKeys<S extends Schema> = { [K in keyof S]: S[K] extends { optional: true } ? never : K }[keyof S];
 type OptionalKeys<S extends Schema> = { [K in keyof S]: S[K] extends { optional: true } ? K : never }[keyof S];
 type Flat<T> = { [K in keyof T]: T[K] };
@@ -73,6 +77,8 @@ function fieldValue(field: Field, raw: unknown, fromQuery: boolean): Parsed<unkn
       return typeof raw === 'string' && field.values.includes(raw) ? { ok: true, value: raw } : refused;
     case 'true':
       return !fromQuery && raw === true ? { ok: true, value: true } : refused;
+    case 'bool':
+      return !fromQuery && typeof raw === 'boolean' ? { ok: true, value: raw } : refused;
     case 'int': {
       const n = fromQuery ? (typeof raw === 'string' && /^\d{1,15}$/.test(raw) ? Number(raw) : Number.NaN) : raw;
       return typeof n === 'number' && Number.isSafeInteger(n) && n >= field.min && n <= field.max ? { ok: true, value: n } : refused;
@@ -147,7 +153,7 @@ export const EVENT_SCHEMAS = {
   'approval.executed': { approval_id: text(NAME), result: oneOf('done', 'failed'), reason_code: text(CODE) },
   'key.changed': { keyref: text(NAME) },
   'rotation.state': { run_id: text(NAME), keyref: text(NAME), state: text(CODE), step: text(CODE) },
-  'rotation.failed': { run_id: text(NAME), keyref: text(NAME), step: text(CODE), reason_code: text(CODE), old_key_works: isTrue },
+  'rotation.failed': { run_id: text(NAME), keyref: text(NAME), step: text(CODE), reason_code: text(CODE), old_key_works: isBool },
   'rotation.old_key_still_on': { run_id: text(NAME), keyref: text(NAME), gen: int(1) },
   'delivery.ready': { delivery_id: text(NAME), keyref: text(NAME), project: text(NAME), name: text(NAME), gen: int(1) },
   'share.version': { version: int() },
@@ -199,6 +205,15 @@ export const AUDIT_SCHEMAS = {
   'token.revoked': {},
   'key.issued': {},
   'key.revoked': {},
+  // rotate (KBOX-51, KBOX-17, KBOX-34): the row's ref is the key reference (a delivery id for `delivery.acked`).
+  'rotation.started': { run_id: text(NAME), origin: oneOf('schedule', 'owner', 'agent', 'approval', 'paste', 'create', 'reconcile'), gen: int(1) },
+  'rotation.step_failed': { run_id: text(NAME), step: text(CODE), code: text(CODE) },
+  'rotation.completed': { run_id: text(NAME), gen: int(1) },
+  'rotation.orphan_revoked': { run_id: text(NAME) },
+  'rotation.restarted': { old_run: text(NAME), new_run: text(NAME) },
+  'rotation.revoke_unconfirmed': { run_id: text(NAME), gen: int(0), attempt: int(1) },
+  'rotation.drive_failed': { run_id: text(NAME), code: text(CODE) },
+  'delivery.acked': {},
   /** A push service accepted one message. The row's ref is `push`; no endpoint, key or title is recorded. */
   'push.delivered': { status: int(100, 599) },
   /** A push service answered 404 or 410: that subscription was removed. */

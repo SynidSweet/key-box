@@ -6,7 +6,7 @@
  * The few browser objects the pages use, typed here because the project's type check carries no DOM library.
  * @typedef {{ textContent: string | null, hidden: boolean, disabled: boolean, value: string, className: string,
  *   append(...nodes: (BrowserElement | string)[]): void, replaceChildren(...nodes: (BrowserElement | string)[]): void,
- *   addEventListener(type: string, listener: () => void): void }} BrowserElement
+ *   setAttribute(name: string, value: string): void, addEventListener(type: string, listener: () => void): void }} BrowserElement
  * @typedef {{ getElementById(id: string): BrowserElement | null, createElement(tag: string): BrowserElement }} BrowserDocument
  * @typedef {{ result: unknown, error: unknown, onsuccess: (() => void) | null, onerror: (() => void) | null, onupgradeneeded: (() => void) | null }} IdbRequest
  * @typedef {{ objectStore(name: string): { put(value: unknown, key: string): IdbRequest, get(key: string): IdbRequest } }} IdbTransaction
@@ -15,7 +15,7 @@
  * @typedef {{ subscribe(o: { userVisibleOnly: true, applicationServerKey: Uint8Array<ArrayBuffer> }): Promise<{ toJSON(): unknown }> }} PushManager
  * @typedef {{ credentials: { create(o: { publicKey: object }): Promise<unknown>, get(o: { publicKey: object }): Promise<unknown> },
  *   serviceWorker?: { register(url: string): Promise<unknown>, ready: Promise<{ pushManager?: PushManager }> } }} BrowserNavigator
- * @typedef {{ document: BrowserDocument, navigator: BrowserNavigator, indexedDB: IdbFactory, location: { hostname: string } }} Browser
+ * @typedef {{ document: BrowserDocument, navigator: BrowserNavigator, indexedDB: IdbFactory, location: { hostname: string, hash: string } }} Browser
  */
 
 /** The browser's globals under the types above. The one place the page's code meets the untyped runtime. */
@@ -66,6 +66,9 @@ export const approvalChallenge = (approvalId, digest, nonce) => sha256('kbox-v1'
 
 /** `SHA-256("kbox-v1-deny" || approvalId || actionDigest || nonce)`. @param {string} approvalId @param {Uint8Array} digest @param {Uint8Array} nonce */
 export const denialChallenge = (approvalId, digest, nonce) => sha256('kbox-v1-deny', approvalId, digest, nonce);
+
+/** `SHA-256("kbox-v1-paste" || pasteId || actionDigest || nonce)` (KBOX-12). @param {string} pasteId @param {Uint8Array} digest @param {Uint8Array} nonce */
+export const pasteChallenge = (pasteId, digest, nonce) => sha256('kbox-v1-paste', pasteId, digest, nonce);
 
 /** `SHA-256("kbox-v1-view" || nonce)`. @param {Uint8Array} nonce */
 export const viewChallenge = (nonce) => sha256('kbox-v1-view', nonce);

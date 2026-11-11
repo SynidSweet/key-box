@@ -11,6 +11,12 @@ export interface Lent {
   use<T>(fn: (bytes: Uint8Array) => Promise<T>): Promise<T>;
 }
 
+/** Where a platform holds a key: the region and project recorded with the key when it was issued (names only). */
+export interface KeyLocation {
+  readonly region?: string;
+  readonly project?: string;
+}
+
 export type Alphabet = 'hex' | 'base62' | 'base64' | 'base64url';
 
 export interface KeyShape {

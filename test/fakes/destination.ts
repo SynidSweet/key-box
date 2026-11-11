@@ -1,4 +1,4 @@
-import type { DeployRef, Destination, DestinationKind, DestinationTarget, PushReceipt, Redeployer } from '../../src/ports/destination.ts';
+import type { DeployRef, Destination, DestinationKind, DestinationTarget, PushOutcome, Redeployer } from '../../src/ports/destination.ts';
 import type { Lent } from '../../src/ports/types.ts';
 
 const slot = (t: DestinationTarget, name: string): string => `${t.kind}:${t.id}/${name}`;
@@ -12,14 +12,14 @@ export class FakeDestination implements Destination {
     return { readableBy: 'runtime', needsRedeploy: true };
   }
 
-  async push(t: DestinationTarget, name: string, v: Lent, master: Lent): Promise<PushReceipt> {
+  async push(t: DestinationTarget, name: string, v: Lent, master: Lent): Promise<PushOutcome> {
     void master;
     const bytes = Buffer.from(await v.use((b) => Promise.resolve(Uint8Array.from(b))));
     const existing = this.#held.get(slot(t, name));
-    if (existing !== undefined && existing.bytes.equals(bytes)) return { version: String(existing.version) };
+    if (existing !== undefined && existing.bytes.equals(bytes)) return { outcome: 'applied', version: String(existing.version) };
     this.#versions += 1;
     this.#held.set(slot(t, name), { bytes, version: this.#versions });
-    return { version: String(this.#versions) };
+    return { outcome: 'applied', version: String(this.#versions) };
   }
 
   remove(t: DestinationTarget, name: string, master: Lent): Promise<void> {

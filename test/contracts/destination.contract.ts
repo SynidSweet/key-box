@@ -27,6 +27,7 @@ export function destinationContract(name: string, make: () => DestinationSubject
     const first = await destination.push(target, 'API_KEY', valueOne, master);
     const again = await destination.push(target, 'API_KEY', valueOne, master);
     assert.equal(has('API_KEY'), true);
+    assert.equal(first.outcome, 'applied', 'a push that took effect says so');
     assert.deepEqual(again, first);
   });
 

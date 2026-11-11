@@ -1,7 +1,7 @@
 // One in-memory platform: an issuer, its lister and its verifier over the same set of live keys.
 import type { Random } from '../../src/ports/random.ts';
-import type { Issuer, IssuerCapabilities, IssuedKey, IssueRequest, KeyLister, PlatformKeyInfo, Verifier } from '../../src/ports/issuer.ts';
-import type { KeyClass, Lent, PlatformKeyId, Scope } from '../../src/ports/types.ts';
+import type { Issuer, IssuerCapabilities, IssuedKey, IssueRequest, KeyListing, KeyLister, PlatformKeyInfo, Verifier } from '../../src/ports/issuer.ts';
+import type { KeyClass, KeyLocation, Lent, PlatformKeyId, Scope } from '../../src/ports/types.ts';
 import { lent } from '../kit/index.ts';
 
 const hex = (b: Uint8Array): string => Buffer.from(b).toString('hex');
@@ -27,6 +27,17 @@ export class FakePlatformWorld {
     return lent(Buffer.from('fk-stranger'), 'stranger:1');
   }
 
+  /**
+   * A platform that holds one credential and takes a value the caller chose (overlap:false, a database password): the value it held
+   * before stops working at once. The credential is listed as `pk-set`.
+   */
+  async set(value: Lent, master: Lent): Promise<void> {
+    await this.#requireMaster(master);
+    if (!this.#reachable) throw new Error('platform unreachable');
+    const bytes = await value.use((b) => Promise.resolve(Uint8Array.from(b)));
+    this.#keys.set('pk-set', { name: 'credential', bytes });
+  }
+
   setReachable(reachable: boolean): void {
     this.#reachable = reachable;
   }
@@ -38,6 +49,7 @@ export class FakePlatformWorld {
       revoke: 'api',
       selfRotate: false,
       overlap: true,
+      set: 'none',
       revealOnce: true,
       scopeSchema: { fields: ['access'] },
       shape: { prefix: 'fk-', alphabet: 'hex', coreLength: { min: 32, max: 32 }, random: true },
@@ -63,6 +75,11 @@ export class FakePlatformWorld {
     list: async (master: Lent): Promise<PlatformKeyInfo[]> => {
       await this.#requireMaster(master);
       return [...this.#keys].map(([platformKeyId, { name }]) => ({ platformKeyId, name }));
+    },
+    /** One place holds every key: any location asked for is answered with all of them, in one complete page. */
+    listAt: async (at: KeyLocation, master: Lent): Promise<KeyListing> => {
+      await this.#requireMaster(master);
+      return { complete: true, at, keys: [...this.#keys].map(([platformKeyId, { name }]) => ({ platformKeyId, name, location: at })) };
     },
   };
 

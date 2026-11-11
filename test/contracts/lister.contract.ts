@@ -33,5 +33,20 @@ export function listerContract(name: string, make: () => ListerSubject): void {
   test(`KBOX-35 lister contract (${name}): a master the platform refuses cannot list`, async () => {
     const { lister, wrongMaster } = make();
     await assert.rejects(() => lister.list(wrongMaster));
+    await assert.rejects(() => lister.listAt({}, wrongMaster));
+  });
+
+  test(`KBOX-35 KBOX-51 lister contract (${name}): a listing of one location says where it is of and whether it is complete, shows an issued key until it is revoked, and carries no value`, async () => {
+    const { issuer, lister, master } = make();
+    const issued = await issuer.issue(request, 'located', master);
+    const value = await issued.value.use((b) => Promise.resolve(Buffer.from(b).toString('utf8')));
+    const before = await lister.listAt({}, master);
+    assert.deepEqual(before.at, {});
+    assert.equal(typeof before.complete, 'boolean');
+    assert.equal(before.keys.some((k) => k.platformKeyId === issued.platformKeyId && k.disabled !== true), true);
+    assert.equal(JSON.stringify(before).includes(value), false);
+    await issuer.revoke(issued.platformKeyId, master);
+    const after = await lister.listAt({}, master);
+    assert.equal(after.complete && after.keys.some((k) => k.platformKeyId === issued.platformKeyId && k.disabled !== true), false);
   });
 }
