@@ -165,11 +165,17 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     }
   };
 
+  /** The release `current` names, or undefined when it names none (it never leaves releases/ through kb-install). */
+  const currentRelease = (): string | undefined => {
+    if (!existsSync(paths.current)) return undefined;
+    const target = realpathSync(paths.current);
+    return dirname(target) === realpathSync(paths.releases) && RELEASE_HASH.test(basename(target)) ? basename(target) : undefined;
+  };
+
   /** H0: `current` resolves to `releases/<H0>`, or kb-install refuses to act. */
   const runningRelease = (): string => {
-    const target = realpathSync(paths.current);
-    const h0 = basename(target);
-    if (dirname(target) !== realpathSync(paths.releases) || !RELEASE_HASH.test(h0)) throw new Error('current is not a release');
+    const h0 = currentRelease();
+    if (h0 === undefined) throw new Error('current is not a release');
     return h0;
   };
 
@@ -309,15 +315,25 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
   /** A restart that cannot be made in time is journalled: `current` is already where it must be, nothing else is left to do. */
   const restartBy = (until: number): Promise<void> => deps.units.restart(until).catch(() => deps.journal?.('restart_failed'));
 
+  /** A record root cannot act on (torn, its base gone, or not matching `current`) is set aside unchanged for a later look,
+   * `current` is left as it is and a fixed code is journalled: the run goes on to serve requests, never wedged by it. */
+  const setAside = (): void => {
+    renameSync(switchingFile, join(paths.results, `switching.bad-${deps.clock.now()}`));
+    deps.journal?.('switching_bad');
+  };
+
   const recoverInterrupted = async (): Promise<void> => {
     if (!existsSync(switchingFile)) return;
     const record = /^switching ([0-9a-f]{64}) from ([0-9a-f]{64})\n$/.exec(readFileSync(switchingFile, 'utf8'));
     const h = record?.[1];
     const base = record?.[2];
-    if (h === undefined || base === undefined || !existsSync(join(paths.releases, base))) throw new Error('the switching record does not name a release');
+    if (h === undefined || base === undefined || h === base || !existsSync(join(paths.releases, base))) return setAside();
+    const running = currentRelease();
+    // The record is written before the copy and removed after: current is its base, its H, or (never made) absent.
+    if (existsSync(paths.current) && running !== base && running !== h) return setAside();
     const release = join(paths.releases, h);
     const ranFromH = existsSync(release);
-    if (!existsSync(paths.current) || runningRelease() !== base) switchCurrent(base);
+    if (running !== base) switchCurrent(base);
     if (ranFromH) await restartBy(Math.min(deps.clock.now() + RESTART_WITHIN_MS, runDeadline));
     rmSync(`${release}.tmp`, { recursive: true, force: true });
     rmSync(release, { recursive: true, force: true });

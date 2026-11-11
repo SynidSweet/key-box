@@ -123,6 +123,8 @@ export interface InstallWorld {
   readonly units: FakeUnits;
   readonly codes: CodeRoot;
   readonly console: string[];
+  /** The fixed codes kb-install journalled, in order. */
+  readonly journal: string[];
   /** Writes a tree to staging/<H>/ and returns H. */
   stage(tree: Tree, name?: string): string;
   /** A kept approval proof for an action, signed by an approver (the owner by default) over the `kbox-v1` challenge. */
@@ -158,6 +160,7 @@ export async function installWorld(t: TestContext, options: { readonly trust?: f
   writeFileSync(paths.bootIdFile, `${BOOT}\n`);
   const clock = new FakeClock(1_700_000_000_000);
   const consoleLines: string[] = [];
+  const journal: string[] = [];
   const codes = createCodeRoot({ dir: paths.codesDir, sink: (l) => void consoleLines.push(l), random: { bytes: (n) => Uint8Array.from(randomBytes(n)) }, clock, wordlist: WORDLIST });
 
   const writeTree = (dir: string, tree: Tree): void => {
@@ -192,6 +195,7 @@ export async function installWorld(t: TestContext, options: { readonly trust?: f
     units,
     codes,
     console: consoleLines,
+    journal,
     stage(tree, name) {
       const h = hashOf(tree);
       writeTree(join(paths.staging, name ?? h), tree);
@@ -206,7 +210,7 @@ export async function installWorld(t: TestContext, options: { readonly trust?: f
       world.request(h, { kind: 'install', install: h, commit: COMMIT, base, ...(approval === undefined ? {} : { approval }) });
     },
     runKilledAt: (step) => runNode([new URL('./install-kill.ts', import.meta.url).pathname, JSON.stringify(paths), step], root),
-    run: (hooks) => runInstaller({ paths, units, clock, wordlist: WORDLIST, domain: DOMAIN, ...(hooks === undefined ? {} : { hooks }) }).then(() => undefined),
+    run: (hooks) => runInstaller({ paths, units, clock, wordlist: WORDLIST, domain: DOMAIN, journal: (code) => void journal.push(code), ...(hooks === undefined ? {} : { hooks }) }).then(() => undefined),
     result(name) {
       const file = join(paths.results, `${name}.result`);
       return existsSync(file) ? readFileSync(file, 'utf8') : undefined;

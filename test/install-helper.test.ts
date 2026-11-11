@@ -557,6 +557,44 @@ test('KBOX-6 a kill between copy and switch leaves the base current and no relea
   assert.deepEqual(w.units.restarts, [], 'current never moved, so nothing is restarted');
 });
 
+// --- a switching record root cannot act on: set aside, never a wedge -------------------------------------------------
+
+/** Plants `record` as the switching record and runs with a trust request waiting: the record must be set aside as
+ * `switching.bad-<time>` unchanged, `current` left where it is, `switching_bad` journalled, and the request still served. */
+async function setAsideAndServe(w: InstallWorld, record: string): Promise<void> {
+  writeFileSync(join(w.paths.results, 'switching'), record);
+  const before = w.current();
+  const added = newApprover(w, 'ap-second-0002');
+  w.request('trust-a', { kind: 'trust', change: 'approver_add', approval: w.proof(addActionOf(added)), approver: added });
+  await w.run();
+  assert.equal(w.current(), before, 'current is kept as it is');
+  assert.deepEqual(w.units.restarts, [], 'nothing was restarted');
+  const setAside = readdirSync(w.paths.results).filter((n) => /^switching\.bad-\d+$/.test(n));
+  assert.equal(setAside.length, 1, `set aside as switching.bad-<time>: ${readdirSync(w.paths.results).join(' ')}`);
+  assert.equal(readFileSync(join(w.paths.results, setAside[0] ?? ''), 'utf8'), record, 'kept byte for byte for a later look');
+  assert.equal(existsSync(join(w.paths.results, 'switching')), false);
+  assert.deepEqual(w.journal, ['switching_bad']);
+  assert.equal(w.result('trust-a'), 'applied', 'kb-install goes on to serve requests');
+}
+
+test('KBOX-6 a torn switching record (it does not parse) is set aside, current is kept, switching_bad is journalled and requests are served', async (t) => {
+  const w = await installWorld(t);
+  await setAsideAndServe(w, `switching ${'a'.repeat(64)} from ${w.h0.slice(0, 20)}`);
+});
+
+test('KBOX-6 a switching record whose base release is gone is set aside, current is kept, and requests are served', async (t) => {
+  const w = await installWorld(t);
+  await setAsideAndServe(w, `switching ${'a'.repeat(64)} from ${'b'.repeat(64)}\n`);
+});
+
+test('KBOX-6 a switching record that does not match current (current is neither its H nor its base) is set aside and current is not moved to its base', async (t) => {
+  const w = await installWorld(t);
+  const other = 'c'.repeat(64);
+  mkdirSync(join(w.paths.releases, other)); // the record's base exists, but current never left H0 for the record's H
+  await setAsideAndServe(w, `switching ${'a'.repeat(64)} from ${other}\n`);
+  assert.deepEqual(w.releases(), [other, w.h0].sort(), 'no release was removed');
+});
+
 // --- trust.json -------------------------------------------------------------------------------------------------------
 
 const newApprover = (w: InstallWorld, id: string) => w.trusted(id, softApprover());
