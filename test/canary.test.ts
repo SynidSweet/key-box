@@ -1,6 +1,7 @@
 // KBOX-2: a value leaves the box only to an approved destination or a relayed upstream. The canary suite is extended by every
 // unit that adds a response, log line or event. Here: vault, adapter errors, requests, the frame, and the running process.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -12,6 +13,7 @@ import { createMetaStore } from '../src/shell/meta.ts';
 import { openMetaDatabase } from '../src/shell/db.ts';
 import { createEventHub } from '../src/shell/events.ts';
 import { route } from '../src/shell/http.ts';
+import { findDerived } from './kit/derived-forms.ts';
 import { FakeClock, bytesOf, canary, drive, fakePlatform, seededRandom, startCore, startNode, tempDir } from './kit/index.ts';
 import type { Surface } from './kit/index.ts';
 
@@ -80,6 +82,7 @@ test('KBOX-2 a value put in the vault, quoted by a failing handler and echoed by
     responses: bodies.join('\n'),
   };
   c.assertAbsent(surfaces);
+  assert.deepEqual(findDerived(c.bytes, REF, surfaces), [], 'a prefix, suffix, length beside the name, or digest of the vault value is in a surface');
   assert.ok(bodies.some((b) => b.includes('"internal"')), 'the failing handlers did answer internal');
   assert.deepEqual(
     box.audit.read(0).entries.filter((r) => r.detail['status'] === 500).map((r) => r.detail['cause']),
@@ -162,4 +165,30 @@ test('KBOX-2 a route that throws an ApiError carrying a detail shows only the cl
   const token = box.enrol('ctl-1', 'control');
   const reply = await box.call('/api/test/detail', { token });
   assert.deepEqual(reply.json(), { error: { code: 'rejected', message: 'The value did not pass its checks.', detail: { code: 'too_short' } } });
+});
+
+test('KBOX-2 the derived-form scan of a vault value finds a prefix, a suffix, a length beside the name and a digest in an audit row, an event, a database row and a WAL', async (t) => {
+  const box = await startCore(t);
+  const c = canary(40);
+  const raw = Buffer.from(c.bytes);
+  const digest = createHash('sha256').update(raw).digest();
+  const planted: [string, string][] = [
+    ['prefix', raw.subarray(0, 8).toString('hex')],
+    ['prefix', raw.subarray(0, 8).toString('base64url')],
+    ['suffix', raw.subarray(-8).toString('hex')],
+    ['length', `${REF} 40`],
+    ['length', `40 ${REF}`],
+    ['sha256', digest.toString('hex')],
+    ['sha256', digest.toString('base64')],
+  ];
+  const clean = findDerived(c.bytes, REF, { audit: JSON.stringify(box.audit.read(0).entries), events: JSON.stringify(box.events.after(0)) });
+  assert.deepEqual(clean, [], 'nothing planted yet');
+  for (const [form, text] of planted) {
+    for (const where of ['audit', 'events', 'database', 'wal']) {
+      const surface: Surface = where === 'database' || where === 'wal' ? Buffer.from(`\0\0${text}\0`) : `{"detail":{"note":"${text}"}}`;
+      const hits = findDerived(c.bytes, REF, { [where]: surface });
+      assert.ok(hits.some((h) => h.form.includes(form)), `${form} planted in ${where} (${text.length} characters) is found`);
+    }
+  }
+  assert.deepEqual(findDerived(c.bytes, REF, { near: `${REF} 401 and 4040 ${'x'.repeat(40)} 40` }), [], 'a length that is not beside the name, or only part of a number, is no hit');
 });
