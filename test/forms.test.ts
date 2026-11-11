@@ -394,7 +394,7 @@ const rawHoldLeaks = (formLength: number, planted: Planted): boolean =>
 test('KBOX-54 property: a copy split at EVERY chunk boundary is found exactly once and the release point never passes its start (wrapped copies included)', () => {
   let rawHoldWouldLeak = 0;
   checkProperty(seed, 8, (rng) => {
-    const core = randomText(rng, COPY_CHARS, 24, 40);
+    const core = randomText(rng, COPY_CHARS, 60, 72);
     const all = formsOrThrow(scanForms(core));
     const base64Forms = all.filter((f) => f.name.startsWith('b64'));
     for (const wrap of WRAPS) {
@@ -429,7 +429,7 @@ test('KBOX-54 property: the same holds for forms made of backslashes, and for a 
 
 test('KBOX-54 a wrapped copy (base64 at 64 and 76 columns with CRLF, backslash-newline) is found only in the stripped view and maps back to its raw offsets', () => {
   const rng = seededRandom(seed);
-  const core = randomText(rng, COPY_CHARS, 40, 48);
+  const core = randomText(rng, COPY_CHARS, 60, 72);
   const forms = formsOrThrow(scanForms(core));
   const form = formNamed(forms, 'b64-0');
   for (const wrap of WRAPS.filter((w) => w.sep !== '')) {
