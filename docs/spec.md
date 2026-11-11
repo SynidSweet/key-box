@@ -388,11 +388,15 @@ refused after 10 minutes and on second use.
 ### Unit `update`: bundle intake, install over an approved base, the bootstrap, egress layers, idle watch
 
 **`KBOX-1` Nobody logs in.** Source: design §1.2. The box has no `sshd`, no login user besides system accounts, no shell endpoint and no debug route; the OCI
-Run Command agent plugin is disabled; the OCI Compute Instance Monitoring plugin stays on. The serial console is reachable only through the OCI account. Agents
+Run Command agent plugin is off: the owner leaves it unticked in the instance's Oracle Cloud Agent settings when creating it (the setup guide says so), and the
+bootstrap stops loudly, before anything is installed, if any Run Command plugin is found on the box (a `runcommand` path under the agent's install, state or log
+directories, or a running process of that name); no on-box command to disable it is documented, so none is run. The OCI Compute Instance Monitoring plugin stays on. The serial console is reachable only through the OCI account. Agents
 get no login, root, console or cloud-account access. Test (`test/bootstrap-text.test.ts`, text check of `deploy/cloud-init.yaml`): `ssh` packages removed and
-`sshd` masked, no `authorized_keys` for any user, the default user's keys removed, the Run Command plugin disabled and the monitoring plugin not; the route
-table of core and relay (exported by `main-*`) has no route matching shell, exec, debug, eval or console; the exact command that disables the plugin is
-UNVERIFIED and is probed on the real instance by the builder (reported, not run in tests).
+`sshd` masked, no `authorized_keys` for any user, the default user's keys removed, the Run Command check present and the monitoring plugin untouched; the route
+table of core and relay (exported by `main-*`) has no route matching shell, exec, debug, eval or console; where the agent keeps its plugins on the Ubuntu
+image is UNVERIFIED, so the check runs in tests against a fixture tree, and the bootstrap records what it looked at (each searched directory that exists, the
+names directly under it, and what the check found) in the root-owned, world-readable `/var/lib/keybox/bootstrap-facts.json` (no secrets); core serves it
+read-only at `GET /api/bootstrap-facts` to a control token, so the builder confirms the paths on the real instance without a login.
 
 **`KBOX-6` The box installs only an approved exact hash, over the base it was approved against.** Source: design §1.4. `POST /api/updates` (scope `control`,
 `Content-Type: application/x-tar`, query `commit=<40 hex>`) takes a tar of the tracked files at commit C plus `runtime.lock`. Intake limits: 20 MiB, 5,000
@@ -441,7 +445,7 @@ directives; both pages carry the sentence "These limits do not stop an approved 
 
 **`KBOX-48` The bootstrap text and the setup checklist.** Source: design §1.5. The bootstrap is a cloud-init document of about 60 lines in the repo's README
 at a tagged release, opened on the phone. It names the commit C and content hash H of release 1 and the official URLs and sha256 of the Node and Caddy builds;
-downloads the source at C from `codeload.github.com`; checks H; installs (the units, `deploy/keybox-tmpfiles.conf` and the root installer `kb-install`, `KBOX-6`); removes sshd and the default user's keys; disables the Run Command plugin; starts
+downloads the source at C from `codeload.github.com`; checks H; installs (the units, `deploy/keybox-tmpfiles.conf` and the root installer `kb-install`, `KBOX-6`); removes sshd and the default user's keys; stops if a Run Command plugin is found; starts
 the units; and generates the one-time setup code (`KBOX-49`) writing it to the console sink only. The checklist (`docs/setup-checklist.md`, written by this unit)
 says, in order: a new email account and a new Oracle account logged into only from the phone; one factor that does not sync to any machine the agents use: an
 **authenticator app synced only to the owner's Google account, which is never signed in on the workstation, devbox or Helsinki**, and whose passwords for
