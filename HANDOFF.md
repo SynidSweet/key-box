@@ -38,7 +38,7 @@ Run units with the compound-loop driver and `-G loop/gate.sh`.
 - `test/fakes/` and `test/contracts/`: in-memory fakes and one contract suite per port (`xContract(name, make)`); adapters call the
   same suite (`vault-fs.test.ts` runs `vaultContract` over the file vault).
 - Tests by rule: `canary.test.ts` (KBOX-2 end to end incl. the running process), `vault-fs.test.ts`, `vault-no-backup.test.ts`
-  (KBOX-19: spec's grep plus the behavioural file-tree test), `vault-sweep.test.ts` (orphan temp sweep), `meta-db`/`meta-store`,
+  (KBOX-19: the spec's grep; untouched), `vault-files.test.ts` (KBOX-19: behavioural file-tree test), `vault-sweep.test.ts` (orphan temp sweep), `meta-db`/`meta-store`,
   `audit-chain`, `events`, `api-frame`, `control-read`, `machine-token`, `client-address`, `canonical`, `deploy-units`, `forms`
   (oracle vectors in `test/fixtures/forms/`), `arch.test.ts` + `test/arch/*` (architecture checks on fixture trees and the repo).
 - `test/journeys/process-split.test.ts` (KBOX-45): root-only, switches uid; the gate runs it in a Docker container, never on the host.
