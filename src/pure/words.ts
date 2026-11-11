@@ -31,7 +31,7 @@ const where = (d: Destination): string => {
 export function titleOf(action: Action): string {
   switch (action.kind) {
     case 'add_key':
-      return `Add a ${action.platform} key: ${action.name}`;
+      return `Add a key on ${action.platform}: ${action.name}`;
     case 'delete_key':
       return `Delete the key ${action.keyref}`;
     case 'rotate_key':

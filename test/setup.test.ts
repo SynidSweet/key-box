@@ -7,6 +7,7 @@ import { softApprover } from './kit/approver.ts';
 import { approveWorld, challenges, newApproverBody, registerAt, setupCodeFrom, wire, RP } from './support/approve-world.ts';
 import { cborEncode } from './kit/cbor.ts';
 import { decodeCoseEs256 } from '../src/pure/cose.ts';
+import { FIXED } from '../src/pure/words.ts';
 
 const hex = (s: string): Uint8Array => Uint8Array.from(Buffer.from(s, 'hex'));
 const VECTOR_COSE = 'a50102032620012158201cf27f25da591208a4239c2e324f104f585525479a29edeedd830f48e77aeae522582059e4b7da6c0106e206ce390c93ab98a15a5ec3887e57f0cc2bece803b920c423';
@@ -130,7 +131,7 @@ test('KBOX-22 GET /app/push-key gives the phone the box\'s applicationServerKey 
   assert.deepEqual(JSON.parse(reply.body), { application_server_key_b64: w.push.applicationServerKey() });
 });
 
-test('KBOX-21 every phone page and script is served as the committed bytes with a self-only CSP and nosniff', async (t) => {
+test('KBOX-53 every phone page and script is served as the committed bytes with a self-only CSP and nosniff', async (t) => {
   const w = await approveWorld(t, { noSetup: true });
   const web = new URL('../src/web/', import.meta.url);
   const pages: [string, string, string][] = [
@@ -149,10 +150,17 @@ test('KBOX-21 every phone page and script is served as the committed bytes with 
   }
 });
 
-test('KBOX-49 KBOX-46 the setup page says losing the device key forces recovery before it makes the key, and that the limits do not stop a malicious approved update', () => {
-  const page = readFileSync(new URL('../src/web/setup.html', import.meta.url), 'utf8');
-  assert.match(page, /reinstall the app or clear its data[^<]*recovery/i);
-  assert.ok(page.includes('These limits do not stop an approved update that is malicious.'));
+test('KBOX-49 KBOX-46 KBOX-20 the setup page warns of the device key before the button that makes it, and carries the egress sentence and both recovery cases; /recover carries both cases', () => {
+  const setup = readFileSync(new URL('../src/web/setup.html', import.meta.url), 'utf8');
+  const recover = readFileSync(new URL('../src/web/recover.html', import.meta.url), 'utf8');
+  const warning = setup.indexOf(FIXED.deviceKeyWarning);
+  assert.ok(warning >= 0, 'the device key warning');
+  assert.ok(warning < setup.indexOf('id="go"'), 'said before the button that creates the key');
+  assert.ok(setup.includes('These limits do not stop an approved update that is malicious.'));
+  for (const page of [setup, recover]) {
+    assert.ok(page.includes(FIXED.recoverReinstalled));
+    assert.ok(page.includes(FIXED.recoverLostPhone));
+  }
 });
 
 test('KBOX-9 the phone page builds the same approval, view, operation and registration challenges as the box, and takes the COSE key out of the authenticator data', async () => {
