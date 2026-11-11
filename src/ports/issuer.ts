@@ -1,4 +1,4 @@
-import type { KeyClass, KeyShape, Lent, PlatformId, PlatformKeyId, Scope, ScopeSchema } from './types.ts';
+import type { KeyClass, KeyLocation, KeyShape, Lent, PlatformId, PlatformKeyId, Scope, ScopeSchema } from './types.ts';
 
 export interface IssuerCapabilities {
   readonly create: 'api' | 'paste';
@@ -36,6 +36,8 @@ export interface Issuer {
 export interface PlatformKeyInfo {
   readonly platformKeyId: PlatformKeyId;
   readonly name: string;
+  /** Where the platform holds it, when the platform has regions or projects (KBOX-51: a revoke is confirmed against this). */
+  readonly location?: KeyLocation;
 }
 
 /** Required when `revealOnce` is true. */

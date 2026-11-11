@@ -199,6 +199,15 @@ export const AUDIT_SCHEMAS = {
   'token.revoked': {},
   'key.issued': {},
   'key.revoked': {},
+  // rotate (KBOX-51, KBOX-17, KBOX-34): the row's ref is the key reference (a delivery id for `delivery.acked`).
+  'rotation.started': { run_id: text(NAME), origin: oneOf('schedule', 'owner', 'agent', 'approval', 'paste', 'create', 'reconcile'), gen: int(1) },
+  'rotation.step_failed': { run_id: text(NAME), step: text(CODE), code: text(CODE) },
+  'rotation.completed': { run_id: text(NAME), gen: int(1) },
+  'rotation.orphan_revoked': { run_id: text(NAME) },
+  'rotation.restarted': { old_run: text(NAME), new_run: text(NAME) },
+  'rotation.revoke_unconfirmed': { run_id: text(NAME), gen: int(0), attempt: int(1) },
+  'rotation.drive_failed': { run_id: text(NAME), code: text(CODE) },
+  'delivery.acked': {},
   /** A push service accepted one message. The row's ref is `push`; no endpoint, key or title is recorded. */
   'push.delivered': { status: int(100, 599) },
   /** A push service answered 404 or 410: that subscription was removed. */
