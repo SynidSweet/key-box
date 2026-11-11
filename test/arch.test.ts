@@ -587,7 +587,8 @@ test('KBOX-6 a path variable assigned again after its declaration is not traced 
 test('KBOX-6 kb-install writing under the spec\'s paths, through a held directory descriptor or in code it never calls is accepted', async (t) => {
   await accepts(
     t,
-    installWriting(
+    {
+      ...installWriting(
       [
         "  const temp = `${paths.trustFile}.tmp`;",
         "  writeFileSync(temp, '{}');",
@@ -597,10 +598,11 @@ test('KBOX-6 kb-install writing under the spec\'s paths, through a held director
         "  rmSync(join(paths.results, 'h.result'), { force: true });",
         "  rmSync(`${paths.current}.tmp`, { force: true });",
         "  mkdirSync(join(paths.codesDir, 'x'));",
-        "  unlinkSync(at(3, 'x.request'));",
         "  closeSync(openSync('/etc/hostname', constants.O_RDONLY));",
       ].join('\n'),
     ),
+    'src/shell/safe-open.ts': "import { unlinkSync } from 'node:fs';\nconst at = (fd: number, name: string): string => `/proc/self/fd/${fd}/${name}`;\nexport const held = (): void => unlinkSync(at(3, 'x.request'));\n",
+    },
     checkInstallWrites,
   );
   await accepts(t, withChanges({ 'src/cli/kb-install.ts': 'export const x = 1;\n', 'src/shell/never.ts': "import { writeFileSync } from 'node:fs';\nexport const w = (): void => writeFileSync('/etc/passwd', 'x');\n" }), checkInstallWrites);

@@ -312,7 +312,7 @@ test('KBOX-9 route: a changed action after render is refused (the digest the pho
 });
 
 test('KBOX-9 an approved install_update keeps the proof kb-install needs, and that proof does not verify for another action', async (t) => {
-  const w = await approveWorld(t);
+  const w = await approveWorld(t, { executors: { install_update: () => Promise.resolve({ result: 'waiting' }) } });
   const action = { kind: 'install_update', install: 'a'.repeat(64), commit: 'b'.repeat(40), base: 'c'.repeat(64) } as const;
   const item = await pending(w, action);
   assert.equal((await w.decide(item.approval_id, 'approve', w.proofFor(item))).status, 200);

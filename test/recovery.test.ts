@@ -393,10 +393,14 @@ test('KBOX-53 a recovery drops a pending device: approving its approver_add afte
   const w = await approveWorld(t);
   const add = await approvedAdd(w);
   const newcomer = softApprover();
+  const rendered = (await w.queue()).find((q) => q.approval_id === add.id);
+  assert.ok(rendered);
+  const proof = w.proofFor(rendered); // signed while the page was still shown
   assert.equal((await registerAt(w, '/recover', w.recoveryCode(), newcomer)).status, 201);
   const calls = addCalls(w);
-  assert.equal(await approveAdd(w, add.id, newcomer), 'failed');
-  assert.deepEqual(outcomes(w), [[add.id, 'failed', 'no_registration']]);
+  const reply = await w.decide(add.id, 'approve', proof);
+  assert.equal(reply.status, 409, reply.body);
+  assert.deepEqual(outcomes(w), []);
   assert.equal(addCalls(w), calls, 'root was not asked');
   assert.equal(w.core.approvers.ids().length, 1);
 });
