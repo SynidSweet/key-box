@@ -18,7 +18,7 @@ import { intentName, nextStep, retryDelayMs } from '../pure/rotation-machine.ts'
 import type { Step } from '../pure/rotation-machine.ts';
 import { revokeAndConfirm } from './revoke-confirm.ts';
 import type { DestinationKit, PlatformKit, PlatformSource, Point } from './rotation-ports.ts';
-import type { DestinationRow, KeyHead, RotationStore, RunOrigin, RunRow } from './rotation-store.ts';
+import type { DestinationRow, KeyHead, Receipt, RotationStore, RunOrigin, RunRow } from './rotation-store.ts';
 
 const HOUR_MS = 3600_000;
 /** The destination kind that is a delivery to the workstation, not an adapter (KBOX-34). */
@@ -382,10 +382,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   /** One notice for the run, then the rollback. */
   async function fail(run: RunRow, stepName: string, code: string, fresh?: Fresh): Promise<Next> {
     const head = store.key(run.keyref);
-    if (!run.failedNotified) {
-      deps.events.append('rotation.failed', { run_id: run.runId, keyref: run.keyref, step: underscored(stepName), reason_code: code, old_key_works: true });
-      if (head !== undefined && head.class !== 'ordinary') deps.push.send({ title: `The key change of ${run.keyref} failed; the old key still works`, kind: 'rotation_failed' });
-    }
+    if (!run.failedNotified) noticeFailed(run, head, underscored(stepName), code);
     const failed = store.update(run.runId, { state: 'rolling_back', failedStep: underscored(stepName), reasonCode: code, failedNotified: true });
     if (head !== undefined) store.setStatus(run.keyref, 'failed');
     const kit = kitOf(run.keyref);
@@ -397,37 +394,67 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     return 'wait';
   };
 
+  /**
+   * KBOX-17's one notice per failed run. A create run has no old generation, so its notice claims no old key: the `rotation.failed` event
+   * pins `old_key_works: true` (KBOX-31), so a create run sends the Web Push alone (admin and master), and its caller gets the failure as
+   * the answer to the create (`POST /api/keys`, the approval's or the paste's execution).
+   */
+  function noticeFailed(run: RunRow, head: KeyHead | undefined, step: string, code: string): void {
+    const pushed = head !== undefined && head.class !== 'ordinary';
+    if (run.genOld === 0) {
+      if (pushed) deps.push.send({ title: `Adding the key ${run.keyref} failed`, kind: 'rotation_failed' });
+      return;
+    }
+    deps.events.append('rotation.failed', { run_id: run.runId, keyref: run.keyref, step, reason_code: code, old_key_works: true });
+    if (pushed) deps.push.send({ title: `The key change of ${run.keyref} failed; the old key still works`, kind: 'rotation_failed' });
+  }
+
+  /** The second notice KBOX-17 allows, named for the one destination that would not take the rollback. */
+  function noticeHeld(run: RunRow, head: KeyHead, receipt: Receipt): void {
+    const pushed = head.class !== 'ordinary';
+    if (run.genOld === 0) {
+      if (pushed) deps.push.send({ title: `The new key of ${run.keyref} could not be removed from ${receipt.target}`, kind: 'rotation_failed' });
+    } else {
+      deps.events.append('rotation.failed', { run_id: run.runId, keyref: run.keyref, step: `rollback_${underscored(receipt.kind)}`, reason_code: 'repush_refused', old_key_works: true });
+      if (pushed) deps.push.send({ title: `The old key of ${run.keyref} could not be put back in ${receipt.target}`, kind: 'rotation_failed' });
+    }
+    store.putReceipt(run.runId, receipt.kind, receipt.target, { rollbackNotified: true });
+  }
+
+  /**
+   * Undoes the run at one destination: the old value pushed back (and redeployed where it was), or, for a create run, the new value removed.
+   * False while the destination holds (or may hold) the new value.
+   */
+  async function undo(run: RunRow, head: KeyHead, receipt: Receipt, old: Lent | undefined, master: Lent): Promise<boolean> {
+    const dk = deps.destination(receipt.kind);
+    if (dk === undefined) return false;
+    const target = { kind: dk.destination.kind, id: receipt.target };
+    if (run.genOld === 0) return (await attempt(run, 'rollback', () => dk.destination.remove(target, head.name, master), 'remove_refused')).ok;
+    if (old === undefined) return false;
+    const back = await attempt(
+      run,
+      'rollback',
+      async () => {
+        await dk.destination.push(target, head.name, old, master);
+        if (receipt.redeployed && dk.redeployer !== undefined) {
+          const ref = await dk.redeployer.redeploy(target, master);
+          if ((await dk.redeployer.ready(ref)) !== 'ready') throw new RangeError('deploy failed');
+        }
+      },
+      'repush_refused',
+    );
+    return back.ok;
+  }
+
   async function rollBack(run: RunRow, head: KeyHead, kit: PlatformKit, fresh?: Fresh): Promise<Next> {
     const master = deps.master(head.platform);
     const old = run.genOld > 0 ? lendOrUndefined(run.keyref, run.genOld) : undefined;
     let held = 0;
+    // Every receipt, `maybe` included: a push that threw or never answered may have changed the destination.
     for (const receipt of store.receipts(run.runId)) {
-      // Every receipt, `maybe` included: a push that threw or never answered may have changed the destination.
-      const dk = deps.destination(receipt.kind);
-      if (old === undefined || dk === undefined) {
-        held += 1;
-        continue;
-      }
-      const target = { kind: dk.destination.kind, id: receipt.target };
-      const back = await attempt(
-        run,
-        'rollback',
-        async () => {
-          await dk.destination.push(target, head.name, old, master);
-          if (receipt.redeployed && dk.redeployer !== undefined) {
-            const ref = await dk.redeployer.redeploy(target, master);
-            if ((await dk.redeployer.ready(ref)) !== 'ready') throw new RangeError('deploy failed');
-          }
-        },
-        'repush_refused',
-      );
-      if (back.ok) continue;
+      if (await undo(run, head, receipt, old, master)) continue;
       held += 1;
-      if (!receipt.rollbackNotified) {
-        deps.events.append('rotation.failed', { run_id: run.runId, keyref: run.keyref, step: `rollback_${underscored(receipt.kind)}`, reason_code: 'repush_refused', old_key_works: true });
-        if (head.class !== 'ordinary') deps.push.send({ title: `The old key of ${run.keyref} could not be put back in ${receipt.target}`, kind: 'rotation_failed' });
-        store.putReceipt(run.runId, receipt.kind, receipt.target, { rollbackNotified: true });
-      }
+      if (!receipt.rollbackNotified) noticeHeld(run, head, receipt);
     }
     if (held > 0) {
       const attempts = run.attempts + 1;

@@ -429,3 +429,48 @@ test('KBOX-16 KBOX-34 an admin key with a workstation destination gets no delive
   await w.seedKey({ destinations: [WORKSTATION] });
   assert.deepEqual(deliveredGens(w), { rows: [], events: [] });
 });
+
+// --- a failed first generation (review B3): there is no old key to keep --------------------------------------------------------
+
+const claimsOldKeyWorks = (w: RotationWorld): boolean =>
+  w.events('rotation.failed').some((e) => e.data['old_key_works'] === true) || w.push.sent.some((p) => /old key/i.test(p.title));
+
+for (const klass of ['ordinary', 'admin'] as const) {
+  test(`KBOX-17 a create run (${klass} key) whose second push fails removes the value from every destination that may hold it, revokes and confirms the new key, ends failed, and claims no old key works`, async (t) => {
+    const w = await rotationWorld(t, { klass });
+    w.destinations.a.refuse('app-b');
+    const key = w.newKey();
+    const created = await w.orch.create(key);
+    assert.equal(created.status, 'failed');
+    assert.equal(w.store.activeRuns().length, 0, 'the run ended without waiting on a clock');
+    assert.equal(w.store.runs().at(-1)?.state, 'failed');
+    assert.deepEqual(heldBy(w), [undefined, undefined], 'no destination holds the value of the failed key');
+    assert.deepEqual(await w.live(), [], 'the new key is revoked and nothing else was made');
+    assert.equal(claimsOldKeyWorks(w), false, 'no notice says an old key works: there is none');
+    assert.equal(w.push.sent.filter((p) => p.kind === 'rotation_failed').length, klass === 'admin' ? 1 : 0, 'one Web Push for an admin key');
+  });
+}
+
+test('KBOX-17 a create run whose removal is refused keeps the new key unrevoked while that destination holds it, sends one more notice named for it, and retries', async (t) => {
+  const w = await rotationWorld(t, { klass: 'admin' });
+  w.destinations.a.refuse('app-b');
+  w.destinations.a.refuseRemove('app-a');
+  const created = await w.orch.create(w.newKey());
+  assert.equal(created.status, 'failed');
+  const newValue = w.destinations.a.heldAt('app-a', NAME);
+  assert.ok(newValue !== undefined, 'app-a still holds the new value');
+  assert.equal((await w.live()).length, 1, 'the new key is not revoked while app-a holds it');
+  const pushes = w.push.sent.filter((p) => p.kind === 'rotation_failed');
+  assert.equal(pushes.length, 2);
+  assert.match(pushes[1]?.title ?? '', /app-a/, 'the second notice names the destination');
+  assert.equal(claimsOldKeyWorks(w), false);
+  w.clock.advance(MINUTE);
+  await w.orch.idle();
+  assert.equal((await w.live()).length, 1, 'still refused: still held');
+  assert.equal(w.push.sent.filter((p) => p.kind === 'rotation_failed').length, 2, 'the retry sends no further notice');
+  w.destinations.a.allow('app-a');
+  await w.settle(2 * MINUTE);
+  assert.deepEqual(heldBy(w), [undefined, undefined]);
+  assert.deepEqual(await w.live(), []);
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+});
