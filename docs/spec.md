@@ -559,7 +559,7 @@ and updates that object; the workstation destination is a delivery (`KBOX-34`); 
 then **confirm it is dead** before marking it `retired`: a 404 (`absent`) is not proof; the confirmation is the verifier **rejecting the old value** (the vault still holds it),
 or, where a platform has no verifier call that can test a key, the `KeyLister` showing the id absent or disabled in the region and project recorded with the key; if the
 verifier says the old value still works or cannot be reached, the key stays in `grace` and step 10's failure path applies. The old value stays in the vault for fingerprints
-only and is never lent or pushed again. **Reconcile** on start and daily: a run holds a **lease** while a process works on it; reconcile skips leased keys, and on start runs
+only until it is revoked (its value file is then deleted, `KBOX-33`), and is never lent or pushed again. **Reconcile** on start and daily: a run holds a **lease** while a process works on it; reconcile skips leased keys, and on start runs
 only after resume has re-leased unfinished runs; for every issuer it lists the platform's keys; a `kbox_…` key matching an unleased `issuing` intent with no stored generation is an
 orphan from a crash between steps 3 and 4: it is revoked and confirmed, the run returns to step 2 with a new run id, and the audit log records it; a `kbox_…` key matching no intent or
 generation raises one notice. Test (`test/rotation.test.ts`, fakes through the ports, `FakeClock`): a crash injected after each step resumes from the persisted step; crash between

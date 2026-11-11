@@ -83,11 +83,8 @@ adversary: `/home/petter/.local/share/lanes/key-box/<unit>.verdict.md`.
 7. m6 (relay.verdict.md): the canonical re-encoding turns Google's literal `documents:runQuery` into `documents%3ArunQuery`
    (`src/pure/target-parse.ts`, per the spec's rule). Whether Google's front end treats it the same is UNVERIFIED: the `google`
    unit probes it.
-8. NEEDS A DECISION: `vault.retire` deletes the value file, so a generation the rotation has revoked has no value left and the
-   share file lists it as `none` (not watched); only a generation in grace is watched as retired. The spec says the old value
-   "stays in the vault for fingerprints only" (KBOX-51 step 10) and the file holds retired generations "found and reported as
-   retired" (KBOX-33). Fixing it means a vault port change (keep a retired value readable by the share reader only) and
-   touches kernel-store; `POST /api/retired` has the same effect.
+8. Decided 2026-11-11 (orchestrator): a revoked generation's value file is deleted (`vault.retire`), so it leaves the share file as
+   `none`; only a generation in grace is watched as retired. `KBOX-33` and `KBOX-51` step 10 say so.
 9. Open items not fixed: old approvers' push subscriptions are not removed on recovery or removal; the control enrol window is
    per label only (decided 2026-11-11: accepted residual, see Decisions); `private.db` from before kernel-approve has no
    migration; the phone app was never run in a real browser; findings of the unit verdicts that no fix commit names are in the
