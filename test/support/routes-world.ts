@@ -11,7 +11,7 @@ import { keyRoutes } from '../../src/shell/key-routes.ts';
 import type { Route } from '../../src/shell/http.ts';
 import { pasteRoutes } from '../../src/shell/paste.ts';
 import { openRotation } from '../../src/shell/rotation.ts';
-import type { Rotation } from '../../src/shell/rotation.ts';
+import type { Rotation, RotationDeps } from '../../src/shell/rotation.ts';
 import type { PlatformSource, Point } from '../../src/shell/rotation-ports.ts';
 import { FakePlatformWorld } from '../fakes/platform.ts';
 import { RecordingDestination, RecordingRedeployer } from '../fakes/recording-destination.ts';
@@ -65,7 +65,13 @@ export interface RoutesWorldOptions {
   readonly checkpoint?: (point: Point) => void | Promise<void>;
   /** false: the api platform holds one credential at a time (it can take a chosen value, so its configuration is accepted). */
   readonly overlap?: boolean;
+  /** Wraps the approvals rotation is given: a fault planted at the port (a sweep or a proposal that throws). */
+  readonly approvals?: (real: RotationApprovals) => RotationApprovals;
+  /** Wraps the platform source rotation is given: a fault planted at the port. */
+  readonly source?: (real: PlatformSource) => PlatformSource;
 }
+
+type RotationApprovals = RotationDeps['approvals'];
 
 export async function routesWorld(t: TestContext, options: RoutesWorldOptions = {}): Promise<RoutesWorld> {
   const random = seededRandom(11);
@@ -115,14 +121,14 @@ export async function routesWorld(t: TestContext, options: RoutesWorldOptions = 
   };
   const rotation = openRotation({
     parts: w.parts,
-    approvals: w.core.approvals,
+    approvals: options.approvals?.(w.core.approvals) ?? w.core.approvals,
     approvers: w.core.approvers,
     push: w.push,
     clock: w.clock,
     scheduler: w.clock,
     random,
     audit: w.parts.audit,
-    source,
+    source: options.source?.(source) ?? source,
     ...(options.checkpoint === undefined ? {} : { checkpoint: options.checkpoint }),
   });
   routes = rotation.routes;
