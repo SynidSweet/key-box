@@ -27,6 +27,7 @@ import type { CoreParts } from '../../src/shell/core.ts';
 import { createApiServer } from '../../src/shell/http.ts';
 import { openPrivateDatabase } from '../../src/shell/private-db.ts';
 import type { PrivateStore } from '../../src/ports/private.ts';
+import type { Route } from '../../src/shell/http.ts';
 
 export const DOMAIN = 'box.example';
 export const RP = { rpId: `keys.${DOMAIN}`, origin: `https://keys.${DOMAIN}` } as const;
@@ -118,6 +119,8 @@ export interface WorldOptions {
   readonly vet?: (action: Action) => 'ok' | 'rejected';
   /** Leave the box without an approver (setup tests). */
   readonly noSetup?: boolean;
+  /** Extra routes beside the box's own (a relay-scope probe route, say). */
+  readonly routes?: readonly Route[];
 }
 
 export async function approveWorld(t: TestContext, options: WorldOptions = {}): Promise<World> {
@@ -133,7 +136,7 @@ export async function approveWorld(t: TestContext, options: WorldOptions = {}): 
   const codes = createCodeRoot({ dir: join(dir, 'codes'), sink: (line) => void consoleLines.push(line), random, clock, wordlist: WORDLIST });
   const trust = new FakeTrust(codes, () => BOOT);
   const core = openApproveCore({ parts, approverStore: priv, trust, push, clock, random, domain: DOMAIN, wordlist: WORDLIST, vet: options.vet ?? (() => 'ok') });
-  const server = createApiServer({ routes: [...parts.routes, ...core.routes], tokens: core.tokens.tokenStore, audit: parts.audit, random, clock, journal: (code) => void journalLines.push(code) });
+  const server = createApiServer({ routes: [...parts.routes, ...core.routes, ...(options.routes ?? [])], tokens: core.tokens.tokenStore, audit: parts.audit, random, clock, journal: (code) => void journalLines.push(code) });
   const socket = join(dir, 'http.sock');
   await server.listen(socket);
   t.after(async () => {
