@@ -37,9 +37,9 @@ export interface LiveNode {
   stop(): Promise<NodeRun>;
 }
 
-/** Starts this Node on `args` and keeps it running; it is killed when the test ends if still alive. */
-export function startNode(t: TestContext, args: readonly string[], cwd: string, env: Readonly<Record<string, string>>): LiveNode {
-  const child = spawn(process.execPath, [...args], { cwd, env: { ...process.env, ...env } });
+/** Starts this Node on `args` (as another user when `as` is given, which needs root) and keeps it running; it is killed when the test ends if still alive. */
+export function startNode(t: TestContext, args: readonly string[], cwd: string, env: Readonly<Record<string, string>>, as?: { readonly uid: number; readonly gid: number }): LiveNode {
+  const child = spawn(process.execPath, [...args], { cwd, env: { ...process.env, ...env }, ...(as === undefined ? {} : { uid: as.uid, gid: as.gid }) });
   const out: Buffer[] = [];
   const err: Buffer[] = [];
   child.stdout.on('data', (c: Buffer) => out.push(c));
@@ -48,8 +48,9 @@ export function startNode(t: TestContext, args: readonly string[], cwd: string, 
   const exited = new Promise<NodeRun>((resolve) => {
     child.on('close', (status) => resolve({ status, stdout: text(out), stderr: text(err) }));
   });
-  t.after(() => {
+  t.after(async () => {
     child.kill('SIGKILL');
+    await exited;
   });
   return {
     stdout: () => text(out),

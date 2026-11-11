@@ -17,3 +17,7 @@ export { bytesOf, lent } from './lent.ts';
 export { settle, waitUntil } from './settle.ts';
 export { startCore } from './core.ts';
 export type { CallOptions, CoreOptions, RunningCore } from './core.ts';
+export { ensureSystemUsers } from './system-users.ts';
+export type { SystemUser, SystemUsers } from './system-users.ts';
+export { directives, missingDirectives, parseTmpfiles, words } from './unit-text.ts';
+export type { TmpfilesLine } from './unit-text.ts';

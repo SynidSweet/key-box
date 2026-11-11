@@ -1,5 +1,6 @@
 // KBOX-29: wire conventions of every machine-API route. KBOX-10 and KBOX-43 are tested here at route level too.
 import assert from 'node:assert/strict';
+import { statSync } from 'node:fs';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import type { TokenStore } from '../src/ports/meta.ts';
@@ -321,4 +322,9 @@ test('KBOX-29 an internal failure answers the fixed text and puts only a cause c
   assert.deepEqual([row?.detail['status'], row?.detail['code'], row?.detail['cause']], [500, 'internal', 'unhandled']);
   c.assertAbsent({ body: reply.body, audit: JSON.stringify(box.audit.read(0).entries), journal: box.journal.join('\n') });
   probe.crashText = 'crash text';
+});
+
+test('KBOX-45 the socket the frame listens on is 0660 whatever the umask of the process, so only its owner and group can connect', async (t) => {
+  const { box } = await boxWithTokens(t);
+  assert.equal(statSync(box.socket).mode & 0o777, 0o660);
 });

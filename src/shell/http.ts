@@ -1,6 +1,6 @@
 // KBOX-29, KBOX-10, KBOX-43: the frame every route of the machine API sits in. It reads a request at the edge into typed
 // values, answers in the one error shape, and writes one audit row per request. Nothing of a request is ever echoed.
-import { rmSync } from 'node:fs';
+import { chmodSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Audit } from '../ports/audit.ts';
@@ -248,15 +248,18 @@ export function createApiServer(deps: ApiServerDeps): ApiServer {
   });
 
   return {
-    listen: (socketPath) =>
-      new Promise<void>((resolve, reject) => {
-        rmSync(socketPath, { force: true });
+    async listen(socketPath: string): Promise<void> {
+      rmSync(socketPath, { force: true });
+      await new Promise<void>((resolve, reject) => {
         server.once('error', reject);
         server.listen(socketPath, () => {
           server.off('error', reject);
           resolve();
         });
-      }),
+      });
+      // Group read and write, nothing for others, whatever the umask: the group on the directory is the access check (KBOX-45).
+      chmodSync(socketPath, 0o660);
+    },
     async stop(): Promise<void> {
       stopping.abort();
       await Promise.allSettled([...inflight]);

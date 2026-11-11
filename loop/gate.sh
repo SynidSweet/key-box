@@ -43,7 +43,9 @@ MODE=gate; ARG_WT=""
 for a in "$@"; do case $a in --preflight) MODE=preflight;; *) ARG_WT=$a;; esac; done
 
 # --- adapt these per project (env overrides win) ------------------------------
-SUITE_CMD=${SUITE_CMD:-node --test}        # exit 0 = suite green
+# The host suite is every test file except the root-only journey, which the gate runs as root in a container (see process-split below).
+SPLIT_FILE=${SPLIT_FILE:-test/journeys/process-split.test.ts}
+SUITE_CMD=${SUITE_CMD:-node --test \$(find test -name '*.ts' ! -path $SPLIT_FILE | sort)}        # exit 0 = suite green
 SUITE_FAILING_IDS_CMD=${SUITE_FAILING_IDS_CMD:-}
                                          # prints failing test IDs, one per line,
                                          # as <repo-relative file>::<test name>
@@ -351,6 +353,24 @@ PY
       else status suite FAIL "red: ${VERDICT#FAIL }"; fi
     fi
   fi
+fi
+
+# --- process-split: the root-only journey (KBOX-45), run as root inside a throwaway container ----------------------------------
+# The uid-switch half of KBOX-45 needs root and makes `kbt-*` system users. That never happens on this host: the file runs as root in
+# an official node:24 container with the work tree mounted read-only and copied in, and the container is removed after the run.
+# KB_REQUIRE_UIDSWITCH=1 is set, and the test fails (never skips) when it cannot switch uid. No docker, no pass: there is no
+# fallback to the host. The run must have passed at least one test and have no failed, skipped or todo test.
+SPLIT_IMAGE=${SPLIT_IMAGE:-node:24}
+SPLIT_LOG="$LOGDIR/process-split.log"
+if ! command -v docker > /dev/null 2>&1; then
+  status process-split FAIL "docker is not available; the root-only test runs in a container and is never run on the host"
+elif docker run --rm --init --network none --memory 1g --pids-limit 512 -v "$PWD":/src:ro -e KB_REQUIRE_UIDSWITCH=1 "$SPLIT_IMAGE" \
+    bash -c "mkdir /work && cd /src && tar cf - --exclude=./node_modules --exclude=./.git . | tar xf - -C /work && cd /work && timeout 240 node --test $SPLIT_FILE" > "$SPLIT_LOG" 2>&1 \
+  && grep -Eq '^ℹ pass [1-9]' "$SPLIT_LOG" && grep -Eq '^ℹ fail 0$' "$SPLIT_LOG" && grep -Eq '^ℹ skipped 0$' "$SPLIT_LOG" && grep -Eq '^ℹ todo 0$' "$SPLIT_LOG"; then
+  status process-split PASS "$(grep -E '^ℹ pass' "$SPLIT_LOG") as root in a $SPLIT_IMAGE container"
+else
+  tail -15 "$SPLIT_LOG" | sed 's/^/    | /'
+  status process-split FAIL "red, skipped or did not run ($SPLIT_LOG)"
 fi
 
 # --- typecheck -------------------------------------------------------------------------
