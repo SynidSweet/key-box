@@ -1,7 +1,7 @@
 // The core process wired as the service wires it, started in this process on a TimedClock (src/main-core.ts `startCore`): the route
 // table holds the rotation routes, a rotation on a fresh box does not stop core, and stopping core leaves no timer of its own.
 import assert from 'node:assert/strict';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
@@ -230,4 +230,25 @@ test('KBOX-28 a sweep that throws is audited as approvals.sweep_failed and the h
   w.clock.advance(HOUR);
   assert.equal(await sweepFailures(), 2, 'a sweep that works audits no failure');
   assert.equal(await pending(), 0, 'and it expired the stale approval');
+});
+
+// --- the updater's settle timer never ends with one throw --------------------------------------------------------------------------
+
+test('KBOX-6 a settle that throws is audited as update.settle_failed and the 5-second settle keeps running: it is not an uncaught exception, and a settle that works audits nothing', async (t) => {
+  const SETTLE = 5_000;
+  const w = await started(t, { domain: 'box.example' });
+  const failures = async (): Promise<number> =>
+    (JSON.parse((await w.call('/api/audit?since=0&limit=500')).body) as { entries: { action: string }[] }).entries.filter((e) => e.action === 'update.settle_failed').length;
+  // Staging becomes a plain file (a disk fault stand-in): the settle's prune cannot list it and throws.
+  const staging = join(w.stateDir, 'staging');
+  rmSync(staging, { recursive: true });
+  writeFileSync(staging, 'not a directory');
+  w.clock.advance(SETTLE);
+  assert.equal(await failures(), 1, 'the throw is audited, and advance did not throw');
+  w.clock.advance(SETTLE);
+  assert.equal(await failures(), 2, 'the schedule went on after the throw');
+  rmSync(staging);
+  mkdirSync(staging);
+  w.clock.advance(SETTLE);
+  assert.equal(await failures(), 2, 'a settle that works audits no failure');
 });

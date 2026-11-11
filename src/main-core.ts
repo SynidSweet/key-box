@@ -224,8 +224,14 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   };
   let cancelSettle = (): void => undefined;
   const settle = (): void => {
-    updater.settle();
-    cancelSettle = scheduler.after(SETTLE_EVERY_MS, settle);
+    // A throw is audited and the schedule goes on, as for the sweep.
+    try {
+      updater.settle();
+    } catch {
+      parts.audit.append({ action: 'update.settle_failed', subject: 'updater', at: clock.now(), detail: { code: 'settle_failed' } });
+    } finally {
+      cancelSettle = scheduler.after(SETTLE_EVERY_MS, settle);
+    }
   };
   if (approve !== undefined) settle();
   let cancelIdle = (): void => undefined;

@@ -32,7 +32,7 @@ test('KBOX-1 the bootstrap removes the ssh packages, masks sshd, removes the def
   assert.match(cloudInit, /^ssh_pwauth: false$/m);
 });
 
-test('KBOX-1 the bootstrap disables the Run Command plugin (its exact command UNVERIFIED) and leaves the monitoring plugin on', () => {
+test('KBOX-1 the bootstrap runs no command that disables a plugin, only checks sudoers and running processes and records what it saw, and leaves the monitoring plugin on', () => {
   const lines = cloudInit.split('\n');
   const code = lines.filter((l) => !/^\s*#/.test(l));
   assert.equal(code.some((l) => /oci-cloud-agent-plugin/.test(l)), false, 'no on-box command that disables a plugin is run (none is documented)');
@@ -150,16 +150,19 @@ test('KBOX-1 a sudoers line naming ocarun, in /etc/sudoers or any /etc/sudoers.d
   assert.equal(near.run.status, 0, 'control: other user names that only contain ocarun are not it');
 });
 
-test('KBOX-1 a running process whose command line names runcommand (any case, in any word) stops the bootstrap loudly and is recorded by program only', async (t) => {
-  for (const words of [['runcommand'], ['/snap/oracle-cloud-agent/current/plugins/RunCommand/runcommand', '--serve', '--token=not-recorded']]) {
+test('KBOX-1 a running process whose program (the basename of the first command word, any case) is runcommand stops the bootstrap loudly and is recorded by program only', async (t) => {
+  for (const words of [['runcommand'], ['/snap/oracle-cloud-agent/current/plugins/runcommand/runcommand', '--serve', '--token=not-recorded'], ['/opt/agent/RunCommand', '--serve']]) {
     const w = await runCheck(t, { paths: ['/snap/oracle-cloud-agent/'], processes: [['/sbin/init'], words] });
     assert.notEqual(w.run.status, 0, words.join(' '));
     assert.doesNotMatch(w.run.stdout, /the-next-step-ran/, words.join(' '));
     assert.match(w.logged, /^-s -p user\.err -t keybox-bootstrap .*Run Command/m, words.join(' '));
     assert.deepEqual(factsOf(w).found.processes, [words[0]], 'the program is recorded, its arguments are not');
   }
-  const arg = await runCheck(t, { processes: [['/usr/bin/vim', 'notes-on-RUNCOMMAND.txt']] });
-  assert.notEqual(arg.run.status, 0, 'a command line that names it is enough');
+  for (const words of [['/snap/oracle-cloud-agent/current/agent', '--plugins=gomon,runcommand'], ['/usr/bin/vim', 'notes-on-RUNCOMMAND.txt'], ['/snap/oracle-cloud-agent/current/plugins/runcommand/runcommand-helper']]) {
+    const w = await runCheck(t, { processes: [words] });
+    assert.equal(w.run.status, 0, `${words.join(' ')}: a word in an argument, or another program's name, is not the plugin: ${w.run.stderr}`);
+    assert.deepEqual(factsOf(w).found.processes, [], words.join(' '));
+  }
 });
 
 test('KBOX-1 the facts stay valid JSON for names with quotes, backslashes and non-ASCII, and missing agent directories are not an error', async (t) => {
@@ -234,11 +237,23 @@ test('KBOX-48 the firewall step is safe to run twice, and a chain with no catch-
   assert.equal(readFileSync(join(w.root, '/etc/iptables/rules.v4'), 'utf8'), '*filter\n:INPUT ACCEPT [0:0]\n-A INPUT -i lo -j ACCEPT\n-A INPUT -p tcp -m state --state NEW -m tcp --dport 443 -j ACCEPT\nCOMMIT\n*nat\n:PREROUTING ACCEPT [0:0]\nCOMMIT\n', 'only the filter table is touched');
 });
 
-test('KBOX-48 a missing rules file, or rules the restore tool refuses, stops the bootstrap loudly and leaves the saved rules as they were', async (t) => {
-  const missing = await runFirewall(t, { files: { '/etc/iptables/rules.v4': oracleRules(V4_REJECT) } });
-  assert.notEqual(missing.run.status, 0);
-  assert.doesNotMatch(missing.run.stdout, /the-next-step-ran/);
-  assert.match(missing.logged, /^-s -p user\.err -t keybox-bootstrap .*KBOX-48/m);
+test('KBOX-48 a missing rules file is skipped with a warning (it holds no rule blocking 443) and the bootstrap goes on with the other file', async (t) => {
+  const v6Missing = await runFirewall(t, { files: { '/etc/iptables/rules.v4': oracleRules(V4_REJECT) } });
+  assert.equal(v6Missing.run.status, 0, v6Missing.run.stderr);
+  assert.match(v6Missing.run.stdout, /the-next-step-ran/);
+  assert.equal(readFileSync(join(v6Missing.root, '/etc/iptables/rules.v4'), 'utf8'), opened(oracleRules(V4_REJECT), V4_REJECT), 'rules.v4 was still rewritten');
+  assert.equal(existsSync(join(v6Missing.root, '/etc/iptables/rules.v6')), false, 'no rules.v6 is made up');
+  assert.equal(v6Missing.logged, '-s -p user.warning -t keybox-bootstrap KBOX-48: /etc/iptables/rules.v6 is missing; nothing to open there\n');
+  const both = await runFirewall(t, {});
+  assert.equal(both.run.status, 0, both.run.stderr);
+  assert.match(both.run.stdout, /the-next-step-ran/);
+  assert.equal(
+    both.logged,
+    '-s -p user.warning -t keybox-bootstrap KBOX-48: /etc/iptables/rules.v4 is missing; nothing to open there\n-s -p user.warning -t keybox-bootstrap KBOX-48: /etc/iptables/rules.v6 is missing; nothing to open there\n',
+  );
+});
+
+test('KBOX-48 rules the restore tool refuses stop the bootstrap loudly and leave the saved rules as they were', async (t) => {
   const tree = await fixtureTree(t, { files: { '/etc/iptables/rules.v4': oracleRules(V4_REJECT), '/etc/iptables/rules.v6': oracleRules(V6_REJECT) } });
   fakeRestore(tree.dir, 'ip6tables-restore');
   writeFileSync(join(tree.dir, 'bin', 'iptables-restore'), '#!/bin/sh\nexit 2\n', { mode: 0o755 });
