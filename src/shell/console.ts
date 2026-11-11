@@ -1,7 +1,7 @@
 // KBOX-20, KBOX-49, KBOX-6: the root side of the setup and recovery codes. kb-code (root, at every host boot) and the
 // bootstrap make them and write the words to the console sink only; root keeps only each code's hash in a root-only
 // directory (0700, files 0600); kb-install checks a typed code against it. Core never runs this code and never sees a hash.
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync, constants } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync, constants } from 'node:fs';
 import { join } from 'node:path';
 import type { Clock } from '../ports/clock.ts';
 import type { Random } from '../ports/random.ts';
@@ -47,6 +47,7 @@ export function createCodeRoot(deps: CodeRootDeps): CodeRoot {
 
   const keep = (kind: CodeKind, record: Readonly<Record<string, string | number>>): void => {
     mkdirSync(deps.dir, { recursive: true, mode: 0o700 });
+    chmodSync(deps.dir, 0o700); // a directory that already existed keeps its old mode otherwise
     const temp = `${file(kind)}.tmp`;
     rmSync(temp, { force: true });
     const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);

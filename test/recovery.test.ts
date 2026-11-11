@@ -1,7 +1,7 @@
 // KBOX-20: recovery of the approver. This file holds the root half (kb-code makes the code, root checks it), the unit text,
 // and core's half through the TrustPort. Times come from a FakeClock.
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { FakeClock, runNode, seededRandom, tempDir } from './kit/index.ts';
@@ -371,4 +371,13 @@ test('KBOX-53 removing some other approver leaves the registration code alone: t
   assert.deepEqual(w.core.approvers.ids(), [w.ownerId]);
   assert.equal((await registerAt(w, '/recover/register', add.code, softApprover())).status, 201);
   assert.deepEqual(outcomes(w).filter(([id]) => id === add.id), [[add.id, 'done', 'ok']]);
+});
+
+test('KBOX-20 the code directory is made 0700 and an existing one with looser modes is tightened to 0700 before a hash is written', async (t) => {
+  const { dir, codes } = await root(t);
+  mkdirSync(dir);
+  chmodSync(dir, 0o755);
+  codes.writeSetupCode(false);
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
+  assert.deepEqual(readdirSync(dir), ['setup.hash']);
 });
