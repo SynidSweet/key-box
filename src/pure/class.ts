@@ -19,6 +19,15 @@ export function admitDestination(klass: KeyClass, readableBy: 'api' | 'runtime')
   return klass === 'ordinary' || readableBy === 'runtime';
 }
 
+/**
+ * The key reference of a key: `<platform>/<first project>/<NAME>`, the first project cut down to what the vault names a directory
+ * (decided here). Two keys with one reference are a `conflict`; the vault takes each segment as written.
+ */
+export function keyrefOf(platform: string, projects: readonly string[], name: string): string {
+  const slug = (projects[0] ?? '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, 64);
+  return `${platform}/${slug === '' || /^\.+$/.test(slug) ? 'p' : slug}/${name}`;
+}
+
 const ALPHABETS: Readonly<Record<Alphabet, RegExp>> = {
   hex: /^[0-9a-fA-F]*$/,
   base62: /^[0-9A-Za-z]*$/,

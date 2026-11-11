@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { KeyClass, KeyShape } from '../src/ports/types.ts';
-import { admitDestination, classOf, matchesShape, raiseClass } from '../src/pure/class.ts';
+import { admitDestination, classOf, keyrefOf, matchesShape, raiseClass } from '../src/pure/class.ts';
 
 const RANK: readonly KeyClass[] = ['ordinary', 'admin', 'master'];
 
@@ -30,6 +30,15 @@ test('KBOX-16 a destination readable by the api is refused for admin and master 
   assert.equal(admitDestination('admin', 'api'), false);
   assert.equal(admitDestination('master', 'api'), false);
   assert.equal(admitDestination('master', 'runtime'), true);
+});
+
+test('KBOX-34 the key reference is platform/project/NAME and every segment is a name the vault accepts', () => {
+  assert.equal(keyrefOf('openai', ['shop'], 'OPENAI_KEY'), 'openai/shop/OPENAI_KEY');
+  for (const projects of [['/odd:project@x'], ['..'], ['a'.repeat(100)], ['é中']]) {
+    const ref = keyrefOf('openai', projects, 'K');
+    assert.match(ref, /^openai\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/K$/);
+  }
+  assert.equal(keyrefOf('openai', ['a', 'b'], 'K'), keyrefOf('openai', ['a', 'b'], 'K'));
 });
 
 const hexShape: KeyShape = { prefix: 'fk-', alphabet: 'hex', coreLength: { min: 8, max: 8 }, random: true };

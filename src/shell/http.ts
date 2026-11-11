@@ -38,6 +38,8 @@ export interface RouteInput {
   readonly params: Readonly<Record<string, string>>;
   /** The raw Cookie header of a phone request (the view session). The machine API refuses any cookie before a route runs. */
   readonly cookie: string | undefined;
+  /** The body bytes of a route that takes `application/octet-stream` (`rawBody`); absent for every other route (KBOX-34). */
+  readonly bytes?: Uint8Array;
 }
 
 export interface Route {
@@ -50,6 +52,8 @@ export interface Route {
   /** An `api` route that takes no token: only the unauthenticated enrol routes (KBOX-53). */
   readonly open: boolean;
   readonly takesBody: boolean;
+  /** The body is raw bytes of `application/octet-stream` (the retired hand-off, KBOX-34), handed to the route as `bytes`. */
+  readonly rawBody?: true;
   run(input: RouteInput): Promise<Reply> | Reply;
 }
 
@@ -239,7 +243,9 @@ export function createApiServer(deps: ApiServerDeps): ApiServer {
 
     const bytes = await readBody(req);
     let body: unknown;
-    if (found.takesBody) {
+    if (found.rawBody === true) {
+      if (!/^application\/octet-stream$/i.test(header(req, 'content-type') ?? '')) throw new ApiError('unsupported_media');
+    } else if (found.takesBody) {
       if (!JSON_TYPE.test(header(req, 'content-type') ?? '')) throw new ApiError('unsupported_media');
       const decoded = decodeJsonBody(bytes);
       if (!decoded.ok) throw new ApiError('bad_request');
@@ -248,7 +254,7 @@ export function createApiServer(deps: ApiServerDeps): ApiServer {
       throw new ApiError('bad_request');
     }
     const cookie = surface === 'phone' ? header(req, 'cookie') : undefined;
-    const reply = await found.run({ actor: trace.actor, source, abort, query: url.searchParams, body, params, cookie });
+    const reply = await found.run({ actor: trace.actor, source, abort, query: url.searchParams, body, params, cookie, ...(found.rawBody === true ? { bytes } : {}) });
     const common = { status: reply.status ?? 200, code: undefined, cause: undefined, headers: reply.headers ?? {} };
     return 'raw' in reply ? { ...common, body: undefined, raw: reply.raw } : { ...common, body: reply.json, raw: undefined };
   }

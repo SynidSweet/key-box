@@ -13,6 +13,8 @@ export interface PlatformKit {
   readonly issuer?: Issuer;
   readonly lister?: KeyLister;
   readonly verifier?: Verifier;
+  /** The platform's own page for making a key, shown on a paste page (never taken from mission control). */
+  readonly keyPageUrl?: string;
 }
 
 export interface DestinationKit {

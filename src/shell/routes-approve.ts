@@ -27,8 +27,8 @@ export interface ApproveRouteDeps {
 }
 
 const refused = { ok: false } as const;
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;
-const only = (o: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean =>
+export const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;
+export const only = (o: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean =>
   required.every((k) => Object.hasOwn(o, k)) && Object.keys(o).every((k) => required.includes(k) || optional.includes(k));
 
 const REASON_TEXT = /^[^\u0000-\u001f\u007f]{0,500}$/u;
@@ -123,8 +123,8 @@ const ASSETS: readonly (readonly [path: string, file: string, type: string])[] =
   ['/register.js', 'register.js', 'text/javascript; charset=utf-8'],
   ['/app.css', 'app.css', 'text/css; charset=utf-8'],
 ];
-const PAGE_HEADERS = { 'content-security-policy': "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'", 'x-content-type-options': 'nosniff' };
-const file = (name: string, type: string): Reply => ({ raw: { type, bytes: readFileSync(new URL(name, WEB)) }, headers: PAGE_HEADERS });
+export const PAGE_HEADERS = { 'content-security-policy': "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'", 'x-content-type-options': 'nosniff' };
+export const file = (name: string, type: string): Reply => ({ raw: { type, bytes: readFileSync(new URL(name, WEB)) }, headers: PAGE_HEADERS });
 
 const b64u = (b: Uint8Array): string => Buffer.from(b).toString('base64url');
 
