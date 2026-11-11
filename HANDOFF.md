@@ -5,7 +5,7 @@ REWRITE it (never append) before you finish. Unchanged fails.
 
 ## Where things stand
 
-Every unit of stages 1 to 4 is built and integrated on `unit/integrate`: `scaffold`, `forms`, `kernel-store`, `kernel-approve`,
+Every unit of stages 1 to 4 is built and integrated on main: `scaffold`, `forms`, `kernel-store`, `kernel-approve`,
 `update`, `relay`, `rotate`, `share`. What is left is the six adapter units, three journeys and the items under Remaining.
 `src/main-core.ts` now wires everything: `startCore(env, runtime)` (exported; `main()` is `startCore` plus SIGTERM/SIGINT)
 serves the machine API, the share file and, when `KB_DOMAIN` is set, the phone app, approvals, the real `TrustPort`, the update
@@ -51,14 +51,18 @@ adversary: `/home/petter/.local/share/lanes/key-box/<unit>.verdict.md`.
 - `src/web/`: the phone app, plain JS under `checkJs` (`app.js`, `setup.*`, `recover.*`, `register.js`, `paste.*`, `sw.js`).
 - `src/data/`: `wordlist.txt`, `push-hosts.json`, `credential-shapes.json`.
 - `deploy/`: `keybox.service`, `keyrelay.service`, `kb-code.service`, `kb-install.service` + `.path`, `caddy.service`,
-  `Caddyfile`, `cloud-init.yaml`, `keybox-tmpfiles.conf`, `runtime.config.json` (`console_device` UNVERIFIED `/dev/ttyAMA0`,
+  `Caddyfile`, `cloud-init.yaml` (its Run Command check writes `/var/lib/keybox/bootstrap-facts.json`, served at
+  `GET /api/bootstrap-facts` to a control token; its host firewall step opens 443 only), `keybox-tmpfiles.conf`, `runtime.config.json` (`console_device` UNVERIFIED `/dev/ttyAMA0`,
   `link_mbps`), `egress-hosts.json` (non-adapter hosts: the push services, `nodejs.org`, `github.com`).
 - Tests: `test/*.test.ts` named for the behaviour (one file per rule family; the spec's rule ids are in the test titles);
   `test/journeys/` (J2 `relayed-call`, J3 in one process `ordinary-rotation`, J5 `recovery`, J6 `share`, `process-split`
   is root-only); `test/contracts/` (one suite per port, run against the fake); `test/arch*` (architecture probe);
   `test/kit/` (shared helpers; add files, do not edit lines; it must not import `src/pure/{webauthn,cose,challenge}`);
   `test/support/*-world.ts` (`approveWorld`, `rotationWorld`, `routesWorld`, `shareWorld`, `relay-world`, `install-world`);
-  `test/fakes/` (platform, destination, push, trust, vault, audit, approvals). New this slice: `main-core.test.ts` (core started
+  `test/support/demo-pages.ts` (a real core on `https://keys.localhost`, state seeded through the real routes, one URL printed per
+  page state) and `test/browser/phone-run.ts` + `cdp.ts` (NOT collected by the gate: real Chromium from `~/.cache/ms-playwright`
+  over CDP, a virtual WebAuthn authenticator, 390 px screenshots of every page state; run with `runq run --place local
+  --why-local display`); `test/fakes/` (platform, destination, push, trust, vault, audit, approvals). New in integration: `main-core.test.ts` (core started
   in process on a `TimedClock`), `platform-source.test.ts`, `share-rotation.test.ts` (real share source over a real rotation).
 
 ## Remaining
@@ -75,8 +79,8 @@ adversary: `/home/petter/.local/share/lanes/key-box/<unit>.verdict.md`.
 3. Release downloads into `<H>.bin`: an update that changes a pin is refused (`lock`), unchanged pins work. GitHub release assets
    redirect to a second host that must join `deploy/egress-hosts.json` (caller `update`) when downloads are built.
 4. Make the trust request's `deadline` required at root (`src/pure/install-request.ts` still parses it as optional).
-5. The OCI Run Command disable line in `deploy/cloud-init.yaml` (`oci-cloud-agent-plugin disable "Compute Instance Run Command"`)
-   is UNVERIFIED: probe it on the instance; the runcmd has no `set -e`, so a failure says nothing.
+5. On the real instance, read `GET /api/bootstrap-facts` once: it shows where the Oracle agent keeps its plugins. The Run Command
+   check (a sudoers grant to `ocarun`, a running `runcommand` program) and the firewall step were tested on fixture trees only.
 6. The `set_allow_rules` executor's widening refusal comes with the adapters (it is `rejected` until one registers, and no code
    reads a key's own allow set but the relay profile narrowing); wire it in the unit that builds that executor, with a test
    through the proposal route.
@@ -85,9 +89,10 @@ adversary: `/home/petter/.local/share/lanes/key-box/<unit>.verdict.md`.
    unit probes it.
 8. Decided 2026-11-11 (orchestrator): a revoked generation's value file is deleted (`vault.retire`), so it leaves the share file as
    `none`; only a generation in grace is watched as retired. `KBOX-33` and `KBOX-51` step 10 say so.
-9. Open items not fixed: old approvers' push subscriptions are not removed on recovery or removal; the control enrol window is
+9. Open items not fixed: the control enrol window is
    per label only (decided 2026-11-11: accepted residual, see Decisions); `private.db` from before kernel-approve has no
-   migration; the phone app was never run in a real browser; findings of the unit verdicts that no fix commit names are in the
+   migration; the phone app ran in real Chromium (test/browser/phone-run.ts) but never on a real phone's browser and passkey;
+   findings of the unit verdicts that no fix commit names are in the
    verdict files.
 
 ## Decisions
