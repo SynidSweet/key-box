@@ -85,31 +85,36 @@ export function keptProof(approver: SoftApprover, approverId: string, action: ob
 
 export interface FakeUnits extends ReleaseUnits {
   readonly restarts: string[];
-  /** Each bound kb-install gave the units, in order: the time by which a restart or a health check must be over. */
-  readonly bounds: { readonly what: 'restart' | 'health'; readonly until: number | undefined }[];
+  /** Each bound kb-install gave the units, in order: the time by which a restart or a health check must be over, and the
+   * clock when it was given. */
+  readonly bounds: { readonly what: 'restart' | 'health'; readonly until: number | undefined; readonly at: number }[];
   /** Whether the next health checks pass. */
   healthy: boolean;
   /** Called by each health check with its bound, e.g. to let it use all the time it is given. */
   onHealth: ((until: number | undefined) => void) | undefined;
+  /** Called by each restart with its bound, e.g. to let it use all the time it is given. */
+  onRestart: ((until: number | undefined) => void) | undefined;
   /** Each release directory whose kb-install self-check was run, with its bound, in order. */
   readonly selfChecks: { readonly release: string; readonly until: number }[];
   /** The self-check to run instead of passing (the real one from systemd.ts, say); undefined passes every release. */
   checkSelf: ReleaseUnits['selfCheck'] | undefined;
 }
 
-export function fakeUnits(current: () => string): FakeUnits {
+export function fakeUnits(current: () => string, now: () => number): FakeUnits {
   const units: FakeUnits = {
     restarts: [],
     bounds: [],
     healthy: true,
     onHealth: undefined,
+    onRestart: undefined,
     restart(until?: number): Promise<void> {
       units.restarts.push(current());
-      units.bounds.push({ what: 'restart', until });
+      units.bounds.push({ what: 'restart', until, at: now() });
+      units.onRestart?.(until);
       return Promise.resolve();
     },
     healthCheck(release: string, until?: number): Promise<boolean> {
-      units.bounds.push({ what: 'health', until });
+      units.bounds.push({ what: 'health', until, at: now() });
       units.onHealth?.(until);
       return Promise.resolve(units.healthy && current() === release);
     },
@@ -186,7 +191,7 @@ export async function installWorld(t: TestContext, options: { readonly trust?: f
   writeTree(r0, { 'bin/node': { body: NODE_BIN, exec: true }, 'bin/caddy': { body: CADDY_BIN, exec: true } });
   symlinkSync(r0, paths.current);
   const current = (): string => readlinkSync(paths.current).split('/').at(-1) ?? '';
-  const units = fakeUnits(current);
+  const units = fakeUnits(current, () => clock.now());
 
   const owner = softApprover();
   const ownerId = 'ap-owner-00001';

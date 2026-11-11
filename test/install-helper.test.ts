@@ -12,6 +12,7 @@ import { runShell } from './kit/index.ts';
 import { BOOT, COMMIT, NODE_BIN, CADDY_BIN, RELEASE_0, addActionOf, hashOf, installWorld, lockFor, sha256Hex } from './support/install-world.ts';
 import type { InstallWorld, Tree } from './support/install-world.ts';
 import type { ReleaseUnits } from '../src/shell/installer.ts';
+import { COPY_DEADLINE_MS, RESTART_WITHIN_MS } from '../src/shell/installer.ts';
 import { systemdUnits } from '../src/shell/systemd.ts';
 
 const RELEASE_1: Tree = { 'runtime.lock': lockFor(NODE_BIN, CADDY_BIN), 'src/main-core.ts': 'new core\n', 'src/cli/kb-install.ts': 'installer\n', 'README.md': 'v1\n', 'run.sh': { body: '#!/bin/sh\n', exec: true } };
@@ -592,6 +593,52 @@ test('KBOX-6 every phase is bounded by the time left under TimeoutStartSec: afte
   for (const b of w.units.bounds) assert.ok(b.until !== undefined && b.until <= start + unitTimeoutMs(), `${b.what} is bounded inside the unit's timeout`);
   const [, health, rollback] = w.units.bounds;
   assert.ok(health?.until !== undefined && rollback?.until !== undefined && rollback.until > health.until, 'the rollback restart has time of its own after the health check');
+});
+
+test('KBOX-6 the write of a release is bounded: writes that run past the copy deadline are refused timeout with nothing switched or restarted', async (t) => {
+  const w = await installWorld(t);
+  const h = w.stage(RELEASE_1);
+  w.installRequest(h);
+  let slowed = false;
+  await w.run({
+    afterWrite: () => {
+      if (!slowed) w.clock.advance(COPY_DEADLINE_MS + 1); // the first write ends a millisecond past the copy deadline
+      slowed = true;
+    },
+  });
+  assert.equal(w.result(h), 'refused:timeout');
+  nothingCopied(w, h);
+  assert.deepEqual(readdirSync(w.paths.results).filter((n) => n.startsWith('switching')), [], 'the switching record is cleared');
+});
+
+test('KBOX-6 a slow write leaves the rollback restart its reserved time: a restart, a self-check and a health check that each use all they are given cannot eat it', async (t) => {
+  const w = await installWorld(t);
+  healthUsesAllItIsGiven(w);
+  const useAll = (until: number | undefined): void => {
+    if (until !== undefined && until > w.clock.now()) w.clock.advance(until - w.clock.now());
+  };
+  w.units.onRestart = useAll;
+  w.units.checkSelf = (_release, until) => {
+    useAll(until);
+    return Promise.resolve(true);
+  };
+  const h = w.stage(RELEASE_1);
+  w.installRequest(h);
+  const start = w.clock.now();
+  let slowed = false;
+  await w.run({
+    afterWrite: () => {
+      if (!slowed) w.clock.advance(COPY_DEADLINE_MS - 1); // the writes end a millisecond inside the copy deadline
+      slowed = true;
+    },
+  });
+  assert.equal(w.result(h), 'rolled_back');
+  assert.deepEqual(w.units.bounds.map((b) => b.what), ['restart', 'health', 'restart']);
+  for (const b of w.units.bounds) assert.ok(b.until !== undefined && b.until <= start + unitTimeoutMs(), `${b.what} is bounded inside the unit's timeout`);
+  const rollback = w.units.bounds.at(-1);
+  assert.ok(rollback?.until !== undefined && rollback.until - rollback.at >= RESTART_WITHIN_MS, `the rollback restart has its ${RESTART_WITHIN_MS} ms: ${JSON.stringify(rollback)}`);
+  const health = w.units.bounds[1];
+  assert.ok(health?.until !== undefined && health.until > health.at, 'the health check was left time of its own after the self-check');
 });
 
 test('KBOX-6 a second install in a run whose time the first used up is refused timeout, with nothing copied', async (t) => {

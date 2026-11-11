@@ -59,6 +59,7 @@ export interface InstallHooks {
   readonly afterList?: (rel: string) => void;
   readonly afterOpen?: (rel: string) => void;
   readonly afterRead?: (rel: string) => void;
+  readonly afterWrite?: (rel: string) => void;
   readonly afterCopy?: () => void;
   readonly afterSwitch?: () => void;
 }
@@ -79,12 +80,16 @@ export const COPY_DEADLINE_MS = 60_000;
 /** kb-install.service has TimeoutStartSec=120s; a run plans to end 10 s before it (Node's start, the result files), so
  * systemd never has to kill it. Every phase below is bounded by the time this leaves. */
 export const RUN_BUDGET_MS = 110_000;
-/** One `systemctl restart` of the three units, at most. */
+/** One `systemctl restart` of the three units, at most. The last this much of a run is the rollback's restart's alone:
+ * no earlier phase is given time that reaches into it. */
 export const RESTART_WITHIN_MS = 15_000;
+/** The new release's kb-install self-check, at most. */
+const SELF_CHECK_WITHIN_MS = 10_000;
 /** The least time worth a health check. */
 const MIN_HEALTH_MS = 10_000;
-/** A copy ends early enough to leave a restart, a health check and a rollback restart inside the run. */
-const AFTER_COPY_MS = 2 * RESTART_WITHIN_MS + MIN_HEALTH_MS;
+/** A copy (its reads, hashes and writes) ends early enough to leave a restart, a self-check, a health check and a rollback
+ * restart inside the run. */
+const AFTER_COPY_MS = 2 * RESTART_WITHIN_MS + SELF_CHECK_WITHIN_MS + MIN_HEALTH_MS;
 /** A pinned binary is read into memory to be hashed; Node's and Caddy's builds are well under this. */
 const BINARY_LIMIT = 256 * 1024 * 1024;
 
@@ -100,6 +105,8 @@ interface CopiedFile {
   readonly path: string;
   readonly executable: boolean;
   readonly bytes: Uint8Array;
+  /** Of `bytes`, taken as they are read, inside the copy's deadline. */
+  readonly sha256: string;
 }
 interface Copy {
   readonly dirs: readonly string[];
@@ -222,7 +229,7 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
             if (!read.ok) throw new Refusal('size');
             total += read.bytes.length;
             hooks.afterRead?.(rel);
-            files.push({ path: rel, executable: opened.executable, bytes: read.bytes });
+            files.push({ path: rel, executable: opened.executable, bytes: read.bytes, sha256: fileSha256(read.bytes) });
           }
         } finally {
           closeFd(opened.fd);
@@ -264,8 +271,9 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
           try {
             const read = readThrough(bin.fd, bin.size, BINARY_LIMIT);
             if (!read.ok) throw new Refusal('size');
-            if (fileSha256(read.bytes) !== pin.sha256) throw new Refusal('lock');
-            out.push({ path: `bin/${pin.name}`, executable: true, bytes: read.bytes });
+            const sha256 = fileSha256(read.bytes);
+            if (sha256 !== pin.sha256) throw new Refusal('lock');
+            out.push({ path: `bin/${pin.name}`, executable: true, bytes: read.bytes, sha256 });
           } finally {
             closeFd(bin.fd);
           }
@@ -280,8 +288,9 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     return out;
   };
 
-  /** Writes exactly the bytes read into a root-owned tree: directories 0755, files 0644 or 0755. */
-  const writeRelease = (target: string, copy: Copy, binaries: readonly CopiedFile[]): void => {
+  /** Writes exactly the bytes read into a root-owned tree: directories 0755, files 0644 or 0755. Each written file is
+   * inside the copy's deadline, or the copy is refused `timeout`. */
+  const writeRelease = (target: string, copy: Copy, binaries: readonly CopiedFile[], deadline: number): void => {
     mkdirSync(target, { mode: 0o755 });
     for (const dir of ['bin', ...[...copy.dirs].sort()]) mkdirSync(join(target, dir), { mode: 0o755 });
     for (const file of [...copy.files, ...binaries]) {
@@ -294,6 +303,8 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
       } finally {
         closeSync(fd);
       }
+      hooks.afterWrite?.(file.path);
+      if (deps.clock.now() > deadline) throw new Refusal('timeout');
     }
   };
 
@@ -364,8 +375,8 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     writeSwitching(h, h0);
     try {
       const copy = copyTree(stagingFd, h, deadline);
-      if (releaseHash(copy.files.map((f) => ({ path: f.path, executable: f.executable, sha256: fileSha256(f.bytes) }))) !== h) throw new Refusal('hash');
-      writeRelease(temp, copy, checkBinaries(stagingFd, h, h0, copy, deadline));
+      if (releaseHash(copy.files) !== h) throw new Refusal('hash');
+      writeRelease(temp, copy, checkBinaries(stagingFd, h, h0, copy, deadline), deadline);
     } catch (error) {
       rmSync(temp, { recursive: true, force: true });
       clearSwitching();
@@ -378,10 +389,13 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     spend(req.approval.approval_id);
     switchCurrent(h);
     hooks.afterSwitch?.();
+    // Every phase before a rollback ends by `rollbackAt`, so the rollback's restart always has its RESTART_WITHIN_MS.
+    const rollbackAt = runDeadline - RESTART_WITHIN_MS;
+    const within = (ms: number): number => Math.min(deps.clock.now() + ms, rollbackAt);
     const healthy = await deps.units
-      .restart(deps.clock.now() + RESTART_WITHIN_MS)
-      .then(() => deps.units.selfCheck(release, runDeadline - RESTART_WITHIN_MS))
-      .then((loads) => loads && deps.units.healthCheck(h, runDeadline - RESTART_WITHIN_MS))
+      .restart(within(RESTART_WITHIN_MS))
+      .then(() => deps.units.selfCheck(release, within(SELF_CHECK_WITHIN_MS)))
+      .then((loads) => loads && deps.units.healthCheck(h, rollbackAt))
       .catch(() => false);
     if (!healthy) {
       switchCurrent(h0);
