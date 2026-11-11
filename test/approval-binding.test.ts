@@ -7,12 +7,13 @@ import { test } from 'node:test';
 import { softApprover } from './kit/approver.ts';
 import type { Quirks } from './kit/approver.ts';
 import { seededRandom } from './kit/index.ts';
-import { approveWorld, challenges, wire, RP as WORLD_RP } from './support/approve-world.ts';
+import { DOMAIN, WORDLIST, approveWorld, challenges, newApproverBody, wire, RP as WORLD_RP } from './support/approve-world.ts';
 import type { World } from './support/approve-world.ts';
 import { actionDigest, approvalChallenge, operationChallenge, pasteChallenge, verifyProof, viewChallenge } from '../src/pure/challenge.ts';
 import type { ApproverKeys } from '../src/pure/challenge.ts';
 import { decodeCoseEs256, parseRawPoint } from '../src/pure/cose.ts';
 import { derToRaw, verifyAssertion, verifyEs256Raw } from '../src/pure/webauthn.ts';
+import { createApprovers } from '../src/shell/approvers.ts';
 
 const FIXTURE = new URL('./fixtures/webauthn/vectors.json', import.meta.url);
 
@@ -389,4 +390,74 @@ test('KBOX-9 KBOX-7 a replaced action is stored under the digest of its new cont
   assert.equal(Buffer.from(item.digest_b64, 'base64url').toString('hex'), createHash('sha256').update(canonical).digest('hex'));
   const overOld = w.proofFor({ ...item, digest_b64: first.digest_b64 });
   assert.equal((await w.decide(item.approval_id, 'approve', overOld)).status, 403, 'a fresh nonce over the digest of the action that was replaced');
+});
+
+// --- pins for bindings the code has and no test held (kernel-approve minors 1 to 5) -----------------------------------
+
+/** The codes of every refused proof so far, oldest first. */
+const refusedCodes = (w: World): string[] => w.parts.audit.read(0).entries.filter((e) => e.action === 'proof.refused').map((e) => String(e.detail['code']));
+
+test('KBOX-9 a nonce minted before a restart is refused after it: the key is fresh per process, so replay protection does not rest on the in-memory spent set', async (t) => {
+  const w = await approveWorld(t);
+  const n = await w.nonce('view');
+  const parts = w.owner.prove(challenges.view(n), WORLD_RP);
+  const proof = { nonce: n, ...parts };
+  const restarted = createApprovers({ store: w.priv, trust: w.trust, push: w.push, audit: w.parts.audit, clock: w.clock, random: seededRandom(777), domain: DOMAIN, wordlist: WORDLIST });
+  assert.deepEqual(restarted.check({ kind: 'view' }, viewChallenge, proof), { ok: false, code: 'nonce_foreign' });
+  assert.equal(w.core.approvers.check({ kind: 'view' }, viewChallenge, proof).ok, true, 'control: the same proof is good for the process that minted the nonce');
+});
+
+test('KBOX-9 the signature counter is kept between proofs: a lower or equal counter is refused after a higher one, a higher one is accepted', async (t) => {
+  const w = await approveWorld(t);
+  const open = async (counter: number): Promise<number> => {
+    const n = await w.nonce('view');
+    return (await w.call('/app/view', { json: { proof: wire(n, w.owner.prove(challenges.view(n), WORLD_RP, { counter })) } })).status;
+  };
+  assert.equal(await open(7), 200);
+  assert.equal(await open(6), 403, 'below the stored 7');
+  assert.equal(await open(7), 403, 'equal to the stored 7');
+  assert.equal(await open(8), 200, 'above it');
+  assert.deepEqual(refusedCodes(w), ['counter', 'counter']);
+});
+
+test('KBOX-9 the view cookie is __Host- prefixed, Path=/, HttpOnly, Secure, SameSite=Strict, has no Domain and lasts 15 minutes', async (t) => {
+  const w = await approveWorld(t);
+  const n = await w.nonce('view');
+  const reply = await w.call('/app/view', { json: { proof: wire(n, w.owner.prove(challenges.view(n), WORLD_RP)) } });
+  assert.equal(reply.status, 200);
+  const [pair = '', ...flags] = (reply.headers['set-cookie'] ?? '').split(';').map((s) => s.trim());
+  assert.match(pair, /^__Host-[A-Za-z0-9_-]+=[A-Za-z0-9_-]{20,}$/);
+  assert.deepEqual([...flags].sort(), ['HttpOnly', 'Max-Age=900', 'Path=/', 'SameSite=Strict', 'Secure']);
+});
+
+test('KBOX-9 a registration nonce is spent by the registration: a second registration under the same nonce is refused even with a valid recovery code', async (t) => {
+  const w = await approveWorld(t);
+  const n = await w.nonce('register');
+  const body = (a: ReturnType<typeof softApprover>, code: string) => ({ code, approver: newApproverBody(a), proof: wire(n, a.prove(challenges.register(n), WORLD_RP)), phrase: 'blue kettle' });
+  assert.equal((await w.call('/recover', { json: body(softApprover(), w.recoveryCode()) })).status, 201);
+  assert.equal((await w.call('/recover', { json: body(softApprover(), w.recoveryCode()) })).status, 403);
+  assert.deepEqual(refusedCodes(w), ['nonce_used']);
+});
+
+test('KBOX-9 a nonce is good for the purpose it was minted for only: every other pairing of view, op and register is refused as foreign', async (t) => {
+  const w = await approveWorld(t);
+  const op = { kind: 'token_revoke', label: 'ws-a' } as const;
+  w.token('ws-a', 'relay');
+  const challengeOf = {
+    view: (n: Uint8Array) => challenges.view(n),
+    op: (n: Uint8Array) => challenges.op(op, n),
+    register: (n: Uint8Array) => challenges.register(n),
+  } as const;
+  const purposes = ['view', 'op', 'register'] as const;
+  for (const minted of purposes) {
+    for (const used of purposes) {
+      if (minted === used) continue;
+      const n = await w.nonce(minted);
+      const proof = { nonce: n, ...w.owner.prove(challengeOf[used](n), WORLD_RP) };
+      const verdict = w.core.approvers.check({ kind: used }, challengeOf[used], proof);
+      assert.equal(verdict.ok ? 'ok' : verdict.code, 'nonce_foreign', `a ${minted} nonce used as ${used}`);
+    }
+  }
+  const n = await w.nonce('op');
+  assert.equal(w.core.approvers.check({ kind: 'op' }, challengeOf.op, { nonce: n, ...w.owner.prove(challengeOf.op(n), WORLD_RP) }).ok, true, 'control: an op nonce is good as op');
 });
