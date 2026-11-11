@@ -13,7 +13,9 @@ import { GOLDEN_SIGNING_SEED_HEX } from './kit/share-golden.ts';
 import { openShare } from './kit/reference-matcher.ts';
 import { base64Document, fakeKey, rawDocument } from './kit/share-store.ts';
 import type { FakeKey } from './kit/share-store.ts';
-import { seededRandom } from './kit/index.ts';
+import { FakeClock, TimedClock, drive, seededRandom, startNode, tempDir } from './kit/index.ts';
+import { hashToken, newToken } from '../src/pure/tokens.ts';
+import { openCore } from '../src/shell/core.ts';
 import { shareWorld } from './support/share-world.ts';
 import type { ShareWorld } from './support/share-world.ts';
 
@@ -339,4 +341,32 @@ test('KBOX-33 a copy of a watched value is found by the reference matcher throug
   const after = await read();
   assert.ok(after.ok);
   assert.ok(after.share.scan(rawDocument(second.value)).length > 0);
+});
+
+// ---------------------------------------------------------------- the real process
+
+test('KBOX-33 the running core writes the first share file at start and serves it with the public key GET /api/meta shows', async (t) => {
+  const dir = await tempDir(t);
+  const stateDir = join(dir, 'state');
+  const socket = join(dir, 'http.sock');
+  const random = seededRandom(5);
+  const token = newToken(random);
+  const parts = openCore({ stateDir, clock: new FakeClock(1_000), scheduler: new TimedClock(1_000), random });
+  parts.meta.addMachine({ label: 'mc', scope: 'control', tokenSha256: hashToken(token), enrolledAt: 1_000 });
+  parts.close();
+  const core = startNode(t, [new URL('../src/main-core.ts', import.meta.url).pathname], dir, { KB_STATE_DIR: stateDir, KB_SOCKET: socket });
+  await core.ready('keybox core listening');
+  const driver = drive(socket);
+  const call = (path: string) => driver.request({ path, headers: { 'x-kb-client-ip': '203.0.113.9', authorization: `Bearer ${token}` } });
+  const meta = (await call('/api/meta')).json() as { box: { share_version: number; share_public_key_ed25519_b64: string } };
+  assert.equal(meta.box.share_version, 1);
+  const served = await call('/api/share');
+  assert.equal(served.status, 200, served.body);
+  assert.equal(served.headers['kb-share-version'], '1');
+  const opened = openShare(Buffer.from(served.body), meta.box.share_public_key_ed25519_b64);
+  assert.ok(opened.ok, 'the file the real process wrote verifies with its published key');
+  assert.equal(opened.share.version, 1);
+  const exit = await core.stop();
+  assert.equal(exit.status, 0, exit.stderr);
+  assert.equal(statSync(join(stateDir, 'share', 'share.json')).mode & 0o777, 0o644);
 });

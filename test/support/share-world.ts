@@ -33,6 +33,8 @@ export interface ShareWorldOptions {
   readonly seed?: number;
   /** Do not call `writer.start()`. */
   readonly noStart?: boolean;
+  /** Replaces the fake store with a source made over the running core (the real metadata and vault). */
+  readonly source?: (core: RunningCore) => ShareSource;
   /** The share directory, when it is not under the state directory (a database restored beside an old share directory). */
   readonly shareDir?: string;
 }
@@ -53,7 +55,7 @@ export async function shareWorld(t: TestContext, options: ShareWorldOptions = {}
   const store = [...(options.store ?? [])];
   let reads = 0;
   let failing = 0;
-  const source: ShareSource = {
+  const fake: ShareSource = {
     keys: () => {
       reads += 1;
       if (failing > 0) {
@@ -68,7 +70,7 @@ export async function shareWorld(t: TestContext, options: ShareWorldOptions = {}
     dir: shareDir,
     meta: options.meta === undefined ? core.meta : options.meta(core.meta),
     vault: core.vault,
-    source,
+    source: options.source === undefined ? fake : options.source(core),
     events: core.events,
     hub: core.hub,
     clock: core.clock,
