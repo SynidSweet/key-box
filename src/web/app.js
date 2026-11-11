@@ -51,8 +51,11 @@ function card(item) {
 }
 
 async function openQueue() {
-  const answer = /** @type {{ approvals?: unknown }} */ (await call('/app/queue'));
+  const answer = /** @type {{ phrase?: unknown, approvals?: unknown }} */ (await call('/app/queue'));
   const items = Array.isArray(answer.approvals) ? answer.approvals.filter(isItem) : [];
+  const phrase = byId('phrase');
+  phrase.textContent = typeof answer.phrase === 'string' ? `Your phrase: ${answer.phrase}` : '';
+  phrase.hidden = typeof answer.phrase !== 'string';
   byId('queue').replaceChildren(...items.map(card));
   byId('tools').hidden = false;
   if (items.length === 0) notifier.say('Nothing waits.');

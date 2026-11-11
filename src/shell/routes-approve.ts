@@ -246,7 +246,8 @@ export function approveRoutes(deps: ApproveRouteDeps): Route[] {
       },
     }),
 
-    route({ method: 'GET', path: '/app/queue', surface: 'phone', handle: ({ cookie }) => (viewerOf(cookie), { json: { approvals: approvals.queue() } }) }),
+    // The viewer's own phrase rides with the queue: a view session needs the passkey and the device key (KBOX-9), so the phrase is never shown without both (KBOX-12).
+    route({ method: 'GET', path: '/app/queue', surface: 'phone', handle: ({ cookie }) => ({ json: { phrase: approvers.phraseOf(viewerOf(cookie)), approvals: approvals.queue() } }) }),
 
     route({
       method: 'POST',

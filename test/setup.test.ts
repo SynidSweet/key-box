@@ -231,3 +231,21 @@ test('KBOX-9 the phone page builds the denial challenge the box checks, and it d
   assert.equal(denial, hexOf(challenges.denial('apr_AAAAAAAAAAAAAAAA', digest, nonce)));
   assert.notEqual(denial, hexOf(challenges.approval('apr_AAAAAAAAAAAAAAAA', digest, nonce)));
 });
+
+test('KBOX-12 the queue shows the viewing approver\'s own phrase, in a view session only; without one the phrase is nowhere in the answer', async (t) => {
+  const w = await approveWorld(t);
+  const shown = async (approver = w.owner): Promise<unknown> => ((await w.call('/app/queue', { cookie: await w.view(approver) })).json() as { phrase?: unknown }).phrase;
+  assert.equal(await shown(), 'blue kettle');
+  const bare = await w.call('/app/queue');
+  assert.equal(bare.status, 401);
+  assert.equal(bare.body.includes('blue kettle'), false);
+  const opened = await w.call('/app/propose-approver-add', { method: 'POST', cookie: await w.view() });
+  const id = (opened.json() as { approval_id: string }).approval_id;
+  const item = (await w.queue()).find((q) => q.approval_id === id);
+  assert.ok(item);
+  const code = ((await w.decide(id, 'approve', w.proofFor(item))).json() as { registration_code: string }).registration_code;
+  const second = softApprover();
+  assert.equal((await registerAt(w, '/recover/register', code, second, 'green lantern')).status, 201);
+  assert.equal(await shown(second), 'green lantern', 'each approver sees the phrase it typed');
+  assert.equal(await shown(), 'blue kettle', 'and the first still sees its own');
+});
