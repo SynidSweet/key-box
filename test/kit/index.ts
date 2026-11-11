@@ -1,0 +1,12 @@
+export { FakeClock } from './clock.ts';
+export { canary } from './canary.ts';
+export type { Canary, Hit, Surface } from './canary.ts';
+export { drive } from './drive.ts';
+export type { DriveReply, DriveRequest, Driver } from './drive.ts';
+export { fakePlatform } from './fake-platform.ts';
+export type { FakePlatform, PlatformMode, RecordedRequest } from './fake-platform.ts';
+export { checkProperty, seedFor, seededRandom } from './random.ts';
+export type { SeededRandom } from './random.ts';
+export { softAuthenticator } from './soft-authenticator.ts';
+export type { SoftAssertion, SoftAuthenticator, SoftCredential } from './soft-authenticator.ts';
+export { tempDir } from './temp.ts';

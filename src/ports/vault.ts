@@ -1,0 +1,8 @@
+import type { KeyRef, Lent } from './types.ts';
+
+export interface Vault {
+  put(ref: KeyRef, gen: number, v: Uint8Array): void;
+  /** Throws for a ref and generation that is unknown or retired. */
+  lend(ref: KeyRef, gen: number): Lent;
+  retire(ref: KeyRef, gen: number): void;
+}
