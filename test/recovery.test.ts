@@ -315,6 +315,7 @@ test('KBOX-53 an approver_add whose registration root refuses ends as failed wit
   assert.deepEqual(outcomes(w).at(-1), [good.id, 'done', 'ok']);
 });
 
+// FORCED-FLIP: as of the spec revision 4 the registration comes before any approval, so a refused one ends none.
 test('KBOX-53 an approver_add registration refused for its own keys (not the code) opens no approval, and the code is spent', async (t) => {
   const w = await approveWorld(t);
   const code = await askCode(w);
@@ -328,17 +329,24 @@ test('KBOX-53 an approver_add registration refused for its own keys (not the cod
   assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 403, 'the code is spent by the refused attempt');
 });
 
+// FORCED-FLIP: as of the spec revision 4 a code's end ends no approval: none exists until a phone registers.
 test('KBOX-53 a registration code that is never used is refused at 10 minutes plus 1 ms, and root is never asked', async (t) => {
   const w = await approveWorld(t);
   // FORCED-FLIP: as of the spec revision 4 the code comes before any approval, so its end ends no approval.
+  const onTime = await askCode(w);
+  w.clock.advance(10 * MINUTE);
+  assert.equal((await registerAt(w, '/recover/register', onTime, softApprover())).status, 201, 'still good at 10 minutes');
   const code = await askCode(w);
   w.clock.advance(10 * MINUTE + 1);
   await w.queue();
+  // FORCED-FLIP: as of the spec revision 4 an expired code is refused at registration; no approval exists to end code_expired.
   assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 403);
   assert.equal(addCalls(w), 0, 'root is never asked about an expired code');
+  // FORCED-FLIP: as of the spec revision 4 the late attempt above is the refusal; no approval ended.
   assert.deepEqual(outcomes(w), []);
 });
 
+// FORCED-FLIP: as of the spec revision 4 a newer code replaces the outstanding one; there is no approval to end superseded.
 test('KBOX-53 a second registration code replaces the first: the first code is dead', async (t) => {
   const w = await approveWorld(t);
   // FORCED-FLIP: as of the spec revision 4 a newer code (not a newer approval) replaces the outstanding one.
@@ -348,6 +356,7 @@ test('KBOX-53 a second registration code replaces the first: the first code is d
   assert.equal((await registerAt(w, '/recover/register', second, softApprover())).status, 201);
 });
 
+// FORCED-FLIP: as of the spec revision 4 the code belongs to the approver who asked for it, and no approval exists to end cancelled.
 test('KBOX-53 removing the approver who asked for a registration code cancels the code: root is not asked and no device is added', async (t) => {
   const w = await approveWorld(t);
   const second = await w.addApprover();
@@ -362,8 +371,10 @@ test('KBOX-53 removing the approver who asked for a registration code cancels th
   assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 403);
   assert.equal(addCalls(w), calls, 'root was not asked');
   assert.deepEqual(w.core.approvers.ids(), [second.approverId], 'no device was added');
+  // FORCED-FLIP: as of the spec revision 4 the code was cancelled before any approval existed, so no approval ends cancelled.
 });
 
+// FORCED-FLIP: as of the spec revision 4 a recovery cancels the outstanding code; no approval exists to end cancelled.
 test('KBOX-53 a recovery cancels the registration code the old approvers asked for: the code registers nothing', async (t) => {
   const w = await approveWorld(t);
   // FORCED-FLIP: as of the spec revision 4 the code is asked for before any approval exists.
@@ -377,6 +388,7 @@ test('KBOX-53 a recovery cancels the registration code the old approvers asked f
   assert.deepEqual(outcomes(w), []);
 });
 
+// FORCED-FLIP: as of the spec revision 4 a recovery also drops a phone that registered and waits for approval (the next test keeps the other-approver case).
 test('KBOX-53 a recovery drops a pending device: approving its approver_add afterwards adds nothing and root is not asked', async (t) => {
   const w = await approveWorld(t);
   const add = await approvedAdd(w);

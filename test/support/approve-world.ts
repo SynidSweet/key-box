@@ -237,6 +237,7 @@ export async function approveWorld(t: TestContext, options: WorldOptions = {}): 
     // proposes the approver_add that names its keys; the owner approves it after comparing the fingerprint.
     async addApprover() {
       const cookie = await view();
+      // FORCED-FLIP: as of the spec revision 4 the route answers the code; the add is approved after the registration, below.
       const asked = await call('/app/propose-approver-add', { method: 'POST', cookie });
       assert.equal(asked.status, 201, asked.body);
       const code = (asked.json() as { registration_code: string }).registration_code;

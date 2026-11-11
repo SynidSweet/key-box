@@ -267,6 +267,7 @@ test('KBOX-53 KBOX-9 every state-changing phone route refuses the view cookie al
 async function approvedAddCode(w: World): Promise<string> {
   const opened = await w.call('/app/propose-approver-add', { method: 'POST', cookie: await w.view() });
   assert.equal(opened.status, 201, opened.body);
+  // FORCED-FLIP: as of the spec revision 4 this route answers the code itself; no approval is opened or approved for it.
   const code = (opened.json() as { registration_code?: string }).registration_code;
   assert.match(code ?? '', /^[a-z]+( [a-z]+){11}$/, 'twelve words');
   return code ?? '';

@@ -239,8 +239,8 @@ test('KBOX-12 the queue shows the viewing approver\'s own phrase, in a view sess
   const bare = await w.call('/app/queue');
   assert.equal(bare.status, 401);
   assert.equal(bare.body.includes('blue kettle'), false);
-  // FORCED-FLIP: as of the spec revision 4 the code comes first, the new phone registers, then the box's approver_add is approved.
   const opened = await w.call('/app/propose-approver-add', { method: 'POST', cookie: await w.view() });
+  // FORCED-FLIP: as of the spec revision 4 the code comes first, the new phone registers, then the box's approver_add is approved.
   const code = (opened.json() as { registration_code: string }).registration_code;
   const second = softApprover();
   assert.equal((await registerAt(w, '/recover/register', code, second, 'green lantern')).status, 201);
