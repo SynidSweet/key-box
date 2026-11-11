@@ -45,7 +45,9 @@ for a in "$@"; do case $a in --preflight) MODE=preflight;; *) ARG_WT=$a;; esac; 
 # --- adapt these per project (env overrides win) ------------------------------
 # The host suite is every test file except the root-only journey, which the gate runs as root in a container (see process-split below).
 SPLIT_FILE=${SPLIT_FILE:-test/journeys/process-split.test.ts}
-SUITE_CMD=${SUITE_CMD:-node --test \$(find test -name '*.ts' ! -path $SPLIT_FILE | sort)}        # exit 0 = suite green
+# Every file type `node --test` runs (.ts .mts .js .mjs .cjs), so a test in another type cannot go unrun; only SPLIT_FILE is left out.
+HOST_SUITE='node --test $(find test -type f \( -name "*.ts" -o -name "*.mts" -o -name "*.js" -o -name "*.mjs" -o -name "*.cjs" \) ! -path '"$SPLIT_FILE"' | sort)'
+SUITE_CMD=${SUITE_CMD:-$HOST_SUITE}        # exit 0 = suite green
 SUITE_FAILING_IDS_CMD=${SUITE_FAILING_IDS_CMD:-}
                                          # prints failing test IDs, one per line,
                                          # as <repo-relative file>::<test name>
