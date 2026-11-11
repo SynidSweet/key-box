@@ -8,7 +8,7 @@ Type=simple
 User=keybox
 Group=keybox
 UMask=0007
-Environment=KB_STATE_DIR=/var/lib/keybox KB_SOCKET=/run/keybox/http.sock
+Environment=KB_STATE_DIR=/var/lib/keybox KB_SOCKET=/run/keybox/http.sock KB_LEND_SOCKET=/run/keybox-lend/lend.sock
 ExecStart=/opt/keybox/current/bin/node /opt/keybox/current/src/main-core.ts
 Restart=on-failure
 LimitCORE=0

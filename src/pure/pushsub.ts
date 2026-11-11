@@ -21,7 +21,7 @@ export function decodeBase64Url(value: string): Uint8Array | undefined {
 }
 
 /** `*.domain` matches one or more labels below `domain`, never `domain` itself. */
-function hostAllowed(host: string, allowed: readonly string[]): boolean {
+export function hostAllowed(host: string, allowed: readonly string[]): boolean {
   return allowed.some((entry) => (entry.startsWith('*.') ? host.length > entry.length - 1 && host.endsWith(entry.slice(1)) : host === entry));
 }
 

@@ -239,7 +239,7 @@ export const shareForms = (value: string, options: ValueOptions = {}): FormsResu
 const BACKSLASH = 0x5c;
 const CR = 0x0d;
 const LF = 0x0a;
-const SEPARATOR = 0x00;
+export const SEPARATOR = 0x00;
 /** A run of removed bytes longer than this is kept as one separator: `\` CR LF is 3 bytes, plus one byte of indentation. */
 const LONGEST_JOINABLE_RUN = 4;
 const isBlank = (byte: number): boolean => byte === 0x20 || (byte >= 0x09 && byte <= 0x0d);
@@ -252,14 +252,14 @@ function elementAt<T>(items: ArrayLike<T>, i: number): T {
 const byteAt = (bytes: Uint8Array, i: number): number => elementAt(bytes, i);
 
 /** What one push of the scanner produced; `offsets` are raw offsets from the start of the stream. */
-interface Scanned {
+export interface Scanned {
   readonly bytes: Uint8Array;
   readonly offsets: Float64Array;
   /** Index in `bytes` of the last separator, or -1. */
   readonly lastSeparator: number;
 }
 
-interface StripScanner {
+export interface StripScanner {
   push(data: Uint8Array, final: boolean): Scanned;
   /** Raw offset of the first byte not yet classified (a backslash, maybe with a CR, waiting for what follows), or -1. */
   pendingFrom(): number;
@@ -270,7 +270,7 @@ interface StripScanner {
  * becomes ONE separator byte (so no copy spans it and a whitespace flood is never held). A backslash is removed only when a
  * line break follows, which may arrive in the next chunk, so it stays pending until then.
  */
-function createStripScanner(): StripScanner {
+export function createStripScanner(): StripScanner {
   let pending: Uint8Array = new Uint8Array(0);
   let position = 0;
   let runLength = 0;

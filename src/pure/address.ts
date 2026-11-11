@@ -10,7 +10,7 @@ export interface ClientAddress {
 
 const MAX_LENGTH = 45;
 
-function parseIpv4(text: string): number[] | undefined {
+export function parseIpv4(text: string): number[] | undefined {
   const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
   if (match === null) return undefined;
   const octets = match.slice(1, 5).map((o) => (o.length > 1 && o.startsWith('0') ? Number.NaN : Number(o)));
@@ -36,7 +36,7 @@ function groupsOf(part: string, lastMayBeIpv4: boolean): number[] | undefined {
 }
 
 /** The eight 16-bit groups of an IPv6 address, or undefined. */
-function parseIpv6(text: string): number[] | undefined {
+export function parseIpv6(text: string): number[] | undefined {
   if (!/^[0-9A-Fa-f:.]+$/.test(text)) return undefined;
   const halves = text.split('::');
   if (halves.length > 2) return undefined;
