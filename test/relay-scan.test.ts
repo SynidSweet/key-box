@@ -128,6 +128,30 @@ test('KBOX-14 wrapped copies: base64 at 64 and 76 columns with CRLF and with \\-
   });
 });
 
+/** `text` cut into lines of `width` characters with `eol` between them. */
+const wrapText = (text: string, width: number, eol: string): string => (text.match(new RegExp(`.{1,${width}}`, 'g')) ?? []).join(eol);
+
+test('KBOX-14 wrapped copies of the longest form (\\u-escaped) at 64 and 76 columns never release a copy byte early: a raw-byte hold of the same length would, by the removed line-break bytes', () => {
+  const uEscaped = ENCODINGS['u-escaped'] ?? ((t: string) => t);
+  const longest = Math.max(...formsOf(VALUE).map((f) => f.bytes.length));
+  const copy = uEscaped(VALUE);
+  assert.equal(copy.length, longest, 'the \\u form is the longest form, so the hold is its length minus 1');
+  const seed = seedFor(process.env);
+  checkProperty(seed, 3, (rng) => {
+    for (const [width, eol] of [[64, '\r\n'], [76, '\r\n'], [64, '\\\n'], [76, '\n']] as const) {
+      const lead = `{"blob":"${'q'.repeat(rng.int(300))}`;
+      const wrappedCopy = wrapText(copy, width, eol);
+      assert.ok(wrappedCopy.length > longest, 'the wrapped copy spans more raw bytes than the hold');
+      const body = bytes(`${lead}${wrappedCopy}"}`);
+      for (let cut = 1; cut < body.length; cut += 1) {
+        const result = run(scannerFor(), splitAt(body, cut));
+        assert.equal(result.hit, 'value', `width ${width} cut ${cut}`);
+        assert.ok(result.released <= lead.length, `width ${width} cut ${cut}: released ${result.released} > ${lead.length}`);
+      }
+    }
+  });
+});
+
 test('KBOX-14 a wrapped sk- key never releases a byte of the key before it is withheld', () => {
   const key = `sk-${'A1b2C3d4E5'.repeat(4)}`;
   for (const eol of ['\r\n', '\\\n']) {
