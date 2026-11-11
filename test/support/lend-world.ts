@@ -3,30 +3,16 @@
 import { join } from 'node:path';
 import type { TestContext } from 'node:test';
 import type { PlatformEntry } from '../../src/ports/platform.ts';
+import type { Random } from '../../src/ports/random.ts';
 import type { KeyClass } from '../../src/ports/types.ts';
-import { parseCredentialShapes } from '../../src/pure/scanner.ts';
-import type { CredentialShapes } from '../../src/pure/scanner.ts';
 import { hashToken, newToken } from '../../src/pure/tokens.ts';
 import { openCore } from '../../src/shell/core.ts';
 import type { CoreParts } from '../../src/shell/core.ts';
-import { createLendHandler } from '../../src/shell/lend-core.ts';
+import { createLendHandler, loadCredentialShapes } from '../../src/shell/lend-core.ts';
 import { createLendClient, createLendServer } from '../../src/shell/lend-socket.ts';
 import type { LendClient, LendServer } from '../../src/shell/lend-socket.ts';
 import { TimedClock, seededRandom, tempDir } from '../kit/index.ts';
-import { hostProfile, pathProfile } from '../fixtures/profiles.ts';
-import { readFileSync } from 'node:fs';
-
-export const TEST_REGISTRY: readonly PlatformEntry[] = [
-  { id: 'pathplat', relay: pathProfile },
-  { id: 'hostplat', relay: hostProfile },
-  { id: 'plain' },
-];
-
-export function loadShapes(): CredentialShapes {
-  const parsed = parseCredentialShapes(JSON.parse(readFileSync(new URL('../../src/data/credential-shapes.json', import.meta.url), 'utf8')) as unknown);
-  if (!parsed.ok) throw new Error('credential-shapes.json does not parse');
-  return parsed.value;
-}
+import { TEST_REGISTRY } from '../fixtures/profiles.ts';
 
 export interface NewKey {
   readonly keyref: string;
@@ -54,7 +40,7 @@ export async function lendWorld(t: TestContext, registry: readonly PlatformEntry
   const clock = new TimedClock(1_000_000);
   const random = seededRandom(11);
   const core = openCore({ stateDir: join(dir, 'state'), clock, scheduler: clock, random });
-  const handler = createLendHandler({ meta: core.meta, tokens: core.meta, vault: core.vault, audit: core.audit, events: core.events, registry, shapes: loadShapes(), clock });
+  const handler = createLendHandler({ meta: core.meta, tokens: core.meta, vault: core.vault, audit: core.audit, events: core.events, registry, shapes: loadCredentialShapes(), clock });
   const server = createLendServer(handler);
   const socket = join(dir, 'lend.sock');
   await server.listen(socket);
@@ -69,27 +55,33 @@ export async function lendWorld(t: TestContext, registry: readonly PlatformEntry
     socket,
     server,
     client: createLendClient(socket),
-    enrol(label, scope = 'relay') {
-      const token = newToken(random);
-      core.meta.addMachine({ label, scope, tokenSha256: hashToken(token), enrolledAt: clock.now() });
-      return token;
-    },
-    addKey(key) {
-      const gen = key.gen ?? 1;
-      core.meta.putKey({
-        keyref: key.keyref,
-        platform: key.platform ?? 'pathplat',
-        name: `KEY_${key.keyref.toUpperCase()}`,
-        projects: ['shop'],
-        class: key.cls ?? 'admin',
-        status: 'works',
-        gen_current: gen,
-        schedule: { rotate_every_days: 30, grace_hours: 24, next_due_at: null, expires_at: null },
-        coverage: null,
-        last_use_at: null,
-      });
-      core.vault.put(key.keyref, gen, key.value);
-      for (const machine of key.grants ?? []) core.meta.putGrant(key.keyref, machine);
-    },
+    enrol: (label, scope = 'relay') => seedPass(core, label, scope, random, clock.now()),
+    addKey: (key) => seedKey(core, key),
   };
+}
+
+/** Enrols a machine in `core` and returns its pass. */
+export function seedPass(core: CoreParts, label: string, scope: 'relay' | 'control', random: Random, now: number): string {
+  const token = newToken(random);
+  core.meta.addMachine({ label, scope, tokenSha256: hashToken(token), enrolledAt: now });
+  return token;
+}
+
+/** Stores a key in `core` (meta row, vault value, grants); an admin key of the path profile unless told otherwise. */
+export function seedKey(core: CoreParts, key: NewKey): void {
+  const gen = key.gen ?? 1;
+  core.meta.putKey({
+    keyref: key.keyref,
+    platform: key.platform ?? 'pathplat',
+    name: `KEY_${key.keyref.toUpperCase()}`,
+    projects: ['shop'],
+    class: key.cls ?? 'admin',
+    status: 'works',
+    gen_current: gen,
+    schedule: { rotate_every_days: 30, grace_hours: 24, next_due_at: null, expires_at: null },
+    coverage: null,
+    last_use_at: null,
+  });
+  core.vault.put(key.keyref, gen, key.value);
+  for (const machine of key.grants ?? []) core.meta.putGrant(key.keyref, machine);
 }

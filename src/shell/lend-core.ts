@@ -2,6 +2,7 @@
 // and lends a value only for an admin key: the class check is here, in code, not in configuration, so a master or ordinary
 // value never reaches the relay. Responses are scanned here too, against every value the box holds (master values
 // included), so those values never leave core. The relay's audit rows are written here, closed.
+import { readFileSync } from 'node:fs';
 import type { Audit } from '../ports/audit.ts';
 import type { Clock } from '../ports/clock.ts';
 import type { EventLog } from '../ports/events.ts';
@@ -14,7 +15,7 @@ import { scanForms } from '../pure/forms.ts';
 import type { Form } from '../pure/forms.ts';
 import { FRAME_BYTES, FRAME_END, acceptedMessage, refusalMessage, scanStepMessage } from '../pure/lend-protocol.ts';
 import type { LendRefusal, LendRequest, RelayAuditRow } from '../pure/lend-protocol.ts';
-import { createResponseScanner } from '../pure/scanner.ts';
+import { createResponseScanner, parseCredentialShapes } from '../pure/scanner.ts';
 import type { CredentialShapes, ResponseScanner } from '../pure/scanner.ts';
 import { findTokenHash } from '../pure/tokens.ts';
 import type { LendHandler, LendSession } from './lend-socket.ts';
@@ -34,6 +35,13 @@ export interface LendCoreDeps {
 type Checked<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly code: LendRefusal };
 
 const NOTICE = { code: 'credential_withheld', text: 'credential withheld' } as const;
+
+/** The credential shapes of KBOX-14, from `src/data/credential-shapes.json`; a file that does not parse stops the caller. */
+export function loadCredentialShapes(): CredentialShapes {
+  const parsed = parseCredentialShapes(JSON.parse(readFileSync(new URL('../data/credential-shapes.json', import.meta.url), 'utf8')) as unknown);
+  if (!parsed.ok) throw new RangeError('src/data/credential-shapes.json does not parse');
+  return parsed.value;
+}
 
 export function createLendHandler(deps: LendCoreDeps): LendHandler {
   const profileOf = (platform: string): RelayProfile | undefined => deps.registry.find((e) => e.id === platform)?.relay;

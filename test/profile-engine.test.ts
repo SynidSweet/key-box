@@ -8,7 +8,7 @@ import { checkRegistry, compileProfile, refuseWidening } from '../src/pure/profi
 import type { ProfileEngine } from '../src/pure/profile.ts';
 import { parseRelayTarget } from '../src/pure/target-parse.ts';
 import { IAM_HOST, PATH_HOST, STORAGE_HOST, hostProfile, leakyProfile, pathProfile } from './fixtures/profiles.ts';
-import { TEST_REGISTRY } from './support/lend-world.ts';
+import { TEST_REGISTRY } from './fixtures/profiles.ts';
 import { relayWorld } from './support/relay-world.ts';
 
 const engineOf = (profile: RelayProfile): ProfileEngine => {

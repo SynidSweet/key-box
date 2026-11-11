@@ -35,8 +35,8 @@ export interface RelayDeps {
   readonly registry: readonly PlatformEntry[];
   readonly lend: LendClient;
   readonly egress: Egress;
-  /** The box's domain: the relay URL of a key is `https://api.keys.<domain>/r/<keyref>`. */
-  readonly domain: string;
+  /** The box's domain: the relay URL of a key is `https://api.keys.<domain>/r/<keyref>`. Absent until the bootstrap sets it: then /r/_/grants is unavailable. */
+  readonly domain: string | undefined;
   /** A fixed code when the relay itself could not do its job. Never text of a request, a value or an answer. */
   readonly journal: (code: string) => void;
 }
@@ -157,13 +157,15 @@ export function createRelayServer(deps: RelayDeps): RelayServer {
 
   async function grants(req: IncomingMessage, res: ServerResponse, trace: Trace, source: ClientAddress): Promise<void> {
     trace.route = 'grants';
+    const domain = deps.domain;
+    if (domain === undefined) throw new Refused('unavailable');
     if (req.method !== 'GET') throw new Refused('not_found');
     const pass = passOf(req);
     const answer = await deps.lend.grants({ op: 'grants', token_hash: hashToken(pass.token), network: source.network });
     if (!answer.ok) throw new Refused(answer.code === 'bad_token' ? 'bad_token' : 'forbidden');
     trace.label = answer.machine;
     const list = answer.grants.map((g) => {
-      const relayUrl = `https://api.keys.${deps.domain}/r/${g.keyref}`;
+      const relayUrl = `https://api.keys.${domain}/r/${g.keyref}`;
       const profile = engines.get(g.platform)?.profile;
       return { keyref: g.keyref, platform: g.platform, name: g.name, projects: g.projects, env: profile === undefined ? {} : profile.envForClients(relayUrl) };
     });

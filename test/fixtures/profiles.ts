@@ -2,6 +2,7 @@
 // (as OpenAI and Supabase do) and `hostplat` takes the host as the first path segment (as Google does). The platform units
 // supply the real profiles; these exist so the deny-by-name tests run against real shapes. Every endpoint in `mustDeny`
 // mints a credential, a token or a login.
+import type { PlatformEntry } from '../../src/ports/platform.ts';
 import type { DenyRule, RelayProfile } from '../../src/ports/relay-profile.ts';
 import type { Lent } from '../../src/ports/types.ts';
 
@@ -96,3 +97,10 @@ export const leakyProfile: RelayProfile = {
   allow: [...pathProfile.allow, { id: 'org-anything', method: 'POST', host: PATH_HOST, pathTemplate: '/v1/organization/{rest:**}', query: {} }],
   tailRules: ['files-tail', 'org-anything'],
 };
+
+/** The registry the relay tests run: both test profiles and a platform with no relay profile. */
+export const TEST_REGISTRY: readonly PlatformEntry[] = [
+  { id: 'pathplat', relay: pathProfile },
+  { id: 'hostplat', relay: hostProfile },
+  { id: 'plain' },
+];

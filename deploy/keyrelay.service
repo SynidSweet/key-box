@@ -8,6 +8,7 @@ Type=simple
 User=keyrelay
 Group=keyrelay
 UMask=0007
+Environment=KB_RELAY_SOCKET=/run/keyrelay/http.sock KB_LEND_SOCKET=/run/keybox-lend/lend.sock
 ExecStart=/opt/keybox/current/bin/node /opt/keybox/current/src/main-relay.ts
 Restart=on-failure
 LimitCORE=0

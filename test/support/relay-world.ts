@@ -4,18 +4,18 @@
 import { request } from 'node:http';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { connect } from 'node:net';
 import type { AddressInfo, Socket } from 'node:net';
 import { join } from 'node:path';
 import type { TestContext } from 'node:test';
 import type { PlatformEntry } from '../../src/ports/platform.ts';
 import { createEgress } from '../../src/shell/egress.ts';
-import type { Connector } from '../../src/shell/egress.ts';
 import { createLendClient } from '../../src/shell/lend-socket.ts';
+import { loopbackConnector } from './loopback-connector.ts';
 import { adapterHostsOf, createRelayServer } from '../../src/shell/relay-http.ts';
 import { canary } from '../kit/index.ts';
 import type { Canary } from '../kit/index.ts';
-import { TEST_REGISTRY, lendWorld } from './lend-world.ts';
+import { TEST_REGISTRY } from '../fixtures/profiles.ts';
+import { lendWorld } from './lend-world.ts';
 import type { LendWorld } from './lend-world.ts';
 
 export interface UpstreamRequest {
@@ -38,7 +38,8 @@ export interface Upstream {
   lastClosed(): Promise<void>;
 }
 
-async function upstream(t: TestContext): Promise<Upstream> {
+/** A scripted upstream platform on a loopback port; it records every request it is sent. */
+export async function startUpstream(t: TestContext): Promise<Upstream> {
   const requests: UpstreamRequest[] = [];
   let responder: Responder = (_req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -123,23 +124,14 @@ export interface RelayWorldOptions {
 export async function relayWorld(t: TestContext, options: RelayWorldOptions = {}): Promise<RelayWorld> {
   const registry = options.registry ?? TEST_REGISTRY;
   const lend = await lendWorld(t, registry);
-  const up = await upstream(t);
+  const up = await startUpstream(t);
   const c = canary();
   const value = Buffer.from(Buffer.from(c.bytes).toString('hex'));
   const pass = lend.enrol('laptop');
   lend.addKey({ keyref: 'adminkey1', value, grants: ['laptop'] });
   lend.addKey({ keyref: 'hostkey001', value, platform: 'hostplat', grants: ['laptop'] });
   const hung = new Set<string>();
-  const connector: Connector = {
-    connect: (target, signal) =>
-      new Promise((resolve, reject) => {
-        signal.addEventListener('abort', () => reject(new Error('connect aborted')), { once: true });
-        if (hung.has(target.servername)) return;
-        const socket = connect(up.port, '127.0.0.1');
-        socket.once('connect', () => resolve(socket));
-        socket.once('error', reject);
-      }),
-  };
+  const connector = loopbackConnector(up.port, hung);
   const egress = createEgress({ adapterHosts: adapterHostsOf(registry), listed: [], resolver: { resolve: () => Promise.resolve(['203.0.113.10']) }, connector, scheduler: lend.clock });
   const journal: string[] = [];
   const server = createRelayServer({ registry, lend: createLendClient(lend.socket), egress, domain: 'box.example', journal: (code) => void journal.push(code) });

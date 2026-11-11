@@ -7,19 +7,25 @@ import type { TrustPort } from './ports/trust.ts';
 import { DOMAIN_NAME } from './pure/actions.ts';
 import type { Action } from './pure/actions.ts';
 import { parseWordlist } from './pure/codes.ts';
+import { RegistryRefused, assertRegistry } from './pure/profile.ts';
 import { osErrorCode } from './pure/errors.ts';
 import { openApproveCore } from './shell/approve-core.ts';
 import { systemClock, systemScheduler } from './shell/clock.ts';
 import { openCore } from './shell/core.ts';
 import { createApiServer } from './shell/http.ts';
+import { createLendHandler, loadCredentialShapes } from './shell/lend-core.ts';
+import { createLendServer } from './shell/lend-socket.ts';
 import { createPush } from './shell/push.ts';
 import { createHttpPushTransport } from './shell/push-transport.ts';
 import { openPrivateDatabase } from './shell/private-db.ts';
 import { systemRandom } from './shell/random.ts';
+import { REGISTRY } from './platforms/registry.ts';
 
 interface Config {
   readonly stateDir: string;
   readonly socket: string;
+  /** Where kb-relay asks core for passes, grants, lent values, scans and audit rows (KBOX-3). Absent: no relay call is served. */
+  readonly lendSocket: string | undefined;
   /** The box's domain; the phone app lives on `keys.<domain>`. Absent until the bootstrap configures it. */
   readonly domain: string | undefined;
 }
@@ -28,10 +34,11 @@ interface Config {
 function readConfig(env: NodeJS.ProcessEnv): Config {
   const stateDir = env['KB_STATE_DIR'] ?? '/var/lib/keybox';
   const socket = env['KB_SOCKET'] ?? '/run/keybox/http.sock';
+  const lendSocket = env['KB_LEND_SOCKET'];
   const domain = env['KB_DOMAIN'];
-  if (!isAbsolute(stateDir) || !isAbsolute(socket)) throw new RangeError('KB_STATE_DIR and KB_SOCKET are absolute paths');
+  if (!isAbsolute(stateDir) || !isAbsolute(socket) || (lendSocket !== undefined && !isAbsolute(lendSocket))) throw new RangeError('KB_STATE_DIR, KB_SOCKET and KB_LEND_SOCKET are absolute paths');
   if (domain !== undefined && !DOMAIN_NAME.test(domain)) throw new RangeError('KB_DOMAIN is a lower-case domain name');
-  return { stateDir, socket, domain };
+  return { stateDir, socket, lendSocket, domain };
 }
 
 /** Until the update unit wires kb-install, root answers no trust request: setup, recovery and approver changes cannot complete. */
@@ -45,6 +52,7 @@ const SWEEP_EVERY_MS = 60 * 60_000;
 
 async function main(): Promise<void> {
   const config = readConfig(process.env);
+  assertRegistry(REGISTRY);
   const journal = (code: string): void => void process.stderr.write(`keybox core: ${code}\n`);
   const parts = openCore({ stateDir: config.stateDir, clock: systemClock, scheduler: systemScheduler, random: systemRandom });
   const privateStore = openPrivateDatabase(join(config.stateDir, 'private.db'));
@@ -64,6 +72,12 @@ async function main(): Promise<void> {
     journal,
   });
   await server.listen(config.socket);
+  const lend = createLendServer(
+    createLendHandler({ meta: parts.meta, tokens: approve?.tokens.tokenStore ?? parts.meta, vault: parts.vault, audit: parts.audit, events: parts.events, registry: REGISTRY, shapes: loadCredentialShapes(), clock: systemClock }),
+    journal,
+  );
+  if (config.lendSocket === undefined) journal('no_lend_socket');
+  else await lend.listen(config.lendSocket);
   let cancelSweep = (): void => undefined;
   const sweep = (): void => {
     approve?.approvals.sweep();
@@ -73,7 +87,7 @@ async function main(): Promise<void> {
   const stopped = new Promise<void>((resolve) => {
     const stop = (): void => {
       cancelSweep();
-      void server.stop().then(() => {
+      void Promise.all([server.stop(), lend.stop()]).then(() => {
         privateStore.close();
         parts.close();
         resolve();
@@ -89,7 +103,8 @@ async function main(): Promise<void> {
 process.exitCode = await main().then(
   () => 0,
   (error: unknown) => {
-    process.stderr.write(`keybox core failed to start${osErrorCode(error) === undefined ? '' : ` (${osErrorCode(error)})`}\n`);
+    const why = error instanceof RegistryRefused ? `: ${error.message}` : osErrorCode(error) === undefined ? '' : ` (${osErrorCode(error)})`;
+    process.stderr.write(`keybox core failed to start${why}\n`);
     return 1;
   },
 );
