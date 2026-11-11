@@ -4,6 +4,7 @@
     { "host": "updates.push.services.mozilla.com", "purpose": "Web Push to Firefox (KBOX-22)", "caller": "push" },
     { "host": "web.push.apple.com", "purpose": "Web Push to Safari and iOS home-screen apps (KBOX-22)", "caller": "push" },
     { "host": "*.notify.windows.com", "purpose": "Web Push to Edge on Windows (KBOX-22)", "caller": "push" },
-    { "host": "nodejs.org", "purpose": "the pinned Node binary named in runtime.lock (update intake, KBOX-6)", "caller": "update" }
+    { "host": "nodejs.org", "purpose": "the pinned Node binary named in runtime.lock (update intake, KBOX-6)", "caller": "update" },
+    { "host": "github.com", "purpose": "the pinned Caddy binary named in runtime.lock (update intake, KBOX-6); its release download redirects to a GitHub asset host, added when downloads are built", "caller": "update" }
   ]
 }
