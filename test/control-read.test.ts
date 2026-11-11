@@ -1,5 +1,6 @@
 // KBOX-30: the control read routes, GET /api/meta, GET /api/audit and GET /api/events shapes; KBOX-19 and KBOX-5 at route level.
 import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
@@ -139,4 +140,40 @@ test('KBOX-10 a token and its hash are in no response of the control routes', as
   assert.equal(all.includes(control), false);
   assert.equal(all.includes(control.slice(4)), false);
   assert.equal(all.includes(hashToken(control)), false);
+});
+
+// --- KBOX-1: GET /api/bootstrap-facts ----------------------------------------------------------------------------------
+
+const FACTS = '{"directories":[{"path":"/snap/oracle-cloud-agent","names":["plugins"]}],"found":{"paths":[],"processes":[]}}\n';
+
+test('KBOX-1 GET /api/bootstrap-facts serves the facts file byte for byte as JSON to a control token, and refuses a relay token, a revoked token and no token', async (t) => {
+  const { box, control, relay } = await populated(t);
+  writeFileSync(join(box.stateDir, 'bootstrap-facts.json'), FACTS);
+  const reply = await box.call('/api/bootstrap-facts', { token: control });
+  assert.equal(reply.status, 200);
+  assert.match(reply.headers['content-type'] ?? '', /^application\/json/);
+  assert.equal(reply.body, FACTS);
+  const revoked = box.enrol('old-2', 'control');
+  box.meta.revokeMachine('old-2');
+  assert.equal((await box.call('/api/bootstrap-facts', { token: relay })).status, 403);
+  assert.equal((await box.call('/api/bootstrap-facts', { token: revoked })).status, 401);
+  assert.equal((await box.call('/api/bootstrap-facts')).status, 401);
+});
+
+test('KBOX-1 GET /api/bootstrap-facts with no facts file answers 404 not_found with a closed detail, and a file that is not JSON answers 503, never 500', async (t) => {
+  const { box, control } = await populated(t);
+  const missing = await box.call('/api/bootstrap-facts', { token: control });
+  assert.equal(missing.status, 404);
+  assert.deepEqual(missing.json(), { error: { code: 'not_found', message: 'There is nothing here.', detail: { code: 'no_bootstrap_facts' } } });
+  writeFileSync(join(box.stateDir, 'bootstrap-facts.json'), '{ half a file');
+  const broken = await box.call('/api/bootstrap-facts', { token: control });
+  assert.equal(broken.status, 503);
+  assert.deepEqual((broken.json() as { error: { detail: unknown } }).error.detail, { code: 'bootstrap_facts_unreadable' });
+});
+
+test('KBOX-1 GET /api/bootstrap-facts takes no query and only GET', async (t) => {
+  const { box, control } = await populated(t);
+  writeFileSync(join(box.stateDir, 'bootstrap-facts.json'), FACTS);
+  assert.equal((await box.call('/api/bootstrap-facts?x=1', { token: control })).status, 400);
+  assert.ok([404, 405].includes((await box.call('/api/bootstrap-facts', { token: control, method: 'POST', json: true, body: '{}' })).status));
 });
