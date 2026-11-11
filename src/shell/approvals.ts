@@ -88,7 +88,7 @@ export interface Approvals {
   waiting(kind: ActionKind): readonly { readonly approvalId: string; readonly action: Action; readonly decidedAt: number }[];
   /** Proposals of one kind that wait for the owner. */
   pending(kind: ActionKind): readonly { readonly approvalId: string; readonly action: Action }[];
-  /** Marks a waiting execution (approver_add) finished. */
+  /** Marks a waiting execution (an install root has answered) finished. */
   executed(approvalId: string, result: 'done' | 'failed', reason: string): void;
   /** Expires every pending proposal older than 14 days. */
   sweep(): void;
