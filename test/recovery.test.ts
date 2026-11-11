@@ -8,6 +8,8 @@ import { FakeClock, runNode, seededRandom, tempDir } from './kit/index.ts';
 import { directives, words } from './kit/index.ts';
 import { codeHash, parseWordlist } from '../src/pure/codes.ts';
 import { createCodeRoot } from '../src/shell/console.ts';
+import { softApprover } from './kit/approver.ts';
+import { RP, approveWorld, challenges, registerAt, wire } from './support/approve-world.ts';
 
 const WORDLIST = parseWordlist(readFileSync(new URL('../src/data/wordlist.txt', import.meta.url), 'utf8'));
 const MINUTE = 60_000;
@@ -144,4 +146,120 @@ test('KBOX-20 the kb-code unit (not core) has tty, a DeviceAllow for the configu
     assert.equal(other.get('DeviceAllow'), undefined, name);
     assert.equal(other.get('SupplementaryGroups'), undefined, name);
   }
+});
+
+// --- core's half: /recover through the TrustPort ------------------------------------------------------------------------
+
+test('KBOX-20 recovery makes the new approver the only one; root is asked first, the push goes out next while the old approvers still stand, then the table changes', async (t) => {
+  const w = await approveWorld(t);
+  const second = await w.addApprover();
+  const seen: { atRoot?: readonly string[]; atPush?: readonly string[] } = {};
+  w.trust.onApply = (r) => {
+    if (r.change === 'recovery') seen.atRoot = w.core.approvers.ids();
+  };
+  w.push.onSend = (m) => {
+    if (m.kind === 'recovery') seen.atPush = w.core.approvers.ids();
+  };
+  const code = w.recoveryCode();
+  const reply = await registerAt(w, '/recover', code, softApprover());
+  assert.equal(reply.status, 201, reply.body);
+  const fresh = (reply.json() as { approver_id: string }).approver_id;
+  assert.deepEqual([...(seen.atRoot ?? [])].sort(), [w.ownerId, second.approverId].sort(), 'root is asked while core still has the old table');
+  assert.deepEqual([...(seen.atPush ?? [])].sort(), [w.ownerId, second.approverId].sort(), 'the push goes out before anyone is revoked');
+  assert.deepEqual(w.core.approvers.ids(), [fresh]);
+  assert.deepEqual(w.trust.copy?.approvers.map((a) => a.id), [fresh], 'trust.json holds the new approver only');
+  const actions = w.parts.audit.read(0).entries.map((e) => e.action);
+  assert.ok(actions.includes('recovery.used'));
+  assert.equal(actions.filter((a) => a === 'approver.removed').length, 2);
+});
+
+test('KBOX-20 a recovery code root refuses changes nothing, whether the code is wrong, used, or root refuses for its own reason', async (t) => {
+  const w = await approveWorld(t);
+  const before = w.core.approvers.ids();
+  const code = w.recoveryCode();
+  const wrong = code.split(' ').reverse().join(' ');
+  assert.equal((await registerAt(w, '/recover', wrong, softApprover())).status, 403);
+  assert.equal(w.trust.calls.at(-1)?.change, 'recovery', 'core relays the code to root and does not judge it');
+  w.trust.refuseNext('io_error');
+  assert.equal((await registerAt(w, '/recover', code, softApprover())).status, 403);
+  assert.deepEqual(w.core.approvers.ids(), before);
+  assert.equal(w.push.sent.some((m) => m.kind === 'recovery'), false, 'nobody is told of a recovery that did not happen');
+  assert.equal(w.parts.audit.read(0).entries.some((e) => e.action === 'recovery.used'), false);
+  assert.equal((await registerAt(w, '/recover', code, softApprover())).status, 201, 'the right code is still valid after the refusals');
+  assert.equal((await registerAt(w, '/recover', code, softApprover())).status, 403, 'and refused on second use');
+});
+
+test('KBOX-20 after recovery the new approver can approve and open a view, and an old one can do neither, its open view included', async (t) => {
+  const w = await approveWorld(t);
+  const oldCookie = await w.view();
+  const newcomer = softApprover();
+  assert.equal((await registerAt(w, '/recover', w.recoveryCode(), newcomer)).status, 201);
+  assert.equal((await w.call('/app/queue', { cookie: oldCookie })).status, 401, 'the old view session ends');
+  const n = await w.nonce('view');
+  assert.equal((await w.call('/app/view', { json: { proof: wire(n, w.owner.prove(challenges.view(n), RP)) } })).status, 403);
+  const opened = w.propose({ kind: 'revoke_grant', keyref: 'openai/admin', machine: 'ws-1' });
+  const item = (await w.queue(newcomer)).find((q) => q.approval_id === opened.approval_id);
+  assert.ok(item);
+  assert.equal((await w.decide(item.approval_id, 'approve', w.proofFor(item, w.owner))).status, 403, 'the old approver cannot approve');
+  const fresh = (await w.queue(newcomer)).find((q) => q.approval_id === opened.approval_id);
+  assert.ok(fresh);
+  assert.equal((await w.decide(fresh.approval_id, 'approve', w.proofFor(fresh, newcomer))).status, 200, 'the new one can');
+});
+
+test('KBOX-20 the recovery code (a canary) is absent from core\'s database files, WAL, journal, audit, events and responses', async (t) => {
+  const w = await approveWorld(t);
+  const code = w.recoveryCode();
+  w.trust.refuseNext('io_error');
+  const refused = await registerAt(w, '/recover', code, softApprover());
+  const reply = await registerAt(w, '/recover', code, softApprover());
+  assert.equal(reply.status, 201);
+  const surfaces: [string, string][] = readdirSync(w.stateDir).map((f) => [f, readFileSync(join(w.stateDir, f)).toString('latin1')]);
+  surfaces.push(['responses', refused.body + reply.body], ['journal', w.journal.join('\n')], ['audit', JSON.stringify(w.parts.audit.read(0).entries)], ['events', JSON.stringify(w.parts.events.after(0))]);
+  assert.ok(surfaces.length > 4, 'the state directory holds the databases');
+  const head = code.split(' ').slice(0, 3).join(' ');
+  for (const [name, body] of surfaces) assert.equal(body.includes(code) || body.includes(head), false, `code in ${name}`);
+  const used = w.parts.audit.read(0).entries.find((e) => e.action === 'recovery.used');
+  assert.ok(used !== undefined);
+  assert.deepEqual(used.detail, {}, 'recovery.used carries no text');
+});
+
+test('KBOX-20 approver_add and approver_remove go to root first: core\'s table is unchanged when root is asked and stays unchanged when root refuses', async (t) => {
+  const w = await approveWorld(t);
+  const atRoot: (readonly string[])[] = [];
+  w.trust.onApply = () => void atRoot.push(w.core.approvers.ids());
+  const second = await w.addApprover();
+  assert.deepEqual(atRoot.at(-1), [w.ownerId], 'approver_add: root is asked before core adds');
+  assert.equal(w.trust.calls.at(-1)?.change, 'approver_add');
+  assert.deepEqual([...w.core.approvers.ids()].sort(), [w.ownerId, second.approverId].sort());
+
+  const removal = w.propose({ kind: 'approver_remove', approver_id: second.approverId }, 'box');
+  const item = (await w.queue()).find((q) => q.approval_id === removal.approval_id);
+  assert.ok(item);
+  w.trust.refuseNext('io_error');
+  const refused = await w.decide(item.approval_id, 'approve', w.proofFor(item));
+  assert.equal(refused.status, 200, refused.body);
+  assert.equal((refused.json() as { result: string }).result, 'failed');
+  assert.deepEqual([...w.core.approvers.ids()].sort(), [w.ownerId, second.approverId].sort(), 'a refused removal leaves the table');
+
+  const again = w.propose({ kind: 'approver_remove', approver_id: second.approverId }, 'box');
+  const item2 = (await w.queue()).find((q) => q.approval_id === again.approval_id);
+  assert.ok(item2);
+  assert.equal((await w.decide(item2.approval_id, 'approve', w.proofFor(item2))).status, 200);
+  assert.deepEqual([...(atRoot.at(-1) ?? [])].sort(), [w.ownerId, second.approverId].sort(), 'approver_remove: root is asked before core removes');
+  assert.deepEqual(w.core.approvers.ids(), [w.ownerId]);
+  assert.deepEqual(w.trust.copy?.approvers.map((a) => a.id), [w.ownerId]);
+});
+
+test('KBOX-20 a refused approver_add registration leaves core\'s table unchanged and the registration code spent', async (t) => {
+  const w = await approveWorld(t);
+  const cookie = await w.view();
+  const opened = await w.call('/app/propose-approver-add', { method: 'POST', cookie });
+  const id = (opened.json() as { approval_id: string }).approval_id;
+  const item = (await w.queue()).find((q) => q.approval_id === id);
+  assert.ok(item);
+  const code = ((await w.decide(id, 'approve', w.proofFor(item))).json() as { registration_code: string }).registration_code;
+  w.trust.refuseNext('io_error');
+  assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 403);
+  assert.deepEqual(w.core.approvers.ids(), [w.ownerId]);
+  assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 403, 'the code is spent by the attempt root refused');
 });

@@ -87,6 +87,8 @@ export interface World {
   readonly push: FakePush;
   readonly trust: FakeTrust;
   readonly console: string[];
+  /** The fixed codes the HTTP frame wrote to the journal. */
+  readonly journal: string[];
   readonly codes: CodeRoot;
   readonly stateDir: string;
   readonly owner: SoftApprover;
@@ -127,10 +129,11 @@ export async function approveWorld(t: TestContext, options: WorldOptions = {}): 
   const priv = openPrivateDatabase(join(stateDir, 'private.db'));
   const push = new FakePush();
   const consoleLines: string[] = [];
+  const journalLines: string[] = [];
   const codes = createCodeRoot({ dir: join(dir, 'codes'), sink: (line) => void consoleLines.push(line), random, clock, wordlist: WORDLIST });
   const trust = new FakeTrust(codes, () => BOOT);
   const core = openApproveCore({ parts, approverStore: priv, trust, push, clock, random, domain: DOMAIN, wordlist: WORDLIST, vet: options.vet ?? (() => 'ok') });
-  const server = createApiServer({ routes: [...parts.routes, ...core.routes], tokens: core.tokens.tokenStore, audit: parts.audit, random, clock, journal: () => undefined });
+  const server = createApiServer({ routes: [...parts.routes, ...core.routes], tokens: core.tokens.tokenStore, audit: parts.audit, random, clock, journal: (code) => void journalLines.push(code) });
   const socket = join(dir, 'http.sock');
   await server.listen(socket);
   t.after(async () => {
@@ -196,8 +199,9 @@ export async function approveWorld(t: TestContext, options: WorldOptions = {}): 
     push,
     trust,
     console: consoleLines,
+    journal: journalLines,
     stateDir,
-      owner,
+    owner,
     codes,
     get ownerId() {
       return ownerId;
