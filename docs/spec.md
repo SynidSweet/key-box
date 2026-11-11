@@ -248,7 +248,7 @@ The closed list of kinds and their `data` (names, ids and codes only, never a va
 | `approval.executed` | `approval_id, result: done\|failed, reason_code` |
 | `key.changed` | `keyref` |
 | `rotation.state` | `run_id, keyref, state, step` |
-| `rotation.failed` | `run_id, keyref, step, reason_code, old_key_works` (boolean: `false` only for a failed create run, which has no old key) |
+| `rotation.failed` | `run_id, keyref, step, reason_code, old_key_works` (boolean, the fact at notice time: `false` for a failed create run, which has no old key, and for an `overlap: false` key whose `set(old)` could not be done yet; `true` otherwise) |
 | `rotation.old_key_still_on` | `run_id, keyref, gen` |
 | `delivery.ready` | `delivery_id, keyref, project, name, gen` |
 | `share.version` | `version` |
