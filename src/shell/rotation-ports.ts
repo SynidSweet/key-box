@@ -3,6 +3,7 @@
 import type { Destination, Redeployer } from '../ports/destination.ts';
 import type { Issuer, KeyLister, Verifier } from '../ports/issuer.ts';
 import type { Lent, PlatformId } from '../ports/types.ts';
+import type { Vault } from '../ports/vault.ts';
 import type { Step } from '../pure/rotation-machine.ts';
 
 /**
@@ -37,6 +38,15 @@ export function setterOf(issuer: Issuer | undefined): SetValue | undefined {
   return (value, at, master) => set.call(issuer, value, at, master);
 }
 
+/** A generation the vault no longer lends (retired, never stored) as a result: the caller decides what its absence means. */
+export function tryLend(vault: Pick<Vault, 'lend'>, keyref: string, gen: number): { readonly ok: true; readonly value: Lent } | { readonly ok: false } {
+  try {
+    return { ok: true, value: vault.lend(keyref, gen) };
+  } catch {
+    return { ok: false };
+  }
+}
+
 export interface DestinationKit {
   readonly destination: Destination;
   readonly redeployer?: Redeployer;
@@ -44,15 +54,20 @@ export interface DestinationKit {
 
 /**
  * Where the process may be stopped in a test: after a key is created and before it is stored (`issued`), after it is stored and before the
- * step is persisted (`stored`), after a push and before its receipt (`pushed`), after each receipt, after each step is persisted.
+ * step is persisted (`stored`), after a push and before its receipt (`pushed`), after each receipt, after an overlap:false platform took the
+ * new value and before its receipt (`taken`), after a redeploy started and before it is ready (`redeployed`), after a rollback removed the
+ * new value from a destination (`removed`), after each step is persisted.
  */
-export type Point = 'issued' | 'stored' | 'pushed' | 'receipt' | Step;
+export type Point = 'issued' | 'stored' | 'pushed' | 'receipt' | 'taken' | 'redeployed' | 'removed' | Step;
 
 export interface PlatformSource {
   /** The adapters of a platform id, or undefined when none is registered. */
   platform(id: PlatformId): PlatformKit | undefined;
   /** The adapters of a destination kind as the metadata names it (`vercel_env`, ...), or undefined. */
   destination(kind: string): DestinationKit | undefined;
-  /** The platform's master key, lent. */
-  master(platform: PlatformId): Lent;
+  /**
+   * The platform's master key, lent: of the master keys whose current generation can be lent, the one of the key's own project (`projects`
+   * of the key it serves; none given, no project is preferred). Throws `conflict` (`master_ambiguous`) when two still qualify (review N5).
+   */
+  master(platform: PlatformId, projects?: readonly string[]): Lent;
 }

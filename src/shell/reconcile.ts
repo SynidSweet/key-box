@@ -53,7 +53,7 @@ export function createReconciler(deps: ReconcileDeps): Reconciler {
         continue;
       }
       if (orchestrator.isLeased(run.keyref)) continue;
-      const dead = await revokeAndConfirm({ kit, platform, id: key.platformKeyId, at: key.location ?? {}, value: undefined, master: deps.master(platform) });
+      const dead = await revokeAndConfirm({ kit, platform, id: key.platformKeyId, at: key.location ?? {}, value: undefined, master: deps.master(platform, store.key(run.keyref)?.projects) });
       if (!dead) continue;
       deps.audit.append({ action: 'rotation.orphan_revoked', subject: run.keyref, at: deps.clock.now(), detail: { run_id: run.runId } });
       if (run.state === 'issuing') orchestrator.retake(run.runId);
@@ -74,7 +74,7 @@ export function createReconciler(deps: ReconcileDeps): Reconciler {
     // No lister: the platform has nothing to list, so no orphan can be found by listing and there is nothing to wait for.
     if (lister === undefined) return true;
     try {
-      return intentAbsent(await lister.listAt(info.location, deps.master(head.platform)), info.location, run.intentName);
+      return intentAbsent(await lister.listAt(info.location, deps.master(head.platform, head.projects)), info.location, run.intentName);
     } catch {
       deps.audit.append({ action: 'rotation.drive_failed', subject: run.runId, at: deps.clock.now(), detail: { run_id: run.runId, code: 'list_failed' } });
       return false;
@@ -88,8 +88,20 @@ export function createReconciler(deps: ReconcileDeps): Reconciler {
         if (keys !== undefined) await sweepPlatform(platform, keys);
       }
       for (const run of store.activeRuns()) {
-        if (run.state === 'issuing' && !orchestrator.isLeased(run.keyref) && (await mayGoAgain(run))) orchestrator.retake(run.runId);
+        if (run.state !== 'issuing' || orchestrator.isLeased(run.keyref)) continue;
+        if (await mayGoAgain(run)) orchestrator.retake(run.runId);
+        else noticeUnsettled(run);
       }
     },
   };
+
+  /**
+   * A run reconcile cannot settle (an incomplete listing, one that never matches the recorded location) would stay open with no word (review
+   * N8): the first time, it files the run's one card, recorded before it goes out, and never again. The old key works meanwhile.
+   */
+  function noticeUnsettled(run: RunRow): void {
+    if (run.failedNotified) return;
+    store.update(run.runId, { failedNotified: true });
+    deps.events.append('rotation.failed', { run_id: run.runId, keyref: run.keyref, step: 'issuing', reason_code: 'reconcile_unsettled', old_key_works: run.genOld > 0 });
+  }
 }

@@ -2,16 +2,20 @@
 // table holds the rotation routes, a rotation on a fresh box does not stop core, and stopping core leaves no timer of its own.
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
+import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import type { KeyRow } from '../src/ports/meta.ts';
+import { intentName } from '../src/pure/rotation-machine.ts';
 import { hashToken, newToken } from '../src/pure/tokens.ts';
 import { startCore } from '../src/main-core.ts';
 import type { StartedCore } from '../src/main-core.ts';
 import { openCore } from '../src/shell/core.ts';
+import type { PlatformSource } from '../src/shell/rotation-ports.ts';
 import { createRotationStore } from '../src/shell/rotation-store.ts';
-import { TimedClock, drive, seededRandom, tempDir } from './kit/index.ts';
+import { FakePlatformWorld } from './fakes/platform.ts';
+import { TimedClock, drive, lent, seededRandom, tempDir, waitUntil } from './kit/index.ts';
 
 const DAY = 24 * 3600_000;
 
@@ -20,6 +24,7 @@ interface World {
   readonly clock: TimedClock;
   readonly journal: string[];
   readonly token: string;
+  readonly lendSocket: string;
   call(path: string, body?: unknown): Promise<{ status: number; body: string }>;
 }
 
@@ -27,6 +32,10 @@ interface Options {
   readonly domain?: string;
   /** Written to the state directory before core starts. */
   readonly seed?: (state: { readonly meta: ReturnType<typeof openCore>['meta']; readonly clock: TimedClock; readonly rotation: ReturnType<typeof createRotationStore> }) => void;
+  /** Core also listens on a lend socket, at `World.lendSocket`. */
+  readonly lend?: boolean;
+  /** The platform adapters rotation is given in place of the (empty) registry's. */
+  readonly platforms?: PlatformSource;
 }
 
 /** Starts core in this process over a fresh state directory, with a control token enrolled before the start. */
@@ -43,8 +52,16 @@ async function started(t: TestContext, options: Options = {}): Promise<World> {
   options.seed?.({ meta: prepared.meta, clock, rotation: createRotationStore(prepared.db, clock, prepared.hub) });
   prepared.close();
   const journal: string[] = [];
-  const env: Record<string, string> = { KB_STATE_DIR: stateDir, KB_SOCKET: socket, KB_INSTALL_RESULTS: join(dir, 'results'), KB_CURRENT: join(dir, 'current'), ...(options.domain === undefined ? {} : { KB_DOMAIN: options.domain }) };
-  const core = await startCore(env, { clock, scheduler: clock, random, journal: (code) => void journal.push(code) });
+  const lendSocket = join(dir, 'lend.sock');
+  const env: Record<string, string> = {
+    KB_STATE_DIR: stateDir,
+    KB_SOCKET: socket,
+    KB_INSTALL_RESULTS: join(dir, 'results'),
+    KB_CURRENT: join(dir, 'current'),
+    ...(options.domain === undefined ? {} : { KB_DOMAIN: options.domain }),
+    ...(options.lend === true ? { KB_LEND_SOCKET: lendSocket } : {}),
+  };
+  const core = await startCore(env, { clock, scheduler: clock, random, journal: (code) => void journal.push(code), ...(options.platforms === undefined ? {} : { platforms: options.platforms }) });
   t.after(() => core.stop());
   const driver = drive(socket);
   const call = async (path: string, body?: unknown): Promise<{ status: number; body: string }> => {
@@ -56,7 +73,7 @@ async function started(t: TestContext, options: Options = {}): Promise<World> {
     });
     return { status: reply.status, body: reply.body };
   };
-  return { core, clock, journal, token, call };
+  return { core, clock, journal, token, lendSocket, call };
 }
 
 const adminRow = (keyref: string): KeyRow => ({
@@ -123,4 +140,66 @@ test('KBOX-51 stopping core cancels every timer it set, rotation\'s hourly tick 
   await w.core.stop();
   assert.equal(w.clock.pendingTimers, 0, 'no timer is left');
   await assert.rejects(w.call('/api/meta'), 'the socket is closed');
+});
+
+// --- rotation starts after the lend server and never holds the start or the stop (review N4) ---------------------------------------
+
+/** Resolves once a connection to the unix socket is accepted; rejects when nothing listens there. */
+const accepts = (path: string): Promise<void> =>
+  new Promise((resolve, reject) => {
+    const socket = createConnection(path);
+    socket.once('connect', () => {
+      socket.destroy();
+      resolve();
+    });
+    socket.once('error', reject);
+  });
+
+test('KBOX-51 a platform call that hangs while a run resumes holds back neither the lend socket nor a graceful stop; the stores close once the call returns', { timeout: 20_000 }, async (t) => {
+  const keyref = 'hang/shop/HANG_KEY';
+  const runId = 'run_00000000000000a1';
+  let release = (): void => undefined;
+  const hanging = new Promise<'revoked'>((resolve) => {
+    release = () => resolve('revoked');
+  });
+  let revoking = false;
+  const caps = new FakePlatformWorld(seededRandom(4)).issuer.capabilities();
+  const platforms: PlatformSource = {
+    platform: (id) =>
+      id === 'hang'
+        ? {
+            issuer: {
+              platform: 'hang',
+              capabilities: () => caps,
+              issue: () => Promise.reject(new Error('not in this test')),
+              revoke: () => {
+                revoking = true;
+                return hanging;
+              },
+            },
+          }
+        : undefined,
+    destination: () => undefined,
+    master: () => lent(Buffer.from('hang-master'), 'master:1'),
+  };
+  const w = await started(t, {
+    domain: 'box.example',
+    lend: true,
+    platforms,
+    seed: ({ meta, clock, rotation }) => {
+      meta.putKey({ ...adminRow(keyref), platform: 'hang', name: 'HANG_KEY', class: 'ordinary', gen_current: 2 });
+      rotation.putKeyInfo(keyref, { scopeItems: ['read'], location: {}, rotatedAt: clock.now(), markAdmin: false });
+      rotation.putGen({ keyref, gen: 1, status: 'grace', platformKeyId: 'pk-1', location: {} });
+      rotation.putGen({ keyref, gen: 2, status: 'current', platformKeyId: 'pk-2', location: {} });
+      rotation.openRun({ runId, keyref, state: 'revoking', genOld: 1, genNew: 2, intentName: intentName(keyref, 2, runId), origin: 'schedule' });
+    },
+  });
+  await waitUntil(() => revoking, 'the resumed run to call the platform');
+  await accepts(w.lendSocket);
+  assert.equal((await w.call('/api/meta')).status, 200, 'core answers while the run waits on the platform');
+  await w.core.stop();
+  await assert.rejects(accepts(w.lendSocket), 'the lend socket is closed');
+  await assert.rejects(w.call('/api/meta'), 'the api socket is closed');
+  release();
+  await w.core.closed;
 });

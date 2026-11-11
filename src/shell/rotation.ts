@@ -1,6 +1,6 @@
 // The rotation unit as one wiring: the orchestrator, reconcile, the paste flow, the key and delivery routes, the executors of the two kinds this
 // unit owns (`rotate_key`, `add_key`) and the scheduler's tick. main-core hands it the platform registry when the adapter units build one.
-import type { Audit } from '../ports/audit.ts';
+import type { Audit, AuditEvent } from '../ports/audit.ts';
 import type { Clock, Scheduler } from '../ports/clock.ts';
 import type { Push } from '../ports/push.ts';
 import type { Random } from '../ports/random.ts';
@@ -23,7 +23,7 @@ import type { Paste } from './paste.ts';
 import { createReconciler } from './reconcile.ts';
 import type { Reconciler } from './reconcile.ts';
 import { createRotationStore } from './rotation-store.ts';
-import type { RotationStore } from './rotation-store.ts';
+import type { KeyHead, RotationStore } from './rotation-store.ts';
 import { isPasteSource as pasteSource, overlapOf } from './rotation-ports.ts';
 import type { PlatformSource, Point } from './rotation-ports.ts';
 
@@ -32,6 +32,10 @@ const TICK_MS = HOUR_MS;
 const RECONCILE_MS = 24 * HOUR_MS;
 /** A key whose last run failed is not tried again by the schedule for this long: one notice per day at most. */
 const AFTER_FAILURE_MS = 24 * HOUR_MS;
+/** The fixed codes a failed part of the schedule is audited with (`rotation.drive_failed`). */
+type ScheduleFault = 'tick_failed' | 'resume_failed' | 'reconcile_failed';
+/** The part of the schedule each code names, recorded as the audit row's `run_id`. */
+const PART_OF: Readonly<Record<ScheduleFault, string>> = { tick_failed: 'tick', resume_failed: 'resume', reconcile_failed: 'reconcile' };
 
 export interface RotationDeps {
   readonly parts: CoreParts;
@@ -56,8 +60,14 @@ export interface Rotation {
   readonly executors: Partial<Readonly<Record<ActionKind, Executor>>>;
   /** Opens what is due: ordinary keys start a run, admin and master keys open their approval or paste task, once. */
   tick(): void;
-  /** At start: resume unfinished runs, then reconcile, then tick; arms the hourly tick and the daily reconcile. Returns the stop, which also stops the orchestrator's run timers. */
-  run(): Promise<() => void>;
+  /**
+   * Starts rotation without waiting on any port (review N4): arms the hourly tick and the daily reconcile, and in the background resumes
+   * unfinished runs, then reconciles, then ticks, each audited when it fails. Returns the stop, which also stops the orchestrator's run timers;
+   * start-up work not begun when it is called is not begun.
+   */
+  run(): () => void;
+  /** Resolves when the start-up work has ended and every run this process works on has finished or waits for a clock. */
+  idle(): Promise<void>;
 }
 
 export function openRotation(deps: RotationDeps): Rotation {
@@ -114,28 +124,61 @@ export function openRotation(deps: RotationDeps): Rotation {
     }
   };
 
-  const tick = (): void => {
-    deps.approvals.sweep();
-    const now = deps.clock.now();
-    const keys = store.keys();
-    const due = dueDates(keys.map((k) => ({ keyref: k.keyref, class: k.class, rotateEveryDays: k.rotateEveryDays, graceHours: k.graceHours, lastRotatedAt: k.rotatedAt, expiresAt: k.expiresAt, manual: false })));
-    const waiting = new Set(parts.meta.snapshot().approvals.map((a) => a.slot));
-    for (const key of keys) {
-      const slot = slotOf({ kind: 'rotate_key', keyref: key.keyref });
-      const pending = waiting.has(slot) || paste.hasPending(slot);
-      if ((key.status === 'awaiting_approval' || key.status === 'awaiting_paste') && !pending && store.activeRunOf(key.keyref) === undefined) store.setStatus(key.keyref, 'works');
-      const at = due.get(key.keyref);
-      if (at === undefined || at > now || pending || store.activeRunOf(key.keyref) !== undefined) continue;
-      if (!store.gens(key.keyref).some((g) => g.status === 'current')) continue;
-      const last = store.runs().filter((r) => r.keyref === key.keyref).at(-1);
-      // KBOX-52: no sooner than 24 hours after the failure itself (the schema refuses a failed run without its failure time).
-      if (last?.state === 'failed' && now - (last.failedAt ?? last.openedAt) < AFTER_FAILURE_MS) continue;
-      // KBOX-34: an ordinary key on a paste-source platform has no issuer; the box holds no such key and never runs it as an api run.
-      if (key.class === 'ordinary' && isPasteSource(key.platform)) continue;
-      if (key.class === 'ordinary') orchestrator.start({ keyref: key.keyref, origin: 'schedule' });
-      else openRequest(key.keyref, key.platform);
+  /**
+   * One part of the schedule (review N2): a throw is audited with the part's fixed code and the schedule goes on, so a failed sweep or one bad
+   * key never stops the others and never reaches a timer (where it would end core).
+   */
+  const scheduled = (subject: string, code: ScheduleFault, work: () => void): void => {
+    try {
+      work();
+    } catch {
+      deps.audit.append(faultOf(subject, code));
     }
-    noticeStaleDeliveries(delivery);
+  };
+  const faultOf = (subject: string, code: ScheduleFault): AuditEvent => ({ action: 'rotation.drive_failed', subject, at: deps.clock.now(), detail: { run_id: PART_OF[code], code } });
+
+  const tickKey = (key: KeyHead, now: number, due: ReadonlyMap<string, number>, waiting: ReadonlySet<string>): void => {
+    const slot = slotOf({ kind: 'rotate_key', keyref: key.keyref });
+    const pending = waiting.has(slot) || paste.hasPending(slot);
+    if ((key.status === 'awaiting_approval' || key.status === 'awaiting_paste') && !pending && store.activeRunOf(key.keyref) === undefined) store.setStatus(key.keyref, 'works');
+    const at = due.get(key.keyref);
+    if (at === undefined || at > now || pending || store.activeRunOf(key.keyref) !== undefined) return;
+    if (!store.gens(key.keyref).some((g) => g.status === 'current')) return;
+    const last = store.runs().filter((r) => r.keyref === key.keyref).at(-1);
+    // KBOX-52: no sooner than 24 hours after the failure itself (the schema refuses a failed run without its failure time).
+    if (last?.state === 'failed' && now - (last.failedAt ?? last.openedAt) < AFTER_FAILURE_MS) return;
+    // KBOX-34: an ordinary key on a paste-source platform has no issuer; the box holds no such key and never runs it as an api run.
+    if (key.class === 'ordinary' && isPasteSource(key.platform)) return;
+    if (key.class === 'ordinary') orchestrator.start({ keyref: key.keyref, origin: 'schedule' });
+    else openRequest(key.keyref, key.platform);
+  };
+
+  const tick = (): void => {
+    scheduled('tick', 'tick_failed', () => deps.approvals.sweep());
+    scheduled('tick', 'tick_failed', () => {
+      const now = deps.clock.now();
+      const keys = store.keys();
+      const due = dueDates(keys.map((k) => ({ keyref: k.keyref, class: k.class, rotateEveryDays: k.rotateEveryDays, graceHours: k.graceHours, lastRotatedAt: k.rotatedAt, expiresAt: k.expiresAt, manual: false })));
+      const waiting = new Set(parts.meta.snapshot().approvals.map((a) => a.slot));
+      for (const key of keys) scheduled(key.keyref, 'tick_failed', () => tickKey(key, now, due, waiting));
+    });
+    scheduled('tick', 'tick_failed', () => noticeStaleDeliveries(delivery));
+  };
+
+  /** Start-up work and daily reconciles in flight: `idle()` waits for them, so the stores are not closed under them. */
+  const inBackground = new Set<Promise<void>>();
+  const background = (job: Promise<void>): void => {
+    inBackground.add(job);
+    void job.finally(() => inBackground.delete(job));
+  };
+
+  /** The start-up and daily work that awaits ports: a throw is audited and the start or the loop goes on. */
+  const scheduledAsync = async (subject: 'resume' | 'reconcile', code: ScheduleFault, work: () => Promise<void>): Promise<void> => {
+    try {
+      await work();
+    } catch {
+      deps.audit.append(faultOf(subject, code));
+    }
   };
 
   return {
@@ -146,37 +189,44 @@ export function openRotation(deps: RotationDeps): Rotation {
     routes,
     executors,
     tick,
-    async run() {
-      await orchestrator.resume();
-      await reconciler.run();
-      tick();
+    run() {
       let stopped = false;
       let cancelTick = (): void => undefined;
       let cancelReconcile = (): void => undefined;
       const loopTick = (): void => {
         if (stopped) return;
-        tick();
         cancelTick = deps.scheduler.after(TICK_MS, loopTick);
+        tick();
       };
       const loopReconcile = (): void => {
         if (stopped) return;
-        void reconciler
-          .run()
-          .catch(() => {
-            deps.audit.append({ action: 'rotation.drive_failed', subject: 'reconcile', at: deps.clock.now(), detail: { run_id: 'reconcile', code: 'reconcile_failed' } });
-          })
-          .finally(() => {
+        background(
+          scheduledAsync('reconcile', 'reconcile_failed', () => reconciler.run()).finally(() => {
             if (!stopped) cancelReconcile = deps.scheduler.after(RECONCILE_MS, loopReconcile);
-          });
+          }),
+        );
       };
       cancelTick = deps.scheduler.after(TICK_MS, loopTick);
       cancelReconcile = deps.scheduler.after(RECONCILE_MS, loopReconcile);
+      // KBOX-51: reconcile on start runs after resume has re-leased the unfinished runs; neither holds back the caller (a port may hang).
+      background(
+        (async (): Promise<void> => {
+          await scheduledAsync('resume', 'resume_failed', () => orchestrator.resume());
+          if (stopped) return;
+          await scheduledAsync('reconcile', 'reconcile_failed', () => reconciler.run());
+          if (!stopped) tick();
+        })(),
+      );
       return () => {
         stopped = true;
         cancelTick();
         cancelReconcile();
         orchestrator.stop();
       };
+    },
+    async idle() {
+      while (inBackground.size > 0) await Promise.all([...inBackground]);
+      await orchestrator.idle();
     },
   };
 }

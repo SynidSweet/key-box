@@ -233,3 +233,100 @@ test('KBOX-52 KBOX-51 run() ticks at start and every hour after, resumes a run w
   await w.rotation.orchestrator.idle();
   assert.equal(w.rotation.store.activeRunOf(KEYREF)?.state, 'grace', 'a stopped rotation does no more');
 });
+
+// --- a failed tick never stops the schedule or reaches the timer (review N2) -------------------------------------------------------
+
+/** The audit rows that say a part of the schedule failed and the loop went on: the subject and the fixed code. */
+const scheduleFaults = (w: RoutesWorld): string[][] =>
+  w.parts.audit
+    .read(0)
+    .entries.filter((e) => e.action === 'rotation.drive_failed')
+    .map((e) => [e.ref, String(e.detail['code'])]);
+
+const failingOnce = (): { arm(): void; fire(): void } => {
+  let armed = false;
+  return {
+    arm: () => void (armed = true),
+    fire: () => {
+      if (!armed) return;
+      armed = false;
+      throw new Error('database is locked');
+    },
+  };
+};
+
+test('KBOX-52 a sweep that throws at an hourly tick is audited and the schedule goes on: later ticks run and a due key still opens its run', async (t) => {
+  const sweep = failingOnce();
+  let sweeps = 0;
+  const w = await routesWorld(t, {
+    approvals: (real) => ({
+      propose: (input) => real.propose(input),
+      sweep: () => {
+        sweep.fire();
+        sweeps += 1;
+        return real.sweep();
+      },
+    }),
+  });
+  await w.api('/api/keys', { json: { platform: 'fake', name: 'OPENAI_KEY', projects: ['shop'], scope: { items: ['read'] }, rotate_every_days: 30 } });
+  const stop = w.rotation.run();
+  t.after(stop);
+  await w.rotation.idle();
+  sweep.arm();
+  w.clock.advance(HOUR);
+  const after = sweeps;
+  w.clock.advance(30 * DAY);
+  assert.ok(sweeps > after, 'the ticks after the failed one swept again');
+  assert.equal(w.rotation.store.activeRunOf(KEYREF)?.origin, 'schedule', 'the due key opened its run');
+  assert.deepEqual(scheduleFaults(w), [['tick', 'tick_failed']]);
+  await w.rotation.orchestrator.idle();
+});
+
+test('KBOX-52 a sweep that throws at the start-up tick does not stop the start: the hourly tick is armed and a due key opens its run', async (t) => {
+  const sweep = failingOnce();
+  const w = await routesWorld(t, { approvals: (real) => ({ propose: (input) => real.propose(input), sweep: () => (sweep.fire(), real.sweep()) }) });
+  await w.api('/api/keys', { json: { platform: 'fake', name: 'OPENAI_KEY', projects: ['shop'], scope: { items: ['read'] }, rotate_every_days: 30 } });
+  sweep.arm();
+  const stop = w.rotation.run();
+  t.after(stop);
+  await w.rotation.idle();
+  assert.deepEqual(scheduleFaults(w), [['tick', 'tick_failed']], 'the start-up tick failed, audited');
+  w.clock.advance(30 * DAY);
+  assert.equal(w.rotation.store.activeRunOf(KEYREF)?.origin, 'schedule');
+  await w.rotation.orchestrator.idle();
+});
+
+test('KBOX-51 a reconcile that throws at start does not stop the start: it is audited and the start-up tick still runs', async (t) => {
+  const lookup = failingOnce();
+  const w = await routesWorld(t, { source: (real) => ({ ...real, platform: (id) => (lookup.fire(), real.platform(id)) }) });
+  await w.api('/api/keys', { json: { platform: 'fake', name: 'OPENAI_KEY', projects: ['shop'], scope: { items: ['read'] }, rotate_every_days: 30 } });
+  w.clock.advance(30 * DAY);
+  lookup.arm();
+  const stop = w.rotation.run();
+  t.after(stop);
+  await w.rotation.idle();
+  assert.deepEqual(scheduleFaults(w), [['reconcile', 'reconcile_failed']]);
+  assert.equal(w.rotation.store.activeRunOf(KEYREF)?.origin, 'schedule', 'the start-up tick found the key due');
+  await w.rotation.orchestrator.idle();
+});
+
+test('KBOX-52 the tick is guarded per key: an approval that cannot be proposed for one due key is audited with its key, and the other due key still opens its run', async (t) => {
+  const w = await routesWorld(t, {
+    approvals: (real) => ({
+      propose: (input) => {
+        if (input.action.kind === 'rotate_key') throw new Error('database is locked');
+        return real.propose(input);
+      },
+      sweep: () => real.sweep(),
+    }),
+  });
+  const execute = w.rotation.executors.add_key;
+  assert.ok(execute);
+  await execute({ approvalId: 'apr_x', revision: 1, action: { kind: 'add_key', platform: 'fake', name: 'ADMIN_KEY', projects: ['shop'], scope: { items: ['admin'] } }, requester: { kind: 'box' }, proof: undefined });
+  await w.api('/api/keys', { json: { platform: 'fake', name: 'OPENAI_KEY', projects: ['shop'], scope: { items: ['read'] }, rotate_every_days: 30 } });
+  w.clock.advance(91 * DAY);
+  w.rotation.tick();
+  assert.deepEqual(scheduleFaults(w), [['fake/shop/ADMIN_KEY', 'tick_failed']], 'the key that failed, named, with a fixed code');
+  assert.equal(w.rotation.store.activeRunOf(KEYREF)?.origin, 'schedule', 'the key after it in the tick still opened its run');
+  await w.rotation.orchestrator.idle();
+});

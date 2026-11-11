@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import type { KeyRow } from '../src/ports/meta.ts';
 import type { PlatformEntry } from '../src/ports/platform.ts';
+import { ApiError } from '../src/pure/errors.ts';
 import { openCore } from '../src/shell/core.ts';
 import { createPlatformSource } from '../src/shell/platform-source.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
@@ -58,4 +59,37 @@ test('KBOX-51 a platform with no master key row, or one that is not master class
   w.parts.vault.put('fake/admin', 1, Buffer.from('an-admin-value'));
   w.parts.meta.putKey({ ...masterRow('fake/admin', 'fake', 1), class: 'admin' });
   assert.throws(() => w.source.master('fake'), (error: unknown) => error instanceof RangeError && !String(error.message).includes('an-admin-value') && /no master key/.test(error.message));
+});
+
+// --- which master row serves a key (review N5) ----------------------------------------------------------------------------------
+
+const textOf = async (w: Awaited<ReturnType<typeof world>>, platform: string, projects: readonly string[]): Promise<string> => Buffer.from(await bytesOf(w.source.master(platform, projects))).toString('utf8');
+const ambiguous = (error: unknown): boolean => error instanceof ApiError && error.code === 'conflict' && JSON.stringify(error.detail) === JSON.stringify({ code: 'master_ambiguous' });
+
+test('KBOX-51 a master row whose current generation cannot be lent (a failed create left it) does not serve: the working master of the platform does, whatever the row order', async (t) => {
+  const w = await world(t);
+  w.parts.meta.putKey({ ...masterRow('fake/a-leftover', 'fake', 1), status: 'failed' });
+  w.parts.vault.put('fake/master', 1, Buffer.from('working-master'));
+  w.parts.meta.putKey(masterRow('fake/master', 'fake', 1));
+  assert.equal(await textOf(w, 'fake', ['shop']), 'working-master');
+});
+
+test('KBOX-51 with a master row per project, a key gets its own project\'s master, never the other project\'s', async (t) => {
+  const w = await world(t);
+  w.parts.vault.put('fake/other/MASTER', 1, Buffer.from('other-master'));
+  w.parts.meta.putKey({ ...masterRow('fake/other/MASTER', 'fake', 1), projects: ['other'] });
+  w.parts.vault.put('fake/shop/MASTER', 1, Buffer.from('shop-master'));
+  w.parts.meta.putKey({ ...masterRow('fake/shop/MASTER', 'fake', 1), projects: ['shop'] });
+  assert.equal(await textOf(w, 'fake', ['shop']), 'shop-master');
+  assert.equal(await textOf(w, 'fake', ['other']), 'other-master');
+});
+
+test('KBOX-51 two masters that both still qualify are refused with master_ambiguous, never guessed: two of the key\'s own project, or two of other projects', async (t) => {
+  const w = await world(t);
+  for (const [ref, projects] of [['fake/one/MASTER', ['shop']], ['fake/two/MASTER', ['shop']]] as const) {
+    w.parts.vault.put(ref, 1, Buffer.from(`${ref}-value`));
+    w.parts.meta.putKey({ ...masterRow(ref, 'fake', 1), projects: [...projects] });
+  }
+  assert.throws(() => w.source.master('fake', ['shop']), ambiguous, 'two of the key\'s own project');
+  assert.throws(() => w.source.master('fake', ['third']), ambiguous, 'none of the key\'s project and two of others');
 });

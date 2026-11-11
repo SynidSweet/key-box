@@ -35,6 +35,7 @@ import type { Executor } from './shell/approvals.ts';
 import { createPlatformSource } from './shell/platform-source.ts';
 import { openRotation } from './shell/rotation.ts';
 import type { Rotation } from './shell/rotation.ts';
+import type { PlatformSource } from './shell/rotation-ports.ts';
 
 interface Config {
   readonly stateDir: string;
@@ -97,6 +98,8 @@ export interface CoreRuntime {
   readonly scheduler: Scheduler;
   readonly random: Random;
   readonly journal: (code: string) => void;
+  /** The platform adapters rotation is given; production derives them from the registry (a test passes its own). */
+  readonly platforms?: PlatformSource;
 }
 
 const systemRuntime: CoreRuntime = {
@@ -109,8 +112,13 @@ const systemRuntime: CoreRuntime = {
 export interface StartedCore {
   /** The route table the server answers from. */
   readonly routes: readonly Route[];
-  /** Cancels every timer core set, then closes the sockets and the stores. */
+  /**
+   * Cancels every timer core set and closes the sockets; resolves then. A rotation run waiting on a platform or destination call is not waited
+   * for (review N4): every run is persisted step by step, so the process may end there and the next start resumes it.
+   */
   stop(): Promise<void>;
+  /** Resolves once a stop has closed the stores, which happens when rotation's work in flight has ended; rejects when closing failed. */
+  readonly closed: Promise<void>;
 }
 
 /** Opens the state directory, wires every part and starts listening. The environment is read once, here. */
@@ -167,7 +175,8 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
       executors: { install_update: updater.executor, rotate_key: viaRotation('rotate_key'), add_key: viaRotation('add_key') },
       updateChanges: (action) => updater.changes(action),
     });
-    rotation = openRotation({ parts, approvals: approve.approvals, approvers: approve.approvers, push, clock, scheduler, random, audit: parts.audit, source: createPlatformSource({ registry: REGISTRY, meta: parts.meta, vault: parts.vault }) });
+    const source = runtime.platforms ?? createPlatformSource({ registry: REGISTRY, meta: parts.meta, vault: parts.vault });
+    rotation = openRotation({ parts, approvals: approve.approvals, approvers: approve.approvers, push, clock, scheduler, random, audit: parts.audit, source });
   }
   const rotationStore = rotation?.store;
   const shares = createShareWriter({
@@ -194,8 +203,6 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
     journal,
   });
   await server.listen(config.socket);
-  // Resume unfinished runs, reconcile, tick, and arm the hourly tick and the daily reconcile. No platform is registered yet, so on a fresh box this finds nothing to do.
-  const stopRotation = (await rotation?.run()) ?? ((): void => undefined);
   // Platform adapters register the short-lived values they mint here, so the scanner holds them while they live (KBOX-14).
   const minted = createMintedValues(clock);
   const lend = createLendServer(
@@ -222,6 +229,18 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   };
   if (idle !== undefined) sampleIdle();
   if (approve !== undefined) sweep();
+  // Last, once both sockets listen (review N4): resume, reconcile and the first tick run in the background, so a port that hangs holds back
+  // neither the start nor the signal handlers main() sets next; the hourly tick and the daily reconcile are armed now.
+  const stopRotation = rotation?.run() ?? ((): void => undefined);
+  let settleClosed: { resolve(): void; reject(error: unknown): void } | undefined;
+  const closed = new Promise<void>((resolve, reject) => {
+    settleClosed = { resolve, reject };
+  });
+  const closeStores = async (): Promise<void> => {
+    await rotation?.idle();
+    privateStore.close();
+    parts.close();
+  };
   const shutDown = async (): Promise<void> => {
     cancelSweep();
     cancelSettle();
@@ -229,12 +248,15 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
     idle?.stop();
     shares.stop();
     stopRotation();
-    await Promise.all([server.stop(), lend.stop(), rotation?.orchestrator.idle()]);
-    privateStore.close();
-    parts.close();
+    await Promise.all([server.stop(), lend.stop()]);
+    // A failure to close is passed on through `closed`, never swallowed.
+    void closeStores().then(
+      () => settleClosed?.resolve(),
+      (error: unknown) => settleClosed?.reject(error),
+    );
   };
   let stopping: Promise<void> | undefined;
-  return { routes, stop: () => (stopping ??= shutDown()) };
+  return { routes, stop: () => (stopping ??= shutDown()), closed };
 }
 
 async function main(): Promise<void> {
