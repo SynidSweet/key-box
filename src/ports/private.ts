@@ -21,6 +21,10 @@ export interface VapidKeyPairRow {
 export interface PushStore {
   listPushSubscriptions(): readonly PushSubscriptionRow[];
   removePushSubscription(endpoint: string): void;
+  /** Removes every subscription registered by this approver (a removed approver's phone gets no more notices). Ownerless rows stay. */
+  removePushSubscriptionsOf(approverId: string): void;
+  /** Removes every subscription not registered by one of these approvers, ownerless rows included (recovery replaces the approvers). */
+  retainPushSubscriptionsOf(approverIds: readonly string[]): void;
   /** The stored VAPID key pair, or `undefined` before the first one was put. */
   getVapidKeyPair(): VapidKeyPairRow | undefined;
   putVapidKeyPair(row: VapidKeyPairRow): void;
@@ -52,7 +56,8 @@ export interface ApproverStore {
 }
 
 export interface PrivateStore extends PushStore, ApproverStore {
-  addPushSubscription(row: PushSubscriptionRow): void;
+  /** `approverId` is the approver who registered it; a subscription added without one is ownerless. One endpoint is one row. */
+  addPushSubscription(row: PushSubscriptionRow, approverId?: string): void;
   addApprover(row: ApproverRow): void;
   close(): void;
 }

@@ -28,14 +28,70 @@ runcmd:
   - apt-get purge -y openssh-server openssh-client
   - systemctl mask --now ssh.service ssh.socket
   - rm -f /home/ubuntu/.ssh/authorized_keys /root/.ssh/authorized_keys
-  # Disable the OCI Run Command plugin; keep Compute Instance Monitoring on. The exact command is UNVERIFIED (KBOX-1).
-  # runcmd is one plain sh script, so a failure stops it only by exiting: the error goes to the journal and the console,
-  # and cloud-init records the run as failed before anything is installed.
+  # KBOX-1: the Run Command plugin is off because the owner leaves it unticked; no on-box command to disable it is documented, so none
+  # is run. The bootstrap only checks, and stops if the plugin could act as root (a sudoers line naming its user, ocarun) or is running
+  # (a process whose program, the basename of the first word of its command line, is runcommand in any case; an argument naming it is not). Plugin FILES are not refused: the agent snap may ship every plugin's files whether
+  # or not it is enabled. What it looked at goes to bootstrap-facts.json first (names only, no secrets), so a failed box records why and
+  # core serves it at GET /api/bootstrap-facts. $KB_FS_ROOT is empty on a real box; the tests point it at a fixture tree.
+  # runcmd is one plain sh script, so a failure stops it only by exiting: the error goes to the journal and the console, and cloud-init
+  # records the run as failed before anything is installed.
   - |
-    if ! oci-cloud-agent-plugin disable "Compute Instance Run Command"; then
-      logger -s -p user.err -t keybox-bootstrap "KBOX-1 FAILED: the OCI Run Command plugin was not disabled; the bootstrap stops here"
+    R=${KB_FS_ROOT:-}
+    umask 022
+    jlist() { LC_ALL=C sed -e 's/[[:cntrl:]]//g' -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/.*/"&"/' | paste -sd, -; }
+    dirs=
+    for d in /snap/oracle-cloud-agent /var/snap/oracle-cloud-agent /var/lib/oracle-cloud-agent /var/log/oracle-cloud-agent /usr/lib/oracle-cloud-agent /etc/oracle-cloud-agent; do
+      [ -d "$R$d" ] || continue
+      names=$(find "$R$d" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort | jlist)
+      dirs="${dirs:+$dirs,}{\"path\":\"$d\",\"names\":[$names]}"
+    done
+    sudoers=$(for f in "$R/etc/sudoers" "$R"/etc/sudoers.d/*; do
+      [ -f "$f" ] && sed 's/#.*//' "$f" | grep -Eq '(^|[^[:alnum:]_.-])ocarun($|[^[:alnum:]_.-])' && printf '%s\n' "${f#"$R"}"
+    done | jlist)
+    procs=$(for f in "$R"/proc/[0-9]*/cmdline; do
+      prog=$(tr '\0' '\n' < "$f" 2>/dev/null | head -n 1)
+      case ${prog##*/} in [Rr][Uu][Nn][Cc][Oo][Mm][Mm][Aa][Nn][Dd]) printf '%s\n' "$prog";; esac
+    done | jlist)
+    mkdir -p "$R/var/lib/keybox"
+    printf '{"directories":[%s],"found":{"sudoers":[%s],"processes":[%s]}}\n' "$dirs" "$sudoers" "$procs" > "$R/var/lib/keybox/bootstrap-facts.json.new"
+    chmod 0644 "$R/var/lib/keybox/bootstrap-facts.json.new"
+    mv "$R/var/lib/keybox/bootstrap-facts.json.new" "$R/var/lib/keybox/bootstrap-facts.json"
+    if [ -n "$sudoers$procs" ]; then
+      logger -s -p user.err -t keybox-bootstrap "KBOX-1 FAILED: the OCI Run Command plugin could act as root or is running (what was found: /var/lib/keybox/bootstrap-facts.json); the bootstrap stops here"
       exit 1
     fi
+  # KBOX-48: open TCP 443 only (port 80 stays closed, KBOX-44) in the image's host firewall. Oracle's Ubuntu images end the INPUT chain of
+  # rules.v4 and rules.v6 in a catch-all REJECT after an ACCEPT for port 22: the 443 rule goes in before the REJECT (or before COMMIT of
+  # the filter table when there is none), the port 22 rule goes, OUTPUT stays as the image has it. The new file is checked, saved over the
+  # old one (netfilter-persistent loads it at boot) and applied. A missing file (rules.v6 when the image has no IPv6) holds no rule that
+  # blocks 443: it is skipped with a warning and the bootstrap goes on; a present file the restore tool refuses stops it.
+  - |
+    set -eu
+    R=${KB_FS_ROOT:-}
+    umask 022
+    for v in 4 6; do
+      f="$R/etc/iptables/rules.v$v"
+      restore=iptables-restore
+      [ "$v" = 6 ] && restore=ip6tables-restore
+      if [ ! -f "$f" ]; then
+        logger -s -p user.warning -t keybox-bootstrap "KBOX-48: /etc/iptables/rules.v$v is missing; nothing to open there"
+        continue
+      fi
+      awk '
+        /^\*/ { infilter = ($0 == "*filter") }
+        infilter && /^-A INPUT / && /--dport 22( |$)/ && /-j ACCEPT/ { next }
+        infilter && /^-A INPUT / && /--dport 443( |$)/ && /-j ACCEPT/ { have = 1 }
+        infilter && !have && (/^-A INPUT -j REJECT/ || $0 == "COMMIT") { print "-A INPUT -p tcp -m state --state NEW -m tcp --dport 443 -j ACCEPT"; have = 1 }
+        { print }
+      ' "$f" > "$f.new"
+      if ! "$restore" --test < "$f.new"; then
+        logger -s -p user.err -t keybox-bootstrap "KBOX-48 FAILED: $restore refused the rules with port 443 opened; the bootstrap stops here"
+        rm -f "$f.new"
+        exit 1
+      fi
+      mv "$f.new" "$f"
+      "$restore" < "$f"
+    done
   - |
     set -eu
     . /root/keybox-release.env

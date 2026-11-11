@@ -1,8 +1,9 @@
 // The core process wired as the service wires it, started in this process on a TimedClock (src/main-core.ts `startCore`): the route
 // table holds the rotation routes, a rotation on a fresh box does not stop core, and stopping core leaves no timer of its own.
 import assert from 'node:assert/strict';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
+import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
@@ -25,6 +26,7 @@ interface World {
   readonly journal: string[];
   readonly token: string;
   readonly lendSocket: string;
+  readonly stateDir: string;
   call(path: string, body?: unknown): Promise<{ status: number; body: string }>;
 }
 
@@ -73,7 +75,7 @@ async function started(t: TestContext, options: Options = {}): Promise<World> {
     });
     return { status: reply.status, body: reply.body };
   };
-  return { core, clock, journal, token, lendSocket, call };
+  return { core, clock, journal, token, lendSocket, stateDir, call };
 }
 
 const adminRow = (keyref: string): KeyRow => ({
@@ -202,4 +204,51 @@ test('KBOX-51 a platform call that hangs while a run resumes holds back neither 
   await assert.rejects(w.call('/api/meta'), 'the api socket is closed');
   release();
   await w.core.closed;
+});
+
+// --- the approvals sweep timer never ends with one throw ---------------------------------------------------------------------------
+
+test('KBOX-28 a sweep that throws is audited as approvals.sweep_failed and the hourly sweep keeps running: it is not an uncaught exception, and the next sweep that works expires what is stale', async (t) => {
+  const HOUR = 3600_000;
+  const w = await started(t, {
+    domain: 'box.example',
+    seed: ({ meta, clock }) => meta.putApproval({ approval_id: 'ap_stale', kind: 'key_rotate', title: 'Rotate a key', slot: 'admin-1', opened_at: clock.now(), expires_at: clock.now() + HOUR / 2 }),
+  });
+  const audit = async (): Promise<readonly { action: string }[]> => (JSON.parse((await w.call('/api/audit?since=0&limit=500')).body) as { entries: { action: string }[] }).entries;
+  const sweepFailures = async (): Promise<number> => (await audit()).filter((e) => e.action === 'approvals.sweep_failed').length;
+  const pending = async (): Promise<number> => (JSON.parse((await w.call('/api/meta')).body) as { approvals: unknown[] }).approvals.length;
+  // The database refuses every write to approvals (an I/O error stand-in), so the sweep's expiry write throws once the row is stale.
+  const db = new DatabaseSync(join(w.stateDir, 'meta.db'));
+  t.after(() => db.close());
+  db.exec("CREATE TRIGGER refuse_expiry BEFORE UPDATE ON approvals BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END");
+  w.clock.advance(HOUR);
+  assert.equal(await sweepFailures(), 1, 'the throw is audited, and advance did not throw');
+  w.clock.advance(HOUR);
+  assert.equal(await sweepFailures(), 2, 'the schedule went on after the throw');
+  assert.equal(await pending(), 1, 'nothing was expired meanwhile');
+  db.exec('DROP TRIGGER refuse_expiry');
+  w.clock.advance(HOUR);
+  assert.equal(await sweepFailures(), 2, 'a sweep that works audits no failure');
+  assert.equal(await pending(), 0, 'and it expired the stale approval');
+});
+
+// --- the updater's settle timer never ends with one throw --------------------------------------------------------------------------
+
+test('KBOX-6 a settle that throws is audited as update.settle_failed and the 5-second settle keeps running: it is not an uncaught exception, and a settle that works audits nothing', async (t) => {
+  const SETTLE = 5_000;
+  const w = await started(t, { domain: 'box.example' });
+  const failures = async (): Promise<number> =>
+    (JSON.parse((await w.call('/api/audit?since=0&limit=500')).body) as { entries: { action: string }[] }).entries.filter((e) => e.action === 'update.settle_failed').length;
+  // Staging becomes a plain file (a disk fault stand-in): the settle's prune cannot list it and throws.
+  const staging = join(w.stateDir, 'staging');
+  rmSync(staging, { recursive: true });
+  writeFileSync(staging, 'not a directory');
+  w.clock.advance(SETTLE);
+  assert.equal(await failures(), 1, 'the throw is audited, and advance did not throw');
+  w.clock.advance(SETTLE);
+  assert.equal(await failures(), 2, 'the schedule went on after the throw');
+  rmSync(staging);
+  mkdirSync(staging);
+  w.clock.advance(SETTLE);
+  assert.equal(await failures(), 2, 'a settle that works audits no failure');
 });

@@ -98,5 +98,5 @@ export function openCore(deps: CoreDeps): CoreParts {
   const vaultRoot = join(deps.stateDir, 'vault');
   for (const ref of sweepOrphanTemps(vaultRoot)) audit.append({ action: 'vault.temp_swept', subject: ref, at: deps.clock.now() });
   const vault = createFileVault(vaultRoot);
-  return { db, meta, audit, events, hub, poller, vault, share: { signingKey: shareSigningKeyIn(vault), values: shareValuesIn(vault) }, routes: controlRoutes({ meta, audit, events, poller }), close: () => db.close() };
+  return { db, meta, audit, events, hub, poller, vault, share: { signingKey: shareSigningKeyIn(vault), values: shareValuesIn(vault) }, routes: controlRoutes({ bootstrapFactsPath: join(deps.stateDir, 'bootstrap-facts.json'), meta, audit, events, poller }), close: () => db.close() };
 }
