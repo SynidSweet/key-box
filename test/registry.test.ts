@@ -106,7 +106,7 @@ test('KBOX-23 an issuer with revealOnce exports a lister', () => {
   const issuer = new FakePlatformWorld(seededRandom(1)).issuer;
   assert.equal(issuer.capabilities().revealOnce, true);
   assert.equal(failure([{ id: 'reveal', issuer }]), 'reveal_once_without_lister reveal');
-  assert.equal(failure([{ id: 'reveal', issuer, lister: { list: () => Promise.resolve([]) } }]), 'passed');
+  assert.equal(failure([{ id: 'reveal', issuer, lister: { list: () => Promise.resolve([]), listAt: (at) => Promise.resolve({ complete: true, at, keys: [] }) } }]), 'passed');
 });
 
 test('KBOX-23 two entries with the same id, or an entry whose relay profile names another platform, fail', () => {
