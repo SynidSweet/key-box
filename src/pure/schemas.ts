@@ -214,6 +214,8 @@ export const AUDIT_SCHEMAS = {
   'rotation.revoke_unconfirmed': { run_id: text(NAME), gen: int(0), attempt: int(1) },
   'rotation.drive_failed': { run_id: text(NAME), code: text(CODE) },
   'delivery.acked': {},
+  /** The hourly approvals sweep threw (core's own timer); a fixed code, nothing of the failure. The next sweep is still scheduled. */
+  'approvals.sweep_failed': { code: text(CODE) },
   /** A push service accepted one message. The row's ref is `push`; no endpoint, key or title is recorded. */
   'push.delivered': { status: int(100, 599) },
   /** A push service answered 404 or 410: that subscription was removed. */

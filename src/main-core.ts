@@ -213,8 +213,14 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   else await lend.listen(config.lendSocket);
   let cancelSweep = (): void => undefined;
   const sweep = (): void => {
-    approve?.approvals.sweep();
-    cancelSweep = scheduler.after(SWEEP_EVERY_MS, sweep);
+    // A throw is audited and the schedule goes on: under the real timer an uncaught throw would end core and stop every later sweep.
+    try {
+      approve?.approvals.sweep();
+    } catch {
+      parts.audit.append({ action: 'approvals.sweep_failed', subject: 'approvals', at: clock.now(), detail: { code: 'sweep_failed' } });
+    } finally {
+      cancelSweep = scheduler.after(SWEEP_EVERY_MS, sweep);
+    }
   };
   let cancelSettle = (): void => undefined;
   const settle = (): void => {
