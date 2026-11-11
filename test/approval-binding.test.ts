@@ -376,3 +376,17 @@ test('KBOX-9 KBOX-11 a signed operation needs the device signature, a fresh nonc
   assert.equal(w.parts.meta.tokens().find((x) => x.label === 'ws-b')?.revoked, false);
   void token;
 });
+
+test('KBOX-9 KBOX-7 a replaced action is stored under the digest of its new content: the queue shows that digest and a fresh proof over the old one is refused', async (t) => {
+  const w = await approveWorld(t);
+  const first = await pending(w, { kind: 'grant', keyref: 'k1', machine: 'ws-1' });
+  const replacement = { kind: 'grant', keyref: 'k1', machine: 'ws-evil' };
+  w.propose(replacement, 'ctl-1');
+  const item = (await w.queue()).find((q) => q.approval_id === first.approval_id);
+  assert.ok(item);
+  // The oracle: RFC 8785 of a flat all-string object is JSON with the keys sorted.
+  const canonical = JSON.stringify(Object.fromEntries(Object.entries(replacement).sort(([a], [b]) => (a < b ? -1 : 1))));
+  assert.equal(Buffer.from(item.digest_b64, 'base64url').toString('hex'), createHash('sha256').update(canonical).digest('hex'));
+  const overOld = w.proofFor({ ...item, digest_b64: first.digest_b64 });
+  assert.equal((await w.decide(item.approval_id, 'approve', overOld)).status, 403, 'a fresh nonce over the digest of the action that was replaced');
+});

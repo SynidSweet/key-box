@@ -71,7 +71,9 @@ test('KBOX-11 the window takes a control enrol at 10 minutes, refuses one at 10 
   const accepted = await enrol(w, first, 'mc', 'control');
   assert.equal(accepted.status, 201, accepted.body);
   assert.equal((await w.call('/api/meta', { token: first })).status, 200);
-  assert.equal((await enrol(w, freshToken(), 'mc2', 'control')).status, 403, 'the window took its one enrol');
+  assert.equal((await op(w, 'token_revoke', 'mc')).reply.status, 200);
+  const again = await enrol(w, freshToken(), 'mc', 'control');
+  assert.equal(again.status, 403, `the window took its one enrol, even for its own label once that token is revoked: ${again.body}`);
 
   assert.equal((await op(w, 'enrol_window_open', 'mc3')).reply.status, 200);
   w.clock.advance(10 * MINUTE + 1);
