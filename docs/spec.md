@@ -575,7 +575,7 @@ named notice only for that destination; the retry schedule on `FakeClock`; the c
 
 **`KBOX-52` The scheduler.** Source: design §5.2. Each key has `rotateEvery` (90 days by default). The due date is the earlier of the schedule and `expiresAt - grace - 1 day`, moved earlier
 where needed so that at most one admin or master rotation falls due per day (a schedule, not a cap: a manual "replace now" is never held back). For an admin or master key "due" opens
-an approval (a box-originated proposal, `KBOX-7`) and the old key keeps working while it waits. Test (`test/scheduler.test.ts`, `FakeClock`, a seeded property test): for any set of keys, at most one
+an approval (a box-originated proposal, `KBOX-7`) and the old key keeps working while it waits. After a failed run (`KBOX-17`) the scheduler starts the key's next run no sooner than 24 hours after the failure itself (decided at build; the failure's one notice is not repeated meanwhile). Test (`test/scheduler.test.ts`, `FakeClock`, a seeded property test): for any set of keys, at most one
 admin or master rotation is due per day and every due date is no later than the unstaggered one; an expiry earlier than the schedule wins; a manual rotation is never delayed; a due admin key
 opens exactly one approval and a second tick opens none.
 
