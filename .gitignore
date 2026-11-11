@@ -1,2 +1,4 @@
 node_modules/
 *.log
+.loop-forced-flips
+.loop-escalation

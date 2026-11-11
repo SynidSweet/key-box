@@ -1,4 +1,0 @@
-test/support/lend-world.ts — createLendHandler gained two required deps (minted registry, journal), so the one handler-construction line takes them; the world now also exposes both (additive lines)
-test/journeys/relay-processes.ts — the same two new deps on its one createLendHandler call
-test/support/relay-world.ts — the world's returned object gains stop() (additive in meaning: the call and every existing member are unchanged)
-test/web-push.test.ts — createHttpPushTransport now takes the egress gate (push goes through it, KBOX-47): the LoopbackTransport harness class builds the real gate over a loopback connector instead of rewriting the endpoint URL; no assertion of any existing test is touched
