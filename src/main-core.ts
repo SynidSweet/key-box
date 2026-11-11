@@ -15,6 +15,8 @@ import { openCore } from './shell/core.ts';
 import { createApiServer } from './shell/http.ts';
 import { createLendHandler, loadCredentialShapes } from './shell/lend-core.ts';
 import { createLendServer } from './shell/lend-socket.ts';
+import { createShareWriter, shareRoute } from './shell/share-writer.ts';
+import { createMetaShareSource } from './shell/share-source.ts';
 import { createPush } from './shell/push.ts';
 import { createHttpPushTransport } from './shell/push-transport.ts';
 import { openPrivateDatabase } from './shell/private-db.ts';
@@ -48,6 +50,9 @@ const noInstaller: TrustPort = { apply: () => Promise.resolve({ result: 'refused
 const NEEDS_ADAPTER: ReadonlySet<Action['kind']> = new Set(['add_key', 'add_destination', 'set_allow_rules', 'vercel_set_domain', 'vercel_set_team_setting']);
 const vetWithoutAdapters = (action: Action): 'ok' | 'rejected' => (NEEDS_ADAPTER.has(action.kind) ? 'rejected' : 'ok');
 
+/** No platform adapter registers its key shape yet, so no admin or master key is watched; each adapter unit adds its `shape` here. */
+const noShapeYet = (): undefined => undefined;
+
 const SWEEP_EVERY_MS = 60 * 60_000;
 
 async function main(): Promise<void> {
@@ -63,8 +68,22 @@ async function main(): Promise<void> {
     const wordlist = parseWordlist(readFileSync(new URL('./data/wordlist.txt', import.meta.url), 'utf8'));
     approve = openApproveCore({ parts, approverStore: privateStore, trust: noInstaller, push, clock: systemClock, random: systemRandom, domain: config.domain, wordlist, vet: vetWithoutAdapters });
   }
+  const shares = createShareWriter({
+    dir: join(config.stateDir, 'share'),
+    meta: parts.meta,
+    signingKey: parts.share.signingKey,
+    source: createMetaShareSource({ meta: parts.meta, values: parts.share.values, shapeOf: noShapeYet }),
+    events: parts.events,
+    hub: parts.hub,
+    clock: systemClock,
+    scheduler: systemScheduler,
+    random: systemRandom,
+    audit: parts.audit,
+  });
+  // A first file that cannot be written does not stop the box: the file is served as stale (503) until the next key.changed makes one.
+  await shares.start().catch(() => parts.audit.append({ action: 'share.refresh_failed', subject: 'share', at: systemClock.now(), detail: { code: 'start_failed' } }));
   const server = createApiServer({
-    routes: [...parts.routes, ...(approve?.routes ?? [])],
+    routes: [...parts.routes, ...(approve?.routes ?? []), shareRoute(shares)],
     tokens: approve?.tokens.tokenStore ?? parts.meta,
     audit: parts.audit,
     random: systemRandom,
@@ -87,6 +106,7 @@ async function main(): Promise<void> {
   const stopped = new Promise<void>((resolve) => {
     const stop = (): void => {
       cancelSweep();
+      shares.stop();
       void Promise.all([server.stop(), lend.stop()]).then(() => {
         privateStore.close();
         parts.close();

@@ -221,6 +221,8 @@ export const AUDIT_SCHEMAS = {
     code: optional(text(CODE)),
     reason: optional(text(CODE)),
   },
+  /** The share writer could not refresh the share file (KBOX-33): a fixed code, nothing of the failure. The file is then served as stale. */
+  'share.refresh_failed': { code: text(CODE) },
 } as const satisfies Readonly<Record<string, Schema>>;
 
 export type AuditAction = keyof typeof AUDIT_SCHEMAS;

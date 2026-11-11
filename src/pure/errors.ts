@@ -112,6 +112,25 @@ export class WriteRefused extends Error {
   }
 }
 
+export type ShareFailure = 'signing_key_mismatch' | 'signing_key_unreadable' | 'write_failed' | 'refresh_failed';
+
+/** The share writer could not make or sign the file. A fixed code and a fixed text: no cause, no value, no path. */
+export class ShareError extends Error {
+  readonly failure: ShareFailure;
+
+  constructor(failure: ShareFailure) {
+    const text: Record<ShareFailure, string> = {
+      signing_key_mismatch: 'the share signing key is not the one the box published',
+      signing_key_unreadable: 'the share signing key could not be read',
+      write_failed: 'the share file could not be written',
+      refresh_failed: 'the share file could not be refreshed',
+    };
+    super(text[failure]);
+    this.name = 'ShareError';
+    this.failure = failure;
+  }
+}
+
 const OS_ERROR_CODE = /^E[A-Z0-9]{2,15}$/;
 
 /** The OS error code of a thrown filesystem error, or undefined. Only a code of the OS's own shape is kept. */
