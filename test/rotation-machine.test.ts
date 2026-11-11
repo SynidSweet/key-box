@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { checkProperty, seedFor } from './kit/index.ts';
-import { confirmDead, defaultGraceHours, intentName, nextStep, retryDelayMs, stepsFor } from '../src/pure/rotation-machine.ts';
+import { confirmDead, defaultGraceHours, intentAbsent, intentName, nextStep, retryDelayMs, stepsFor } from '../src/pure/rotation-machine.ts';
 
 const MINUTE = 60_000;
 
@@ -56,9 +56,9 @@ test('KBOX-51 only the verifier rejecting the old value, or the lister showing t
   assert.equal(confirmDead({ by: 'verifier', verdict: 'rejected' }), true);
   assert.equal(confirmDead({ by: 'verifier', verdict: 'ok' }), false, 'a 404 while the old value still works');
   assert.equal(confirmDead({ by: 'verifier', verdict: 'unreachable' }), false);
-  assert.equal(confirmDead({ by: 'lister', id: 'pk-1', listed: [{ platformKeyId: 'pk-2', name: 'n' }] }), true);
-  assert.equal(confirmDead({ by: 'lister', id: 'pk-1', listed: [{ platformKeyId: 'pk-1', name: 'n', location: { region: 'us' } }] }), false, 'listed anywhere is alive');
-  assert.equal(confirmDead({ by: 'lister', id: 'pk-1', listed: undefined }), false, 'a list that failed proves nothing');
+  assert.equal(confirmDead({ by: 'lister', id: 'pk-1', at: {}, listing: { complete: true, at: {}, keys: [{ platformKeyId: 'pk-2', name: 'n' }] } }), true);
+  assert.equal(confirmDead({ by: 'lister', id: 'pk-1', at: {}, listing: { complete: true, at: {}, keys: [{ platformKeyId: 'pk-1', name: 'n', location: { region: 'us' } }] } }), false, 'listed anywhere is alive');
+  assert.equal(confirmDead({ by: 'lister', id: 'pk-1', at: {}, listing: undefined }), false, 'a list that failed proves nothing');
 });
 
 test('KBOX-51 a listing proves a key dead only when it is complete, is for the location recorded with the key, and shows the id absent or disabled', () => {
@@ -75,4 +75,16 @@ test('KBOX-51 a listing proves a key dead only when it is complete, is for the l
   assert.equal(dead({ complete: true, at: { region: 'eu', project: 'blog' }, keys: [other] }), false, 'another project');
   assert.equal(dead({ complete: true, at: { region: 'eu' }, keys: [other] }), false, 'a listing that omits the project');
   assert.equal(dead(undefined), false, 'a listing that failed proves nothing');
+});
+
+test('KBOX-51 an intent key is absent only on a complete listing of the key location that does not name it', () => {
+  const at = { region: 'eu', project: 'shop' };
+  const named = { platformKeyId: 'pk-9', name: 'kbox_a_g2_ab12cd34' };
+  const other = { platformKeyId: 'pk-2', name: 'kbox_b_g1_ffffffff' };
+  assert.equal(intentAbsent({ complete: true, at, keys: [other] }, at, named.name), true, 'a complete listing without it');
+  assert.equal(intentAbsent({ complete: true, at, keys: [] }, at, named.name), true, 'an empty complete listing');
+  assert.equal(intentAbsent({ complete: true, at, keys: [other, named] }, at, named.name), false, 'it is listed');
+  assert.equal(intentAbsent({ complete: false, at, keys: [other] }, at, named.name), false, 'one page of several proves nothing');
+  assert.equal(intentAbsent({ complete: true, at: { region: 'us', project: 'shop' }, keys: [other] }, at, named.name), false, 'a listing of another region');
+  assert.equal(intentAbsent(undefined, at, named.name), false, 'a listing that failed');
 });

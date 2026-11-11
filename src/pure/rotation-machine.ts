@@ -47,6 +47,9 @@ export type Evidence =
 
 const sameLocation = (a: KeyLocation, b: KeyLocation): boolean => a.region === b.region && a.project === b.project;
 
+/** A listing that reads as "these are all the keys at `at`": complete, and of the region and project asked for. Anything else proves no absence. */
+const covers = (listing: KeyListing | undefined, at: KeyLocation): listing is KeyListing => listing !== undefined && listing.complete && sameLocation(listing.at, at);
+
 /**
  * A 404 is not proof. Dead means the verifier rejects the value, or a listing that is complete and of the region and project recorded with
  * the key shows the id absent or disabled. A failed listing, one page of several, or a listing of another location proves nothing.
@@ -54,6 +57,11 @@ const sameLocation = (a: KeyLocation, b: KeyLocation): boolean => a.region === b
 export function confirmDead(evidence: Evidence): boolean {
   if (evidence.by === 'verifier') return evidence.verdict === 'rejected';
   const { listing, id } = evidence;
-  if (listing === undefined || !listing.complete || !sameLocation(listing.at, evidence.at)) return false;
+  if (!covers(listing, evidence.at)) return false;
   return !listing.keys.some((k) => k.platformKeyId === id && k.disabled !== true);
+}
+
+/** Reconcile's absence: the intent name is off the platform only on a listing that covers the key's location (as `confirmDead` reads one) and does not show it. */
+export function intentAbsent(listing: KeyListing | undefined, at: KeyLocation, intent: string): boolean {
+  return covers(listing, at) && !listing.keys.some((k) => k.name === intent);
 }

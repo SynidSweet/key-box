@@ -22,7 +22,10 @@ export function isPasteSource(source: Pick<PlatformSource, 'platform'>, platform
   return source.platform(platform)?.issuer?.capabilities().create === 'paste';
 }
 
-type SetValue = NonNullable<Issuer['set']>;
+/** Whether the platform can hold two valid keys at once (true when it says nothing: there is then no one-credential order to follow). */
+export const overlapOf = (kit: PlatformKit | undefined): boolean => kit?.issuer?.capabilities().overlap ?? true;
+
+type SetValue =NonNullable<Issuer['set']>;
 
 /**
  * The issuer's `set` when it both declares the capability and has the call (neither alone is trusted), bound to the issuer: what an

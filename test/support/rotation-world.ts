@@ -20,7 +20,7 @@ import type { CoreParts } from '../../src/shell/core.ts';
 import { FakePlatformWorld } from '../fakes/platform.ts';
 import { FakePush } from '../fakes/push.ts';
 import { RecordingDestination, RecordingRedeployer } from '../fakes/recording-destination.ts';
-import { TimedClock, bytesOf, seededRandom, tempDir } from '../kit/index.ts';
+import { TimedClock, bytesOf, lent, seededRandom, tempDir } from '../kit/index.ts';
 
 export const HOUR = 3600_000;
 export const MINUTE = 60_000;
@@ -248,7 +248,14 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
     },
     async seedKey(over = {}) {
       const key = world.newKey(over);
-      await world.orch.create(key);
+      if (options.overlap === false) {
+        // A run never creates the key of a one-credential platform (no old value to set back): it is added by paste, as the owner does.
+        const pasted = Buffer.from(`fk-${Buffer.from(random.bytes(16)).toString('hex')}`);
+        await platform.set(lent(pasted, 'paste:1'), platform.master());
+        await world.orch.create(key, pasted);
+      } else {
+        await world.orch.create(key);
+      }
       return key.keyref;
     },
     async live() {

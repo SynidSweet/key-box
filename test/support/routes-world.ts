@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type { TestContext } from 'node:test';
 import type { Issuer, IssuerCapabilities, Verifier } from '../../src/ports/issuer.ts';
-import type { KeyClass, Lent, PlatformKeyId, Scope } from '../../src/ports/types.ts';
+import type { KeyClass, KeyLocation, Lent, PlatformKeyId, Scope } from '../../src/ports/types.ts';
 import { deliveryRoutes } from '../../src/shell/deliveries.ts';
 import { keyRoutes } from '../../src/shell/key-routes.ts';
 import type { Route } from '../../src/shell/http.ts';
@@ -63,6 +63,8 @@ export interface RoutesWorld extends World {
 export interface RoutesWorldOptions {
   /** Where the process may be stopped (`Point`): a checkpoint that throws stands for the process dying there. */
   readonly checkpoint?: (point: Point) => void | Promise<void>;
+  /** false: the api platform holds one credential at a time (it can take a chosen value, so its configuration is accepted). */
+  readonly overlap?: boolean;
 }
 
 export async function routesWorld(t: TestContext, options: RoutesWorldOptions = {}): Promise<RoutesWorld> {
@@ -78,9 +80,10 @@ export async function routesWorld(t: TestContext, options: RoutesWorldOptions = 
 
   const apiIssuer: Issuer = {
     platform: 'fake',
-    capabilities: (): IssuerCapabilities => ({ ...platform.issuer.capabilities(), classify }),
+    capabilities: (): IssuerCapabilities => ({ ...platform.issuer.capabilities(), classify, ...(options.overlap === false ? { overlap: false, set: 'api' as const } : {}) }),
     issue: (req, intent, master) => platform.issuer.issue(req, intent, master),
     revoke: (id: PlatformKeyId, master: Lent) => platform.issuer.revoke(id, master),
+    ...(options.overlap === false ? { set: (value: Lent, _at: KeyLocation, master: Lent) => platform.set(value, master) } : {}),
   };
   const pasteIssuer: Issuer = {
     platform: PASTE_PLATFORM,

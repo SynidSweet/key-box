@@ -1,6 +1,6 @@
 // A destination that keeps what it holds, in order, and can refuse a target or fail a deploy: the rotation tests read it to see what each
 // destination holds at any moment. Faults are planted through the port (it refuses), never by patching.
-import type { DeployRef, Destination, DestinationKind, DestinationTarget, PushReceipt, Redeployer } from '../../src/ports/destination.ts';
+import type { DeployRef, Destination, DestinationKind, DestinationTarget, PushOutcome, Redeployer } from '../../src/ports/destination.ts';
 import type { Lent } from '../../src/ports/types.ts';
 
 const place = (t: DestinationTarget, name: string): string => `${t.id}/${name}`;
@@ -10,6 +10,7 @@ export class RecordingDestination implements Destination {
   readonly #held = new Map<string, { bytes: string; version: number }>();
   readonly #refused = new Map<string, number>();
   readonly #applyThenThrow = new Set<string>();
+  readonly #timeOut = new Set<string>();
   readonly #removeRefused = new Set<string>();
   readonly #trace: string[];
   #versions = 0;
@@ -29,12 +30,12 @@ export class RecordingDestination implements Destination {
     return { readableBy: this.#runtime ? 'runtime' : 'api', needsRedeploy: this.#runtime };
   }
 
-  /** The destination answers an error for every push to this target until `allow`. */
+  /** The destination answers `refused` (it applied nothing) to every push to this target until `allow`. */
   refuse(target: string): void {
     this.refuseAfter(target, 0);
   }
 
-  /** Lets `pushes` more pushes to this target through, then answers an error for every one until `allow`. */
+  /** Lets `pushes` more pushes to this target through, then answers `refused` to every one until `allow`. */
   refuseAfter(target: string, pushes: number): void {
     this.#refused.set(target, pushes);
   }
@@ -42,6 +43,11 @@ export class RecordingDestination implements Destination {
   /** The next push to this target changes what it holds and then answers an error (a timeout or a 5xx after the commit). */
   applyThenThrow(target: string): void {
     this.#applyThenThrow.add(target);
+  }
+
+  /** The next push to this target never answers (a timeout) and applied nothing: the caller cannot tell that from one that applied. */
+  timeOut(target: string): void {
+    this.#timeOut.add(target);
   }
 
   /** The destination answers an error for every removal at this target until `allow`. */
@@ -54,22 +60,23 @@ export class RecordingDestination implements Destination {
     this.#removeRefused.delete(target);
   }
 
-  async push(t: DestinationTarget, name: string, v: Lent, master: Lent): Promise<PushReceipt> {
+  async push(t: DestinationTarget, name: string, v: Lent, master: Lent): Promise<PushOutcome> {
     void master;
     const left = this.#refused.get(t.id);
-    if (left === 0) throw new Error(`refused ${t.id}`);
+    if (left === 0) return { outcome: 'refused' };
     if (left !== undefined) this.#refused.set(t.id, left - 1);
+    if (this.#timeOut.delete(t.id)) throw new Error(`timed out ${t.id}`);
     const bytes = await v.use((b) => Promise.resolve(Buffer.from(b).toString('utf8')));
     const existing = this.#held.get(place(t, name));
     this.#trace.push(`push:${t.id}`);
     if (existing?.bytes === bytes) {
       if (this.#applyThenThrow.delete(t.id)) throw new Error(`timed out ${t.id}`);
-      return { version: String(existing.version) };
+      return { outcome: 'applied', version: String(existing.version) };
     }
     this.#versions += 1;
     this.#held.set(place(t, name), { bytes, version: this.#versions });
     if (this.#applyThenThrow.delete(t.id)) throw new Error(`timed out ${t.id}`);
-    return { version: String(this.#versions) };
+    return { outcome: 'applied', version: String(this.#versions) };
   }
 
   remove(t: DestinationTarget, name: string, master: Lent): Promise<void> {

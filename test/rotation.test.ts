@@ -239,7 +239,7 @@ test('KBOX-51 overlap:false follows its order: set the new value, push, redeploy
   w.trace.length = 0;
   w.orch.start({ keyref, origin: 'owner' });
   await w.orch.idle();
-  assert.deepEqual(w.trace, ['issue', 'verify', 'push:app-a', 'push:app-b', 'redeploy:app-a', 'redeploy:app-b', 'verify', 'revoke', 'verify']);
+  assert.deepEqual(w.trace, ['set', 'verify', 'push:app-a', 'push:app-b', 'redeploy:app-a', 'redeploy:app-b', 'verify', 'verify']);
   assert.equal(w.store.activeRuns().length, 0, 'done at once: no clock was advanced');
   assert.equal(genOf(w, keyref, 1)?.status, 'retired');
 });
@@ -699,9 +699,113 @@ test('KBOX-51 an overlap:false platform that cannot take a chosen value is refus
 });
 
 test('KBOX-51 a run on an overlap:false platform that cannot take a chosen value fails before any platform call', async (t) => {
-  const w = await rotationWorld(t, { overlap: false, settable: false });
-  const created = await w.orch.create(w.newKey());
-  assert.equal(created.status, 'failed');
+  const { w, keyref } = await seeded(t, { overlap: false, settable: false });
+  const before = await w.live();
+  w.trace.length = 0;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  const run = w.store.runs().at(-1);
+  assert.deepEqual([run?.state, run?.reasonCode], ['failed', 'overlap_needs_set']);
   assert.deepEqual(w.trace, [], 'nothing was issued, set or pushed');
-  assert.deepEqual(await w.live(), []);
+  assert.deepEqual(await w.live(), before, 'the platform still holds the one credential it held');
+});
+
+// --- three push outcomes (applied, refused, unknown) ---------------------------------------------------------------------------
+
+const receiptStates = (w: RotationWorld): (string | boolean)[][] => w.store.receipts(w.store.runs().at(-1)?.runId ?? '').map((r) => [r.target, r.pushed]);
+
+test('KBOX-17 a push the destination refused leaves a refused receipt that holds nothing: the rollback does not touch it and the new key is revoked', async (t) => {
+  const { w, keyref, oldValue, oldId } = await seeded(t);
+  w.destinations.a.refuse('app-b');
+  w.trace.length = 0;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.deepEqual(receiptStates(w), [['app-a', true], ['app-b', 'refused']]);
+  assert.deepEqual(w.trace.filter((x) => x.endsWith(':app-b')), [], 'nothing was pushed to or removed from app-b, in the run or in its rollback');
+  assert.deepEqual(heldBy(w), [oldValue, oldValue]);
+  assert.deepEqual(await w.live(), [oldId]);
+  assert.equal(w.events('rotation.failed').length, 1);
+});
+
+test('KBOX-17 a push that timed out leaves a maybe receipt: the rollback puts the old value there, and only then is the new key revoked', async (t) => {
+  const { w, keyref, oldValue, oldId } = await seeded(t);
+  w.destinations.a.timeOut('app-b');
+  w.trace.length = 0;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.deepEqual(receiptStates(w), [['app-a', true], ['app-b', 'maybe']]);
+  assert.deepEqual(w.trace.filter((x) => x === 'push:app-b'), ['push:app-b'], 'the rollback pushed the old value to app-b');
+  assert.deepEqual(heldBy(w), [oldValue, oldValue]);
+  assert.deepEqual(await w.live(), [oldId]);
+});
+
+// --- a failed create run files a card for every class (no old generation) ------------------------------------------------------
+
+for (const klass of ['ordinary', 'admin'] as const) {
+  test(`KBOX-17 a failed create run (${klass} key) files exactly one rotation.failed card, and it says the old key does not work because there is none`, async (t) => {
+    const w = await rotationWorld(t, { klass });
+    w.destinations.a.refuse('app-b');
+    await w.orch.create(w.newKey());
+    const failed = w.events('rotation.failed');
+    assert.equal(failed.length, 1);
+    assert.deepEqual([failed[0]?.data['step'], failed[0]?.data['reason_code'], failed[0]?.data['old_key_works']], ['pushing', 'push_failed', false]);
+    assert.equal(w.push.sent.filter((p) => p.kind === 'rotation_failed').length, klass === 'admin' ? 1 : 0, 'a Web Push for admin and master keys');
+  });
+}
+
+// --- an overlap:false key is never created by a create run ---------------------------------------------------------------------
+
+test('KBOX-51 a create run on an overlap:false platform is refused with overlap_needs_paste before any row or platform call; a key added by paste is then rotated', async (t) => {
+  const w = await rotationWorld(t, { overlap: false });
+  const key = w.newKey();
+  await assert.rejects(
+    () => w.orch.create(key),
+    (e: unknown) => e instanceof ApiError && e.code === 'rejected' && JSON.stringify(e.detail) === JSON.stringify({ code: 'overlap_needs_paste' }),
+  );
+  assert.equal(w.store.key(key.keyref), undefined, 'no key row was written');
+  assert.deepEqual(w.trace, [], 'the platform was not called');
+  const keyref = await w.seedKey();
+  assert.equal(w.store.key(keyref)?.status, 'works', 'added by paste');
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.equal(genOf(w, keyref, 2)?.status, 'current', 'rotated by a run that sets a value the box chose');
+});
+
+// --- reconcile treats absence only from a complete listing --------------------------------------------------------------------
+
+test('KBOX-51 reconcile restarts an issuing run whose intent key is not on the platform only on a complete listing: an incomplete one keeps the run open and retries', async (t) => {
+  const { w, keyref, oldId } = await seeded(t);
+  w.checkpoints.arm('issued');
+  const first = w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  const strayId = (await w.live()).find((id) => id !== oldId) ?? '';
+  await w.platform.issuer.revoke(strayId, w.platform.master());
+  w.checkpoints.crashAt = undefined;
+  w.build();
+  w.faults.listingIncomplete = true;
+  await w.reconciler.run();
+  assert.equal(w.store.run(first.runId)?.state, 'issuing', 'one page of several proves nothing: the run stays open');
+  assert.equal(w.store.runs().filter((r) => r.keyref === keyref).length, 2, 'no second run was opened');
+  w.faults.listingIncomplete = false;
+  await w.reconciler.run();
+  assert.equal(w.store.run(first.runId)?.state, 'abandoned', 'a complete listing without the intent key lets the run go again');
+});
+
+test('KBOX-51 an orphan that reconcile cannot confirm gone from a complete listing keeps its run open: nothing restarts while the platform may still hold the key', async (t) => {
+  const { w, keyref } = await seeded(t);
+  w.checkpoints.arm('issued');
+  const first = w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.checkpoints.crashAt = undefined;
+  w.build();
+  w.faults.listingIncomplete = true;
+  await w.reconciler.run();
+  assert.equal(w.store.run(first.runId)?.state, 'issuing', 'the revoke could not be confirmed from one page of several');
+  assert.equal(w.store.runs().filter((r) => r.keyref === keyref).length, 2, 'no second run');
+  w.faults.listingIncomplete = false;
+  await w.reconciler.run();
+  assert.equal(w.store.run(first.runId)?.state, 'abandoned');
+  assert.equal(w.parts.audit.read(0).entries.filter((e) => e.action === 'rotation.restarted').length, 1);
+  await w.settle();
+  assert.deepEqual(await w.live(), [genOf(w, keyref, 2)?.platformKeyId], 'the orphan is gone and the new run made the one key');
 });

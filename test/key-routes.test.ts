@@ -238,3 +238,23 @@ test('KBOX-34 a retired body of 64 KiB is accepted and 64 KiB + 1 is too_large; 
   assert.equal((await w.api(retiredPath('THIRD_KEY'), { bytes: Buffer.from('x'), contentType: 'application/json' })).status, 415);
   assert.equal((await w.api('/api/retired?platform=fake&project=shop', { bytes: Buffer.from('x') })).status, 400, 'the name is required');
 });
+
+for (const items of [['read'], ['admin']]) {
+  test(`KBOX-51 POST /api/keys for a ${items.join('')} key on an overlap:false platform is refused with overlap_needs_paste: no key row, no approval`, async (t) => {
+    const w = await routesWorld(t, { overlap: false });
+    const reply = await w.api('/api/keys', { json: body({ scope: { items } }) });
+    assert.equal(reply.status, 422, reply.body);
+    assert.deepEqual([errorOf(reply).code, errorOf(reply).detail?.code], ['rejected', 'overlap_needs_paste']);
+    assert.equal(w.parts.meta.snapshot().keys.length, 0);
+    assert.deepEqual(await w.queue(), []);
+  });
+}
+
+test('KBOX-51 an approved add_key on an overlap:false platform fails with overlap_needs_paste and writes no key', async (t) => {
+  const w = await routesWorld(t, { overlap: false });
+  const execute = w.rotation.executors.add_key;
+  assert.ok(execute);
+  const action = { kind: 'add_key', platform: 'fake', name: 'OPENAI_KEY', projects: ['shop'], scope: { items: ['admin'] } } as const;
+  assert.deepEqual(await execute({ approvalId: 'apr_x', revision: 1, action, requester: { kind: 'box' }, proof: undefined }), { result: 'failed', reason: 'overlap_needs_paste' });
+  assert.equal(w.parts.meta.snapshot().keys.length, 0);
+});

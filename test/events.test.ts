@@ -141,7 +141,7 @@ test('KBOX-31 an event outside the closed list, or with data outside its shape, 
     ['key.changed', { keyref: 7 }],
     ['key.changed', { keyref: 'has space' }],
     ['key.changed', null],
-    ['rotation.failed', { run_id: 'r', keyref: 'k', step: 's', reason_code: 'c', old_key_works: false }],
+    ['rotation.failed', { run_id: 'r', keyref: 'k', step: 's', reason_code: 'c', old_key_works: 'false' }],
     ['box.notice', { code: 'idle_near', text: 'any other sentence' }],
     ['approval.decided', { approval_id: 'a', decision: 'maybe' }],
     ['share.version', { version: -1 }],
@@ -192,7 +192,7 @@ test('KBOX-2 property: random byte strings offered as any text member of any eve
       for (const [member, field] of Object.entries(schema)) {
         if (field.kind !== 'text') continue;
         const good: Record<string, unknown> = {};
-        for (const [name, f] of Object.entries(schema)) good[name] = f.kind === 'text' ? 'name' : f.kind === 'int' ? 1 : f.kind === 'true' ? true : (f.values[0] ?? '');
+        for (const [name, f] of Object.entries(schema)) good[name] = f.kind === 'text' ? 'name' : f.kind === 'int' ? 1 : f.kind === 'true' || f.kind === 'bool' ? true : (f.values[0] ?? '');
         good[member] = text;
         assert.throws(() => loose.call(log, kind, good), WriteRefused, `${kind}.${member}`);
       }

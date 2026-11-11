@@ -16,7 +16,7 @@ import type { RotateKey } from './new-key.ts';
 import type { Orchestrator } from './orchestrator.ts';
 import type { Paste } from './paste.ts';
 import { isRecord, only } from './routes-approve.ts';
-import { isPasteSource } from './rotation-ports.ts';
+import { isPasteSource, overlapOf } from './rotation-ports.ts';
 import type { PlatformSource } from './rotation-ports.ts';
 import type { DestinationRow, RotationStore } from './rotation-store.ts';
 import type { Vault } from '../ports/vault.ts';
@@ -110,6 +110,8 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
           const opened = deps.paste.open({ action, requester: { kind: 'token', label: actor } });
           return { status: 202, json: { keyref, class: klass, paste_task_id: opened.paste_id } };
         }
+        // A key of a one-credential platform is added by paste, never by a run (nothing to set back): refused before an approval is asked for.
+        if (!overlapOf(deps.source.platform(action.platform))) throw rejected('overlap_needs_paste');
         if (klass !== 'ordinary') {
           if (body.destinations.length > 0 || body.rotateEveryDays !== undefined) throw rejected('use_approvals_for_options');
           const proposed = deps.approvals.propose({ action, requester: { kind: 'token', label: actor } });

@@ -5,6 +5,7 @@
 // still holds the new one's replacement unconfirmed, and the new one is never revoked while a destination still holds it.
 import type { Audit } from '../ports/audit.ts';
 import type { Clock, Scheduler } from '../ports/clock.ts';
+import type { PushOutcome } from '../ports/destination.ts';
 import type { EventLog } from '../ports/events.ts';
 import type { IssuedKey } from '../ports/issuer.ts';
 import type { MetaStore } from '../ports/meta.ts';
@@ -17,7 +18,7 @@ import { admitDestination, mintValue } from '../pure/class.ts';
 import { intentName, nextStep, retryDelayMs } from '../pure/rotation-machine.ts';
 import type { Step } from '../pure/rotation-machine.ts';
 import { revokeAndConfirm } from './revoke-confirm.ts';
-import { isPasteSource, setterOf } from './rotation-ports.ts';
+import { isPasteSource, overlapOf, setterOf } from './rotation-ports.ts';
 import type { DestinationKit, PlatformKit, PlatformSource, Point } from './rotation-ports.ts';
 import type { DestinationRow, KeyHead, Receipt, RotationStore, RunOrigin, RunRow } from './rotation-store.ts';
 
@@ -68,7 +69,10 @@ export interface Orchestrator {
    * (`no_issuer`) for a run without a value on a paste-source platform (KBOX-34).
    */
   start(input: StartInput): RunRow;
-  /** Writes a key's rows and runs its first generation to the end. Answers the status the key ended in. */
+  /**
+   * Writes a key's rows and runs its first generation to the end. Answers the status the key ended in. Without a value the platform issues it;
+   * `rejected` (`overlap_needs_paste`) for an `overlap: false` platform, whose keys are added by paste.
+   */
   create(key: NewKey, value?: Uint8Array): Promise<{ readonly status: 'works' | 'failed' }>;
   /** After a start: works on every unfinished run again, re-leasing it, except an `issuing` run that stored nothing (reconcile's). */
   resume(): Promise<void>;
@@ -208,7 +212,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     const head = store.key(keyref);
     return head === undefined ? undefined : deps.platform(head.platform);
   };
-  const overlapOf = (kit: PlatformKit | undefined): boolean => kit?.issuer?.capabilities().overlap ?? true;
 
   async function step(run: RunRow): Promise<Next> {
     const head = store.key(run.keyref);
@@ -241,13 +244,25 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     }
   }
 
+  const auditStepFailed = (run: RunRow, stepName: string, code: string): void =>
+    deps.audit.append({ action: 'rotation.step_failed', subject: run.keyref, at: now(), detail: { run_id: run.runId, step: stepName, code } });
+
   async function attempt(run: RunRow, stepName: string, work: () => Promise<void>, code: string): Promise<Outcome> {
     try {
       await work();
       return { ok: true };
     } catch {
-      deps.audit.append({ action: 'rotation.step_failed', subject: run.keyref, at: now(), detail: { run_id: run.runId, step: stepName, code } });
+      auditStepFailed(run, stepName, code);
       return { ok: false, code };
+    }
+  }
+
+  /** A push as an outcome: one that threw or timed out is `unknown`, because it may have applied before it failed to answer. */
+  async function pushed(call: () => Promise<PushOutcome>): Promise<PushOutcome> {
+    try {
+      return await call();
+    } catch {
+      return { outcome: 'unknown' };
     }
   }
 
@@ -388,19 +403,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       if (kit === undefined) return fail(run, 'pushing', 'push_failed');
       const target = { kind: kit.destination.kind, id: row.target };
       // The intent first: from here the destination may hold the new value, whether the push answers, throws or the process dies.
-      store.intendPush(run.runId, row.kind, row.target);
-      const made: { version?: string } = {};
-      const done = await attempt(
-        run,
-        'pushing',
-        async () => {
-          made.version = (await kit.destination.push(target, head.name, value, master)).version;
-        },
-        'push_failed',
-      );
-      if (!done.ok || made.version === undefined) return fail(run, 'pushing', 'push_failed');
+      const alone = store.intendPush(run.runId, row.kind, row.target);
+      const result = await pushed(() => kit.destination.push(target, head.name, value, master));
+      if (result.outcome !== 'applied') {
+        auditStepFailed(run, 'pushing', 'push_failed');
+        // Only a refusal of the one push that could have applied proves the destination holds nothing; any other answer leaves the intent (`maybe`).
+        if (result.outcome === 'refused' && alone) store.putReceipt(run.runId, row.kind, row.target, { pushed: 'refused' });
+        return fail(run, 'pushing', 'push_failed');
+      }
       await point('pushed');
-      store.putReceipt(run.runId, row.kind, row.target, { version: made.version, pushed: true });
+      store.putReceipt(run.runId, row.kind, row.target, { version: result.version, pushed: true });
       await point('receipt');
     }
     return advance(run, 'pushing');
@@ -519,28 +531,23 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   };
 
   /**
-   * KBOX-17's one notice per failed run. A create run has no old generation, so its notice claims no old key: the `rotation.failed` event
-   * pins `old_key_works: true` (KBOX-31), so a create run sends the Web Push alone (admin and master), and its caller gets the failure as
-   * the answer to the create (`POST /api/keys`, the approval's or the paste's execution).
+   * KBOX-17's one notice per failed run: a `rotation.failed` event (mission control raises the desk card) for every class, and a Web Push
+   * for admin and master keys. A create run has no old generation, so its event says `old_key_works: false` and its push claims no old key.
    */
   function noticeFailed(run: RunRow, head: KeyHead | undefined, step: string, code: string): void {
     const pushed = head !== undefined && head.class !== 'ordinary';
-    if (run.genOld === 0) {
-      if (pushed) deps.push.send({ title: `Adding the key ${run.keyref} failed`, kind: 'rotation_failed' });
-      return;
-    }
-    deps.events.append('rotation.failed', { run_id: run.runId, keyref: run.keyref, step, reason_code: code, old_key_works: true });
-    if (pushed) deps.push.send({ title: `The key change of ${run.keyref} failed; the old key still works`, kind: 'rotation_failed' });
+    const oldKeyWorks = run.genOld > 0;
+    deps.events.append('rotation.failed', { run_id: run.runId, keyref: run.keyref, step, reason_code: code, old_key_works: oldKeyWorks });
+    if (pushed) deps.push.send({ title: oldKeyWorks ? `The key change of ${run.keyref} failed; the old key still works` : `Adding the key ${run.keyref} failed`, kind: 'rotation_failed' });
   }
 
   /** The second notice KBOX-17 allows, named for the one destination that would not take the rollback. */
   function noticeHeld(run: RunRow, head: KeyHead, receipt: Receipt): void {
-    const pushed = head.class !== 'ordinary';
-    if (run.genOld === 0) {
-      if (pushed) deps.push.send({ title: `The new key of ${run.keyref} could not be removed from ${receipt.target}`, kind: 'rotation_failed' });
-    } else {
-      deps.events.append('rotation.failed', { run_id: run.runId, keyref: run.keyref, step: `rollback_${underscored(receipt.kind)}`, reason_code: 'repush_refused', old_key_works: true });
-      if (pushed) deps.push.send({ title: `The old key of ${run.keyref} could not be put back in ${receipt.target}`, kind: 'rotation_failed' });
+    const oldKeyWorks = run.genOld > 0;
+    const code = oldKeyWorks ? 'repush_refused' : 'remove_refused';
+    deps.events.append('rotation.failed', { run_id: run.runId, keyref: run.keyref, step: `rollback_${underscored(receipt.kind)}`, reason_code: code, old_key_works: oldKeyWorks });
+    if (head.class !== 'ordinary') {
+      deps.push.send({ title: oldKeyWorks ? `The old key of ${run.keyref} could not be put back in ${receipt.target}` : `The new key of ${run.keyref} could not be removed from ${receipt.target}`, kind: 'rotation_failed' });
     }
     store.putReceipt(run.runId, receipt.kind, receipt.target, { rollbackNotified: true });
   }
@@ -550,6 +557,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
    * False while the destination holds (or may hold) the new value.
    */
   async function undo(run: RunRow, head: KeyHead, receipt: Receipt, old: Lent | undefined, master: Lent): Promise<boolean> {
+    // The destination answered that it applied nothing: there is nothing to put back and nothing it holds.
+    if (receipt.pushed === 'refused') return true;
     if (receipt.kind === PLATFORM_SET) {
       // overlap:false: the platform took the new value and dropped the old one; it takes the old one back, which the vault still holds. A
       // first generation has no old value to set, so the platform keeps the new one and the run holds (the value stays in the vault).
@@ -566,7 +575,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       run,
       'rollback',
       async () => {
-        await dk.destination.push(target, head.name, old, master);
+        // Only an applied push puts the old value back; a refusal or a timeout leaves the destination possibly holding the new one.
+        if ((await dk.destination.push(target, head.name, old, master)).outcome !== 'applied') throw new RangeError('re-push not applied');
         if (receipt.redeployed && dk.redeployer !== undefined) {
           const ref = await dk.redeployer.redeploy(target, master);
           if ((await dk.redeployer.ready(ref)) !== 'ready') throw new RangeError('deploy failed');
@@ -648,6 +658,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   return {
     start,
     async create(key, value) {
+      // A platform that holds one credential is never created by a run: a failed run would have no old value to set back (the owner's law:
+      // a failed rotation keeps the old key working). The key is added by paste and then rotated.
+      if (value === undefined && !overlapOf(deps.platform(key.platform))) throw new ApiError('rejected', 'overlap_needs_paste');
       deps.meta.putKey({
         keyref: key.keyref,
         platform: key.platform,

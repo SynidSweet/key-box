@@ -24,7 +24,7 @@ import { createReconciler } from './reconcile.ts';
 import type { Reconciler } from './reconcile.ts';
 import { createRotationStore } from './rotation-store.ts';
 import type { RotationStore } from './rotation-store.ts';
-import { isPasteSource as pasteSource } from './rotation-ports.ts';
+import { isPasteSource as pasteSource, overlapOf } from './rotation-ports.ts';
 import type { PlatformSource, Point } from './rotation-ports.ts';
 
 const HOUR_MS = 3600_000;
@@ -79,6 +79,7 @@ export function openRotation(deps: RotationDeps): Rotation {
       const action = a.action;
       if (action.kind !== 'add_key') return { result: 'failed', reason: 'wrong_kind' };
       if (isPasteSource(action.platform)) return { result: 'failed', reason: 'paste_required' };
+      if (!overlapOf(deps.source.platform(action.platform))) return { result: 'failed', reason: 'overlap_needs_paste' };
       const key = newKeyOf(action, deps.source);
       if (store.key(key.keyref) !== undefined) return { result: 'failed', reason: 'key_exists' };
       const created = await orchestrator.create(key);
