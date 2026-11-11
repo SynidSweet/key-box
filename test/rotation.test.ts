@@ -809,3 +809,17 @@ test('KBOX-51 an orphan that reconcile cannot confirm gone from a complete listi
   await w.settle();
   assert.deepEqual(await w.live(), [genOf(w, keyref, 2)?.platformKeyId], 'the orphan is gone and the new run made the one key');
 });
+
+test('KBOX-51 stopping the orchestrator cancels the timer of a run waiting out its grace: the process can end, and the run does not go on after the stop', async (t) => {
+  const { w, keyref } = await seeded(t);
+  assert.equal(w.clock.pendingTimers, 0);
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  assert.ok(w.clock.pendingTimers > 0, 'the grace wait holds a timer');
+  w.orch.stop();
+  assert.equal(w.clock.pendingTimers, 0, 'no timer is left');
+  w.clock.advance(25 * HOUR);
+  await w.orch.idle();
+  assert.equal(genOf(w, keyref, 1)?.status, 'grace', 'the stopped orchestrator revoked nothing');
+  assert.equal(w.clock.pendingTimers, 0, 'and set no new timer');
+});

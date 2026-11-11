@@ -56,7 +56,7 @@ export interface Rotation {
   readonly executors: Partial<Readonly<Record<ActionKind, Executor>>>;
   /** Opens what is due: ordinary keys start a run, admin and master keys open their approval or paste task, once. */
   tick(): void;
-  /** At start: resume unfinished runs, then reconcile, then tick; arms the hourly tick and the daily reconcile. Returns the stop. */
+  /** At start: resume unfinished runs, then reconcile, then tick; arms the hourly tick and the daily reconcile. Returns the stop, which also stops the orchestrator's run timers. */
   run(): Promise<() => void>;
 }
 
@@ -175,6 +175,7 @@ export function openRotation(deps: RotationDeps): Rotation {
         stopped = true;
         cancelTick();
         cancelReconcile();
+        orchestrator.stop();
       };
     },
   };
