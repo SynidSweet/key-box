@@ -130,7 +130,8 @@ const MIN_CORE_BYTES = 2;
 const SAFE_SETS: readonly string[] = ['', '/', "!*'()"]; // quote(safe=''), quote()'s default safe='/', encodeURIComponent
 const UNRESERVED = /^[A-Za-z0-9_.~-]$/;
 
-function base64Interior(core: Uint8Array, alignment: number, url: boolean): Uint8Array {
+/** The base64 characters fixed by `core`'s bytes alone when its first byte sits at byte offset `alignment` (0 to 2) mod 3. */
+export function base64Interior(core: Uint8Array, alignment: number, url: boolean): Uint8Array {
   const padded = new Uint8Array(alignment + core.length);
   padded.set(core, alignment);
   const encoded = Buffer.from(padded).toString(url ? 'base64url' : 'base64');
