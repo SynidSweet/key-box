@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Set up the key box</title>
 <link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/app.css">
 <script type="module" src="/setup.js"></script>
 </head>
@@ -19,7 +20,7 @@
 <p class="soft">The box sends its traffic only to the services it needs and refuses the rest. These limits do not stop an approved update that is malicious.</p>
 </div>
 <div class="card">
-<label>The twelve words the box's console shows<input id="code" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+<label>The twelve words the box's console shows<textarea id="code" rows="3" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false"></textarea></label>
 <label>A phrase you will recognise on paste pages<input id="phrase" autocomplete="off" maxlength="64"></label>
 <button id="go">Set up this phone</button>
 <p id="status" class="status" role="status"></p>

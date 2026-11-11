@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Recover the key box</title>
 <link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/app.css">
 <script type="module" src="/recover.js"></script>
 </head>
@@ -18,7 +19,7 @@
 <p class="soft">The phone is lost: recover with the authenticator app restored from your Google account on a new phone.</p>
 </div>
 <div class="card">
-<label>The twelve words<input id="code" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+<label>The twelve words<textarea id="code" rows="3" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false"></textarea></label>
 <label>A phrase you will recognise on paste pages<input id="phrase" autocomplete="off" maxlength="64"></label>
 <button id="recover">Recover with the console words</button>
 <button id="add">Join with words from another phone</button>

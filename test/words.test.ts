@@ -89,3 +89,22 @@ test('KBOX-8 the requester line for the box, an enrol request and an approver', 
   assert.equal(renderPage(a, { requester: { kind: 'approver', approverId: 'ap-BBBBBBBBBB' } }).lines.at(-1), 'Asked for in the app by the approver ap-BBBBBBBBBB.');
   assert.equal(renderPage(a, { requester: { kind: 'enrol', address: '198.51.100.7' } }).lines.at(-1), 'Asked for by an enrol request that carried no token.');
 });
+
+test('KBOX-8 an approver_add the box asks for says a new phone registered with a code from this app, while the generic box sentence stays as it was', () => {
+  const add = action({ kind: 'approver_add', cose_sha256: H('e'), device_sha256: H('f') });
+  const page = renderPage(add, { requester: { kind: 'box' }, fingerprint: 'option busy together cheese describe match' });
+  assert.ok(page.lines.includes('Asked for by the box because a new phone registered with a code from this app.'), page.lines.join(' | '));
+  assert.ok(!page.lines.some((l) => l.includes('a schedule or a platform expiry')));
+  const other = renderPage(action({ kind: 'demote', keyref: 'stripe' }), { requester: { kind: 'box' } });
+  assert.ok(other.lines.includes('Asked for by the box itself (a schedule or a platform expiry).'));
+});
+
+test('KBOX-8 an approver_add page hands the six words over as data beside the line that names them, and none when they could not be made', () => {
+  const add = action({ kind: 'approver_add', cose_sha256: H('e'), device_sha256: H('f') });
+  const words = 'option busy together cheese describe match';
+  const page = renderPage(add, { requester: { kind: 'box' }, fingerprint: words });
+  assert.equal(page.fingerprint?.words, words);
+  assert.equal(page.fingerprint?.label, 'Compare with the new phone');
+  assert.equal(page.lines[page.fingerprint?.at ?? -1], `Compare with the new phone: ${words}`, 'the line it stands for');
+  assert.equal(renderPage(add, { requester: { kind: 'box' } }).fingerprint, undefined);
+});

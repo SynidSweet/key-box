@@ -328,6 +328,7 @@ test('KBOX-53 the fingerprint the new phone shows is the one its approver_add pa
     const page = (await w.queue()).find((q) => q.kind === 'approver_add');
     assert.ok(page);
     assert.ok(page.lines.includes(`Compare with the new phone: ${shown}`), `the approving page shows the same words: ${page.lines.join(' | ')}`);
+    assert.equal(page.fingerprint?.words, shown, 'and carries them as a field of their own');
     return shown;
   };
   const both = await register(a, a);

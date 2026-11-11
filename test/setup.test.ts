@@ -250,3 +250,31 @@ test('KBOX-12 the queue shows the viewing approver\'s own phrase, in a view sess
   assert.equal(await shown(second), 'green lantern', 'each approver sees the phrase it typed');
   assert.equal(await shown(), 'blue kettle', 'and the first still sees its own');
 });
+
+test('KBOX-49 KBOX-20 the twelve words are a wrapping field that keeps the phone keyboard from rewriting them, on the setup and recover pages', () => {
+  for (const name of ['setup.html', 'recover.html']) {
+    const page = readFileSync(new URL(`../src/web/${name}`, import.meta.url), 'utf8');
+    const field = /<textarea id="code"([^>]*)>/.exec(page);
+    assert.ok(field, `${name}: the words field is a textarea`);
+    for (const attribute of ['autocapitalize="none"', 'autocorrect="off"', 'spellcheck="false"', 'autocomplete="off"', 'rows="3"']) assert.ok((field[1] ?? '').includes(attribute), `${name}: ${attribute}`);
+    assert.ok(!/<input id="code"/.test(page), name);
+  }
+});
+
+test('KBOX-53 every phone page names an icon the box serves itself, so no browser asks for /favicon.ico, under the same CSP', async (t) => {
+  const w = await approveWorld(t, { noSetup: true });
+  for (const name of ['index.html', 'setup.html', 'recover.html', 'paste.html']) {
+    const page = readFileSync(new URL(`../src/web/${name}`, import.meta.url), 'utf8');
+    assert.ok(page.includes('<link rel="icon" href="/icon.svg" type="image/svg+xml">'), name);
+  }
+  const reply = await w.call('/icon.svg');
+  assert.equal(reply.status, 200);
+  assert.ok(reply.headers['content-type']?.startsWith('image/svg+xml'));
+  assert.equal(reply.headers['content-security-policy'], "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+  assert.doesNotMatch(reply.body, /<script|href=|xlink/i, 'an icon that loads nothing');
+});
+
+test('KBOX-53 the stylesheet colours links in the page palette and keeps them underlined', () => {
+  const css = readFileSync(new URL('../src/web/app.css', import.meta.url), 'utf8');
+  assert.match(css, /(^|\n)a\s*\{[^}]*color:\s*var\(--accent\)[^}]*text-decoration:\s*underline/);
+});

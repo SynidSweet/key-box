@@ -2,13 +2,34 @@
 // operation asks for the passkey and the device key again over its own challenge. Box words are shown as text only.
 import { approvalChallenge, browser, byId, call, denialChallenge, fromB64u, nonce, notifier, operationChallenge, post, prove, viewChallenge } from './webauthn-client.js';
 
-/** @typedef {{ approval_id: string, kind: string, title: string, lines: string[], digest_b64: string, nonce_b64: string }} Item */
+/**
+ * @typedef {{ label: string, words: string, at: number }} Fingerprint
+ * @typedef {{ approval_id: string, kind: string, title: string, lines: string[], fingerprint?: Fingerprint, digest_b64: string, nonce_b64: string }} Item
+ */
+
+/** @param {unknown} v @returns {v is Fingerprint} */
+function isFingerprint(v) {
+  if (typeof v !== 'object' || v === null) return false;
+  const o = /** @type {Record<string, unknown>} */ (v);
+  return typeof o['label'] === 'string' && typeof o['words'] === 'string' && typeof o['at'] === 'number';
+}
 
 /** @param {unknown} v @returns {v is Item} */
 function isItem(v) {
   if (typeof v !== 'object' || v === null) return false;
   const o = /** @type {Record<string, unknown>} */ (v);
-  return ['approval_id', 'kind', 'title', 'digest_b64', 'nonce_b64'].every((k) => typeof o[k] === 'string') && Array.isArray(o['lines']) && o['lines'].every((l) => typeof l === 'string');
+  const fingerprintOk = o['fingerprint'] === undefined || isFingerprint(o['fingerprint']);
+  return fingerprintOk && ['approval_id', 'kind', 'title', 'digest_b64', 'nonce_b64'].every((k) => typeof o[k] === 'string') && Array.isArray(o['lines']) && o['lines'].every((l) => typeof l === 'string');
+}
+
+/**
+ * Sets a heading's text so a long name breaks after a slash before it breaks inside a word; the text itself is unchanged.
+ * @param {import('./webauthn-client.js').BrowserElement} el @param {string} text
+ */
+function setBreakableText(el, text) {
+  const doc = browser().document;
+  const parts = text.split('/');
+  el.replaceChildren(...parts.flatMap((part, i) => (i < parts.length - 1 ? [`${part}/`, doc.createElement('wbr')] : [part])));
 }
 
 /** @param {Item} item @param {'approve' | 'deny'} decision */
@@ -18,8 +39,7 @@ async function decide(item, decision) {
     const challenge = decision === 'approve' ? approvalChallenge : denialChallenge;
     const proof = await prove(n, await challenge(item.approval_id, fromB64u(item.digest_b64), n));
     await call(`/app/${decision}/${item.approval_id}`, { proof });
-    notifier.say(decision === 'approve' ? 'Approved.' : 'Denied.');
-    await openQueue();
+    await openQueue(decision === 'approve' ? 'Approved.' : 'Denied.');
   } catch (error) {
     notifier.failed(error);
   }
@@ -31,13 +51,24 @@ function card(item) {
   const box = doc.createElement('div');
   box.className = 'card';
   const title = doc.createElement('h2');
-  title.textContent = item.title;
+  setBreakableText(title, item.title);
   box.append(title);
-  for (const line of item.lines) {
+  item.lines.forEach((line, i) => {
+    if (item.fingerprint?.at === i) {
+      // The words to compare with the other phone: the label on one line, the words below in a larger block.
+      const label = doc.createElement('p');
+      label.className = 'words-label';
+      label.textContent = item.fingerprint.label;
+      const words = doc.createElement('p');
+      words.className = 'words';
+      words.textContent = item.fingerprint.words;
+      box.append(label, words);
+      return;
+    }
     const p = doc.createElement('p');
-    p.textContent = line;
+    setBreakableText(p, line);
     box.append(p);
-  }
+  });
   const approve = doc.createElement('button');
   approve.textContent = 'Approve';
   approve.addEventListener('click', () => void decide(item, 'approve'));
@@ -49,7 +80,8 @@ function card(item) {
   return box;
 }
 
-async function openQueue() {
+/** Shows what waits. `outcome` is what the owner just did; it stays on the page beside what is left. @param {string} [outcome] */
+async function openQueue(outcome) {
   const answer = /** @type {{ phrase?: unknown, approvals?: unknown }} */ (await call('/app/queue'));
   const items = Array.isArray(answer.approvals) ? answer.approvals.filter(isItem) : [];
   const phrase = byId('phrase');
@@ -57,7 +89,11 @@ async function openQueue() {
   phrase.hidden = typeof answer.phrase !== 'string';
   byId('queue').replaceChildren(...items.map(card));
   byId('tools').hidden = false;
-  if (items.length === 0) notifier.say('Nothing waits.');
+  if (outcome === undefined) {
+    if (items.length === 0) notifier.say('Nothing waits.');
+  } else {
+    notifier.say(items.length === 0 ? `${outcome} Nothing else waits.` : outcome);
+  }
 }
 
 byId('open').addEventListener('click', () => {
@@ -93,7 +129,9 @@ byId('add-phone').addEventListener('click', () => {
     (answer) => {
       const code = /** @type {{ registration_code?: unknown }} */ (answer).registration_code;
       if (typeof code !== 'string') throw new Error('the box sent no registration code');
-      notifier.say(`On the new phone, open /recover and enter within 10 minutes: ${code}. Then approve here only if the words match the new phone.`);
+      byId('new-phone-words').textContent = code;
+      byId('new-phone').hidden = false;
+      notifier.say('');
     },
     (error) => notifier.failed(error),
   ).catch((error) => notifier.failed(error));
