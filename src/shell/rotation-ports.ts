@@ -3,6 +3,7 @@
 import type { Destination, Redeployer } from '../ports/destination.ts';
 import type { Issuer, KeyLister, Verifier } from '../ports/issuer.ts';
 import type { Lent, PlatformId } from '../ports/types.ts';
+import type { Vault } from '../ports/vault.ts';
 import type { Step } from '../pure/rotation-machine.ts';
 
 /**
@@ -35,6 +36,15 @@ export function setterOf(issuer: Issuer | undefined): SetValue | undefined {
   const set = issuer?.set;
   if (issuer === undefined || set === undefined || issuer.capabilities().set !== 'api') return undefined;
   return (value, at, master) => set.call(issuer, value, at, master);
+}
+
+/** A generation the vault no longer lends (retired, never stored) as a result: the caller decides what its absence means. */
+export function tryLend(vault: Pick<Vault, 'lend'>, keyref: string, gen: number): { readonly ok: true; readonly value: Lent } | { readonly ok: false } {
+  try {
+    return { ok: true, value: vault.lend(keyref, gen) };
+  } catch {
+    return { ok: false };
+  }
 }
 
 export interface DestinationKit {

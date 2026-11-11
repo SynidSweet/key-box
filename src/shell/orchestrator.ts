@@ -18,7 +18,7 @@ import { admitDestination, mintValue } from '../pure/class.ts';
 import { intentName, nextStep, retryDelayMs } from '../pure/rotation-machine.ts';
 import type { Step } from '../pure/rotation-machine.ts';
 import { revokeAndConfirm } from './revoke-confirm.ts';
-import { isPasteSource, overlapOf, setterOf } from './rotation-ports.ts';
+import { isPasteSource, overlapOf, setterOf, tryLend } from './rotation-ports.ts';
 import type { DestinationKit, PlatformKit, PlatformSource, Point } from './rotation-ports.ts';
 import type { DestinationRow, KeyHead, Receipt, RotationStore, RunOrigin, RunRow } from './rotation-store.ts';
 
@@ -280,16 +280,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     }
   }
 
-  /** A generation the vault no longer lends (retired, never stored) as a result: the caller decides what its absence means. */
-  const tryLend = (keyref: string, gen: number): { readonly ok: true; readonly value: Lent } | { readonly ok: false } => {
-    try {
-      return { ok: true, value: deps.vault.lend(keyref, gen) };
-    } catch {
-      return { ok: false };
-    }
-  };
   const lendOrUndefined = (keyref: string, gen: number): Lent | undefined => {
-    const lent = tryLend(keyref, gen);
+    const lent = tryLend(deps.vault, keyref, gen);
     return lent.ok ? lent.value : undefined;
   };
 

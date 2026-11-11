@@ -6,6 +6,7 @@ import type { PlatformEntry } from '../ports/platform.ts';
 import type { Lent } from '../ports/types.ts';
 import type { Vault } from '../ports/vault.ts';
 import { ApiError } from '../pure/errors.ts';
+import { tryLend } from './rotation-ports.ts';
 import type { PlatformKit, PlatformSource } from './rotation-ports.ts';
 
 export interface PlatformSourceDeps {
@@ -46,13 +47,4 @@ export function createPlatformSource(deps: PlatformSourceDeps): PlatformSource {
       return only.value;
     },
   };
-}
-
-/** A generation the vault cannot lend (retired, never stored) as a result: such a row is not a master that can serve. */
-function tryLend(vault: Pick<Vault, 'lend'>, keyref: string, gen: number): { readonly ok: true; readonly value: Lent } | { readonly ok: false } {
-  try {
-    return { ok: true, value: vault.lend(keyref, gen) };
-  } catch {
-    return { ok: false };
-  }
 }

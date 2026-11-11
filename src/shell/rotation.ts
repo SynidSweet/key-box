@@ -1,6 +1,6 @@
 // The rotation unit as one wiring: the orchestrator, reconcile, the paste flow, the key and delivery routes, the executors of the two kinds this
 // unit owns (`rotate_key`, `add_key`) and the scheduler's tick. main-core hands it the platform registry when the adapter units build one.
-import type { Audit } from '../ports/audit.ts';
+import type { Audit, AuditEvent } from '../ports/audit.ts';
 import type { Clock, Scheduler } from '../ports/clock.ts';
 import type { Push } from '../ports/push.ts';
 import type { Random } from '../ports/random.ts';
@@ -132,11 +132,10 @@ export function openRotation(deps: RotationDeps): Rotation {
     try {
       work();
     } catch {
-      auditFault(subject, code);
+      deps.audit.append(faultOf(subject, code));
     }
   };
-  const auditFault = (subject: string, code: ScheduleFault): void =>
-    deps.audit.append({ action: 'rotation.drive_failed', subject, at: deps.clock.now(), detail: { run_id: PART_OF[code], code } });
+  const faultOf = (subject: string, code: ScheduleFault): AuditEvent => ({ action: 'rotation.drive_failed', subject, at: deps.clock.now(), detail: { run_id: PART_OF[code], code } });
 
   const tickKey = (key: KeyHead, now: number, due: ReadonlyMap<string, number>, waiting: ReadonlySet<string>): void => {
     const slot = slotOf({ kind: 'rotate_key', keyref: key.keyref });
@@ -178,7 +177,7 @@ export function openRotation(deps: RotationDeps): Rotation {
     try {
       await work();
     } catch {
-      auditFault(subject, code);
+      deps.audit.append(faultOf(subject, code));
     }
   };
 

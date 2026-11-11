@@ -117,7 +117,7 @@ export interface StartedCore {
    * for (review N4): every run is persisted step by step, so the process may end there and the next start resumes it.
    */
   stop(): Promise<void>;
-  /** Resolves once a stop has closed the stores, which happens when rotation's work in flight has ended (a failure to close is journaled). */
+  /** Resolves once a stop has closed the stores, which happens when rotation's work in flight has ended; rejects when closing failed. */
   readonly closed: Promise<void>;
 }
 
@@ -232,19 +232,14 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   // Last, once both sockets listen (review N4): resume, reconcile and the first tick run in the background, so a port that hangs holds back
   // neither the start nor the signal handlers main() sets next; the hourly tick and the daily reconcile are armed now.
   const stopRotation = rotation?.run() ?? ((): void => undefined);
-  let markClosed = (): void => undefined;
-  const closed = new Promise<void>((resolve) => {
-    markClosed = resolve;
+  let settleClosed: { resolve(): void; reject(error: unknown): void } | undefined;
+  const closed = new Promise<void>((resolve, reject) => {
+    settleClosed = { resolve, reject };
   });
   const closeStores = async (): Promise<void> => {
-    try {
-      await rotation?.idle();
-      privateStore.close();
-      parts.close();
-    } catch {
-      journal('close_failed');
-    }
-    markClosed();
+    await rotation?.idle();
+    privateStore.close();
+    parts.close();
   };
   const shutDown = async (): Promise<void> => {
     cancelSweep();
@@ -254,7 +249,11 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
     shares.stop();
     stopRotation();
     await Promise.all([server.stop(), lend.stop()]);
-    void closeStores();
+    // A failure to close is passed on through `closed`, never swallowed.
+    void closeStores().then(
+      () => settleClosed?.resolve(),
+      (error: unknown) => settleClosed?.reject(error),
+    );
   };
   let stopping: Promise<void> | undefined;
   return { routes, stop: () => (stopping ??= shutDown()), closed };
