@@ -62,17 +62,20 @@ interface ClientData {
   readonly topOrigin: unknown;
 }
 
-function clientData(bytes: Uint8Array): ClientData | undefined {
+const MALFORMED = { malformed: true } as const;
+
+/** The members of clientDataJSON the check reads, or MALFORMED for bytes that are not a UTF-8 JSON object holding them. */
+function clientData(bytes: Uint8Array): ClientData | typeof MALFORMED {
   let parsed: unknown;
   try {
     parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
   } catch {
-    return undefined;
+    return MALFORMED;
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return MALFORMED;
   const o = parsed as Record<string, unknown>;
   const { type, challenge, origin } = o;
-  if (typeof type !== 'string' || typeof challenge !== 'string' || typeof origin !== 'string') return undefined;
+  if (typeof type !== 'string' || typeof challenge !== 'string' || typeof origin !== 'string') return MALFORMED;
   return { type, challenge, origin, crossOrigin: o['crossOrigin'], topOrigin: o['topOrigin'] };
 }
 
@@ -87,7 +90,7 @@ export function verifyAssertion(key: Es256PublicKey, assertion: Assertion, expec
   const flags = data[32] ?? 0;
   if ((flags & (FLAG_AT | FLAG_ED)) !== 0) return fail('malformed');
   const client = clientData(assertion.clientDataJSON);
-  if (client === undefined) return fail('malformed');
+  if ('malformed' in client) return fail('malformed');
   if (client.type !== 'webauthn.get') return fail('type');
   if (client.challenge !== Buffer.from(expect.challenge).toString('base64url')) return fail('challenge');
   if (client.origin !== expect.origin) return fail('origin');
