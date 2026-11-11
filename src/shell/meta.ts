@@ -116,6 +116,8 @@ export function createMetaStore(db: DatabaseSync, clock: Clock, hub: EventSignal
   const keyChanged = (keyref: string): void => void insertEvent(db, clock.now(), 'key.changed', { keyref });
 
   return {
+    epoch: () => (db.prepare('SELECT epoch FROM box_info').get() as { epoch: string }).epoch,
+
     snapshot: () => inReadTransaction(db, () => readSnapshot(db)),
 
     putKey(key: KeyRow): void {

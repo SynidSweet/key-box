@@ -170,7 +170,7 @@ export function parseEventData<K extends EventKind>(kind: K, data: unknown): Par
 
 // --- audit (KBOX-50): a closed detail object per action ---------------------------------------------------------------
 
-export const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'] as const;
+export const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'OTHER'] as const;
 
 /** The actions the box writes. A unit that writes a new action adds its closed detail here. */
 export const AUDIT_SCHEMAS = {

@@ -13,4 +13,6 @@ export { tempDir, tempDirSync } from './temp.ts';
 export { runNode, spawnNode } from './proc.ts';
 export type { NodeRun } from './proc.ts';
 export { bytesOf, lent } from './lent.ts';
-export { settle } from './settle.ts';
+export { settle, waitUntil } from './settle.ts';
+export { startCore } from './core.ts';
+export type { CallOptions, CoreOptions, RunningCore } from './core.ts';
