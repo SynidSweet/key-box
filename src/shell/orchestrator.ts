@@ -259,7 +259,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     try {
       await work();
       return { ok: true };
-    } catch {
+    } catch (error: unknown) {
+      // The process stopping (a test) is not a failed step: the drive ends there.
+      if (error instanceof Stopped) throw error;
       auditStepFailed(run, stepName, code);
       return { ok: false, code };
     }
@@ -362,6 +364,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     store.intendPush(run.runId, PLATFORM_SET, head.platform);
     const taken = await attempt(run, 'issuing', () => set(value, info.location, deps.master(head.platform)), 'set_failed');
     if (!taken.ok) return fail(run, 'issuing', 'set_failed');
+    await point('taken');
     store.putReceipt(run.runId, PLATFORM_SET, head.platform, { pushed: true });
     deps.audit.append({ action: 'key.issued', subject: run.keyref, at: now() });
     return advance(run, 'issuing');
@@ -443,12 +446,14 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       if (kit?.redeployer === undefined || !kit.destination.properties().needsRedeploy) continue;
       const redeployer = kit.redeployer;
       const target = { kind: kit.destination.kind, id: row.target };
+      // The intent first (review N1): from here the destination may run the new value, whether the redeploy answers, throws or the process dies.
+      store.intendRedeploy(run.runId, row.kind, row.target);
       const ready = await attempt(
         run,
         'redeploying',
         async () => {
           const ref = await redeployer.redeploy(target, master);
-          store.putReceipt(run.runId, row.kind, row.target, { redeployed: true });
+          await point('redeployed');
           if ((await redeployer.ready(ref)) !== 'ready') throw new RangeError('deploy failed');
         },
         'redeploy_failed',
@@ -577,7 +582,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     const dk = deps.destination(receipt.kind);
     if (dk === undefined) return false;
     const target = { kind: dk.destination.kind, id: receipt.target };
-    if (run.genOld === 0) return (await attempt(run, 'rollback', () => dk.destination.remove(target, head.name, master), 'remove_refused')).ok;
+    if (run.genOld === 0) {
+      // The receipt is the removal's intent: it stays until the run ends, so a removal that threw or a crash after it is removed again.
+      const removed = (await attempt(run, 'rollback', () => dk.destination.remove(target, head.name, master), 'remove_refused')).ok;
+      if (removed) await point('removed');
+      return removed;
+    }
     if (old === undefined) return false;
     const back = await attempt(
       run,
@@ -585,7 +595,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       async () => {
         // Only an applied push puts the old value back; a refusal or a timeout leaves the destination possibly holding the new one.
         if ((await dk.destination.push(target, head.name, old, master)).outcome !== 'applied') throw new RangeError('re-push not applied');
-        if (receipt.redeployed && dk.redeployer !== undefined) {
+        // Wherever a redeploy was intended, a deploy may run the new value: the old one is deployed and ready before the new key is revoked.
+        if (receipt.redeployIntended && dk.redeployer !== undefined) {
           const ref = await dk.redeployer.redeploy(target, master);
           if ((await dk.redeployer.ready(ref)) !== 'ready') throw new RangeError('deploy failed');
         }

@@ -44,9 +44,11 @@ export interface DestinationKit {
 
 /**
  * Where the process may be stopped in a test: after a key is created and before it is stored (`issued`), after it is stored and before the
- * step is persisted (`stored`), after a push and before its receipt (`pushed`), after each receipt, after each step is persisted.
+ * step is persisted (`stored`), after a push and before its receipt (`pushed`), after each receipt, after an overlap:false platform took the
+ * new value and before its receipt (`taken`), after a redeploy started and before it is ready (`redeployed`), after a rollback removed the
+ * new value from a destination (`removed`), after each step is persisted.
  */
-export type Point = 'issued' | 'stored' | 'pushed' | 'receipt' | Step;
+export type Point = 'issued' | 'stored' | 'pushed' | 'receipt' | 'taken' | 'redeployed' | 'removed' | Step;
 
 export interface PlatformSource {
   /** The adapters of a platform id, or undefined when none is registered. */

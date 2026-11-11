@@ -1,6 +1,7 @@
 // A real core store (meta.db and the file vault in a temp directory), a TimedClock, one fake platform with faults planted through its ports,
 // two recording destinations and a recording push: the world the rotation tests run in. `build()` makes a fresh orchestrator over the
 // same stores, which is how a test plays "the process died and started again". Run directly, this file does nothing.
+import assert from 'node:assert/strict';
 import type { TestContext } from 'node:test';
 import { join } from 'node:path';
 import type { Issuer, IssuerCapabilities, IssueRequest, IssuedKey, KeyListing, KeyLister, PlatformKeyInfo, Verifier } from '../../src/ports/issuer.ts';
@@ -20,6 +21,7 @@ import type { CoreParts } from '../../src/shell/core.ts';
 import { FakePlatformWorld } from '../fakes/platform.ts';
 import { FakePush } from '../fakes/push.ts';
 import { RecordingDestination, RecordingRedeployer } from '../fakes/recording-destination.ts';
+import type { DestinationCall } from '../fakes/recording-destination.ts';
 import { TimedClock, bytesOf, lent, seededRandom, tempDir } from '../kit/index.ts';
 
 export const HOUR = 3600_000;
@@ -41,6 +43,8 @@ export interface Faults {
   listerAt: KeyLocation | undefined;
   /** The lister's listing says it is not complete (one page of several). */
   listingIncomplete: boolean;
+  /** The next `set` (overlap:false) changes the platform's credential and then answers an error. */
+  setThenThrow: boolean;
 }
 
 export interface WorldOptions {
@@ -105,9 +109,27 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
   const push = new FakePush();
   const platform = new FakePlatformWorld(random);
   const trace: string[] = [];
-  const faults: Faults = { issue: false, verifyAt: undefined, revoke404: false, vaultPut: false, master: false, listerAt: undefined, listingIncomplete: false };
+  const faults: Faults = { issue: false, verifyAt: undefined, revoke404: false, vaultPut: false, master: false, listerAt: undefined, listingIncomplete: false, setThenThrow: false };
   const regionOf = new Map<PlatformKeyId, string>();
-  const recording = { a: new RecordingDestination(trace), redeployer: new RecordingRedeployer(trace) };
+  const destination = new RecordingDestination(trace);
+  const recording = { a: destination, redeployer: new RecordingRedeployer(trace, destination) };
+
+  // KBOX-51, KBOX-17 (review N3): every call that may change what a destination or the platform holds or runs is entered only once an open
+  // run's intent receipt for it is written. A call entered without one is recorded here and fails the test that made it.
+  const PLATFORM_SET = 'platform_set';
+  const missingIntent: string[] = [];
+  const intentWritten = (call: DestinationCall | 'set', target: string): boolean =>
+    store.activeRuns().some((run) =>
+      store
+        .receipts(run.runId)
+        .some((r) => (call === 'set' ? r.kind === PLATFORM_SET : r.kind !== PLATFORM_SET && r.target === target) && r.pushed !== 'refused' && (call !== 'redeploy' || r.redeployIntended)),
+    );
+  const requireIntent = (call: DestinationCall | 'set', target: string): void => {
+    if (!intentWritten(call, target)) missingIntent.push(`${call}:${target}`);
+  };
+  recording.a.onEnter(requireIntent);
+  recording.redeployer.onEnter(requireIntent);
+  t.after(() => assert.deepEqual(missingIntent, [], 'every push, redeploy, set and remove was entered with its intent receipt written'));
 
   const settable = options.overlap === false && options.settable !== false;
   const issuer: Issuer = {
@@ -132,8 +154,13 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
       ? {
           set: async (value: Lent, at: KeyLocation, master: Lent): Promise<void> => {
             void at;
+            requireIntent('set', 'fake');
             trace.push('set');
             await platform.set(value, master);
+            if (faults.setThenThrow) {
+              faults.setThenThrow = false;
+              throw new Error('timed out after the platform took the value');
+            }
           },
         }
       : {}),

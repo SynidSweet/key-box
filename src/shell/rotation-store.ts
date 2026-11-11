@@ -63,6 +63,7 @@ const SCHEMA = `
     target TEXT NOT NULL,
     version TEXT,
     pushed INTEGER NOT NULL CHECK (pushed IN (1, 2, 3)),
+    -- 1 once a redeploy's intent is written, before the redeploy is called: the destination may run the new value from then on.
     redeployed INTEGER NOT NULL DEFAULT 0,
     rollback_notified INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (run_id, kind, target)
@@ -180,7 +181,11 @@ export interface Receipt {
    * destination answered that it applied nothing. A rollback undoes `maybe` and `true` and leaves `refused` alone: it holds nothing.
    */
   readonly pushed: 'maybe' | 'refused' | true;
-  readonly redeployed: boolean;
+  /**
+   * The intent of a redeploy was written before it was called (review N1): a deploy may have started and may run the new value, whatever the
+   * redeploy answered. A rollback redeploys the old value wherever this is set, and the new key is not revoked until that deploy is ready.
+   */
+  readonly redeployIntended: boolean;
   readonly rollbackNotified: boolean;
 }
 
@@ -302,8 +307,10 @@ export interface RotationStore {
    * is `maybe` or `true`, may have: a `refused` answer to this push then proves nothing about that one and is not recorded.
    */
   intendPush(runId: string, kind: string, target: string): boolean;
+  /** The intent written BEFORE a redeploy, on the receipt of the push it follows (`internal` when that push's intent is missing). */
+  intendRedeploy(runId: string, kind: string, target: string): void;
   /** Patches a receipt whose intent was written (`internal` otherwise). */
-  putReceipt(runId: string, kind: string, target: string, patch: { readonly version?: string; readonly pushed?: true | 'refused'; readonly redeployed?: true; readonly rollbackNotified?: true }): void;
+  putReceipt(runId: string, kind: string, target: string, patch: { readonly version?: string; readonly pushed?: true | 'refused'; readonly rollbackNotified?: true }): void;
   receipts(runId: string): readonly Receipt[];
 
   /** True the first time for an id: one notice per stray key. */
@@ -451,20 +458,24 @@ export function createRotationStore(db: DatabaseSync, clock: Clock, hub: EventSi
         return true;
       });
     },
+    intendRedeploy(runId, kind, target) {
+      write(() => {
+        const changed = db.prepare('UPDATE rotation_receipts SET redeployed = 1 WHERE run_id = ? AND kind = ? AND target = ?').run(runId, kind, target).changes;
+        if (changed === 0) throw new ApiError('internal', 'no_intent_receipt');
+      });
+    },
     putReceipt(runId, kind, target, patch) {
       write(() => {
         const changed = db
-          .prepare(
-            'UPDATE rotation_receipts SET version = coalesce(?, version), pushed = coalesce(?, pushed), redeployed = max(redeployed, ?), rollback_notified = max(rollback_notified, ?) WHERE run_id = ? AND kind = ? AND target = ?',
-          )
-          .run(patch.version ?? null, pushedCode(patch.pushed), patch.redeployed === true ? 1 : 0, patch.rollbackNotified === true ? 1 : 0, runId, kind, target).changes;
+          .prepare('UPDATE rotation_receipts SET version = coalesce(?, version), pushed = coalesce(?, pushed), rollback_notified = max(rollback_notified, ?) WHERE run_id = ? AND kind = ? AND target = ?')
+          .run(patch.version ?? null, pushedCode(patch.pushed), patch.rollbackNotified === true ? 1 : 0, runId, kind, target).changes;
         // A receipt exists only once its intent was written: a patch without one is a fault of the caller, not a row to invent.
         if (changed === 0) throw new ApiError('internal', 'no_intent_receipt');
       });
     },
     receipts: (runId) =>
       (db.prepare('SELECT * FROM rotation_receipts WHERE run_id = ? ORDER BY kind, target').all(runId) as unknown as { run_id: string; kind: string; target: string; version: string | null; pushed: number; redeployed: number; rollback_notified: number }[]).map(
-        (r): Receipt => ({ runId: r.run_id, kind: r.kind, target: r.target, version: r.version, pushed: pushedOf(r.pushed), redeployed: r.redeployed === 1, rollbackNotified: r.rollback_notified === 1 }),
+        (r): Receipt => ({ runId: r.run_id, kind: r.kind, target: r.target, version: r.version, pushed: pushedOf(r.pushed), redeployIntended: r.redeployed === 1, rollbackNotified: r.rollback_notified === 1 }),
       ),
 
     firstOrphanNotice: (id) => db.prepare('INSERT OR IGNORE INTO orphan_notices (platform_key_id) VALUES (?)').run(id).changes === 1,

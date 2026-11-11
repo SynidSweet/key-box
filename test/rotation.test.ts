@@ -395,6 +395,132 @@ test('KBOX-17 a crash between a push and its receipt leaves an intent receipt: a
   assert.equal(w.store.runs().at(-1)?.state, 'failed');
 });
 
+// --- an intent before every redeploy, set and remove (review N1) -----------------------------------------------------------------
+
+/** The value the code deployed at each target runs: a revoked key there is an app that breaks. */
+const runningAt = (w: RotationWorld): (string | undefined)[] => TARGETS.map((t) => w.destinations.redeployer.runningAt(t, NAME));
+/** What happened at one target, and the revokes, in order (KBOX-17: re-push, redeploy where redeployed, then revoke the new key). */
+const callsAt = (w: RotationWorld, target: string): string[] => w.trace.filter((x) => x.endsWith(`:${target}`) || x === 'revoke');
+
+test('KBOX-17 a redeploy that started and then threw is undone: the rollback redeploys the old value there before the new key is revoked', async (t) => {
+  const { w, keyref, oldValue, oldId } = await seeded(t);
+  w.destinations.redeployer.startThenThrow('app-b');
+  w.trace.length = 0;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.deepEqual(runningAt(w), [oldValue, oldValue], 'app-b, whose deploy of the new value started, runs the old value again');
+  assert.deepEqual(callsAt(w, 'app-b'), ['push:app-b', 'redeploy:app-b', 'push:app-b', 'redeploy:app-b', 'revoke'], 'the new key was revoked only after app-b was redeployed with the old value');
+  assert.deepEqual(await w.live(), [oldId]);
+  assert.equal(w.events('rotation.failed').length, 1);
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+});
+
+test('KBOX-17 a crash between a redeploy and its receipt leaves a redeploy intent: a later rollback redeploys the old value there before the new key is revoked', async (t) => {
+  const { w, keyref, oldValue, oldId } = await seeded(t);
+  w.checkpoints.arm('redeployed', 1);
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  assert.equal(w.checkpoints.seen.at(-1), 'redeployed', 'the process died after the first redeploy started and before its result was written');
+  const newValue = await w.valueOf(keyref, 2);
+  assert.equal(w.destinations.redeployer.runningAt('app-a', NAME), newValue, 'app-a runs the new value');
+  w.checkpoints.crashAt = undefined;
+  w.destinations.redeployer.refuseNext('app-a');
+  w.trace.length = 0;
+  w.build();
+  await w.orch.resume();
+  await w.settle(MINUTE);
+  assert.deepEqual(runningAt(w), [oldValue, oldValue], 'app-a, whose redeploy after the restart was refused, was redeployed with the old value by the rollback');
+  assert.deepEqual(callsAt(w, 'app-a'), ['push:app-a', 'redeploy:app-a', 'revoke'], 'the rollback re-pushed and redeployed app-a, then revoked the new key');
+  assert.deepEqual(await w.live(), [oldId]);
+  assert.equal(w.events('rotation.failed').length, 1);
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+});
+
+test('KBOX-17 the new key is not revoked while a destination whose deploy of it started may still run it: a rollback redeploy that fails holds the revoke until it goes through', async (t) => {
+  const { w, keyref, oldValue, oldId } = await seeded(t);
+  w.destinations.redeployer.startThenThrow('app-b');
+  w.destinations.redeployer.failAt('app-b');
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  const newValue = await w.valueOf(keyref, 2);
+  assert.equal(w.destinations.redeployer.runningAt('app-b', NAME), newValue, 'app-b runs the new value: its rollback deploy failed');
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'rolling_back');
+  assert.equal((await w.live()).length, 2, 'the new key is not revoked while app-b runs it');
+  assert.deepEqual(w.events('rotation.failed').map((e) => e.data['step']), ['redeploying', 'rollback_vercel_env'], 'the failure and one card named for app-b');
+  w.destinations.redeployer.allow('app-b');
+  w.clock.advance(MINUTE);
+  await w.orch.idle();
+  assert.deepEqual(runningAt(w), [oldValue, oldValue]);
+  assert.deepEqual(await w.live(), [oldId]);
+  assert.equal(w.events('rotation.failed').length, 2, 'the retry files no further card');
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+});
+
+test('KBOX-17 overlap:false: a set that took the new value and then threw is undone, the platform takes the old value again', async (t) => {
+  const { w, keyref, oldValue } = await seeded(t, { overlap: false });
+  w.faults.setThenThrow = true;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.equal(await platformTakes(w, oldValue), 'ok', 'the platform, which holds one credential, takes the old value again');
+  assert.deepEqual(w.trace.filter((x) => x === 'set'), ['set', 'set'], 'the new value set, then the old one set back');
+  assert.deepEqual(heldBy(w), [oldValue, oldValue]);
+  assert.equal(w.events('rotation.failed').length, 1);
+  assert.deepEqual([w.store.runs().at(-1)?.state, genOf(w, keyref, 2)?.status, genOf(w, keyref, 1)?.status], ['failed', 'failed', 'current']);
+});
+
+test('KBOX-17 overlap:false: a crash between the set and its receipt leaves the set intent: a later failure sets the old value back at the platform', async (t) => {
+  const { w, keyref, oldValue } = await seeded(t, { overlap: false });
+  w.checkpoints.arm('taken', 1);
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  assert.equal(w.checkpoints.seen.at(-1), 'taken', 'the process died after the platform took the new value and before its receipt');
+  assert.equal(await platformTakes(w, oldValue), 'rejected', 'the platform holds only the new value');
+  w.checkpoints.crashAt = undefined;
+  w.destinations.a.refuse('app-a');
+  w.build();
+  await w.orch.resume();
+  await w.settle(MINUTE);
+  assert.equal(await platformTakes(w, oldValue), 'ok', 'the rollback set the old value back');
+  assert.deepEqual(heldBy(w), [oldValue, oldValue]);
+  assert.equal(w.events('rotation.failed').length, 1);
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+});
+
+test('KBOX-17 a create run whose removal took the value away and then threw tries again, and revokes the new key only once the removal answers', async (t) => {
+  const w = await rotationWorld(t);
+  w.destinations.a.refuse('app-b');
+  w.destinations.a.removeThenThrow('app-a');
+  const key = w.newKey();
+  await w.orch.create(key);
+  assert.equal(w.destinations.a.heldAt('app-a', NAME), undefined, 'the removal took the value away');
+  assert.equal(w.store.activeRunOf(key.keyref)?.state, 'rolling_back', 'an answer that failed proves nothing: the run holds');
+  assert.equal((await w.live()).length, 1, 'the new key is not revoked on an unanswered removal');
+  w.clock.advance(MINUTE);
+  await w.orch.idle();
+  assert.deepEqual(await w.live(), [], 'the removal answered, so the new key is revoked');
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+  assert.deepEqual(w.events('rotation.failed').map((e) => e.data['reason_code']), ['push_failed', 'remove_refused']);
+});
+
+test('KBOX-17 a create run that crashed between a removal and its result removes again on resume, then revokes the new key: one card', async (t) => {
+  const w = await rotationWorld(t);
+  w.destinations.a.refuse('app-b');
+  w.checkpoints.arm('removed', 1);
+  const key = w.newKey();
+  await w.orch.create(key);
+  assert.equal(w.checkpoints.seen.at(-1), 'removed', 'the process died after the removal and before the run went on');
+  assert.equal((await w.live()).length, 1, 'the new key is still live');
+  w.checkpoints.crashAt = undefined;
+  w.trace.length = 0;
+  w.build();
+  await w.orch.resume();
+  assert.deepEqual(callsAt(w, 'app-a'), ['remove:app-a', 'revoke'], 'removed again before the revoke');
+  assert.deepEqual(await w.live(), []);
+  assert.equal(w.destinations.a.heldAt('app-a', NAME), undefined);
+  assert.equal(w.events('rotation.failed').length, 1);
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+});
+
 // --- deliveries to the workstation (review B2, M4) -----------------------------------------------------------------------------
 
 const WORKSTATION = { kind: 'workstation', target: 'workstation', readable_by: 'api' } as const;
