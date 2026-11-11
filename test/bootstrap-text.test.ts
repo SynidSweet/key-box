@@ -4,7 +4,7 @@
 // and reported by the builder, never run here.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
@@ -32,21 +32,20 @@ test('KBOX-1 the bootstrap removes the ssh packages, masks sshd, removes the def
   assert.match(cloudInit, /^ssh_pwauth: false$/m);
 });
 
-test('KBOX-1 the bootstrap disables the Run Command plugin (its exact command UNVERIFIED) and leaves the monitoring plugin on', () => {
-  const lines = cloudInit.split('\n');
-  const runCommand = lines.filter((l) => /Run Command/i.test(l) || /runcommand/i.test(l));
-  assert.ok(runCommand.some((l) => /disable/i.test(l)), 'a line disables the Run Command plugin');
-  assert.ok(runCommand.some((l) => /UNVERIFIED/.test(l)), 'the command is marked UNVERIFIED');
-  assert.equal(lines.some((l) => /monitoring/i.test(l) && /disable|stop|mask/i.test(l) && !/^\s*#/.test(l)), false, 'nothing disables monitoring');
+test('KBOX-1 the bootstrap checks whether the Run Command plugin could act as root or is running, runs no command to disable it, and leaves the monitoring plugin on', () => {
+  const lines = cloudInit.split('\n').filter((l) => !/^\s*#/.test(l));
+  assert.equal(lines.some((l) => /oci-cloud-agent-plugin/.test(l)), false, 'no on-box command that disables a plugin is run (none is documented)');
+  assert.ok(lines.some((l) => /ocarun/.test(l)) && lines.some((l) => /etc\/sudoers/.test(l)), 'the check looks for the ocarun user in sudoers');
+  assert.ok(lines.some((l) => /\/proc\//.test(l)), 'the check reads the running processes\' command lines');
+  assert.ok(lines.some((l) => /bootstrap-facts\.json/.test(l)), 'the check records what it looked at');
+  assert.equal(lines.some((l) => /monitoring/i.test(l) && /disable|stop|mask/i.test(l)), false, 'nothing disables monitoring');
 });
 
-/** The runcmd item that disables the Run Command plugin, as the bootstrap's script holds it (a one-line item or a block). */
-function runCommandItem(): string {
+/** The runcmd item (a `- |` block) whose script holds `marker`, as the bootstrap's script holds it. */
+function runcmdItem(marker: RegExp): string {
   const lines = cloudInit.split('\n');
-  const at = lines.findIndex((l) => /oci-cloud-agent-plugin disable/.test(l) && !/^\s*#/.test(l));
-  assert.ok(at >= 0, 'the bootstrap has the disable line');
-  const one = /^ {2}- (?!\|)(.*)$/.exec(lines[at] ?? '');
-  if (one?.[1] !== undefined) return one[1];
+  const at = lines.findIndex((l) => marker.test(l) && !/^\s*#/.test(l));
+  assert.ok(at >= 0, `the bootstrap has an item with ${marker.source}`);
   let start = at;
   while (start > 0 && !/^ {2}- \|$/.test(lines[start] ?? '')) start -= 1;
   const body: string[] = [];
@@ -57,26 +56,213 @@ function runCommandItem(): string {
   return body.join('\n');
 }
 
-/** Runs the item in a shell whose PATH holds a plugin tool that exits `status` and a logger that records its arguments. */
-async function runDisable(t: TestContext, status: number): Promise<{ readonly run: ReturnType<typeof runShell>; readonly logged: string }> {
-  const dir = await tempDir(t);
-  mkdirSync(join(dir, 'bin'));
-  writeFileSync(join(dir, 'bin', 'oci-cloud-agent-plugin'), `#!/bin/sh\nexit ${status}\n`, { mode: 0o755 });
-  writeFileSync(join(dir, 'bin', 'logger'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${join(dir, 'logged')}"\n`, { mode: 0o755 });
-  const run = runShell(`PATH="${join(dir, 'bin')}:$PATH"\n${runCommandItem()}\necho the-next-step-ran`, dir);
-  const logged = existsSync(join(dir, 'logged')) ? readFileSync(join(dir, 'logged'), 'utf8') : '';
-  return { run, logged };
+const AGENT_DIRS = ['/snap/oracle-cloud-agent', '/var/snap/oracle-cloud-agent', '/var/lib/oracle-cloud-agent', '/var/log/oracle-cloud-agent', '/usr/lib/oracle-cloud-agent', '/etc/oracle-cloud-agent'] as const;
+const FACTS_PATH = '/var/lib/keybox/bootstrap-facts.json';
+
+interface CheckWorld {
+  readonly run: ReturnType<typeof runShell>;
+  readonly logged: string;
+  readonly root: string;
 }
 
-test('KBOX-1 a Run Command disable that fails stops the bootstrap loudly: an error in the journal and on the console, a failed result, nothing after it runs', async (t) => {
-  const failed = await runDisable(t, 3);
-  assert.notEqual(failed.run.status, 0, 'the bootstrap fails (cloud-init records the error)');
-  assert.doesNotMatch(failed.run.stdout, /the-next-step-ran/, 'nothing after it is installed');
-  assert.match(failed.logged, /^-s -p user\.err -t keybox-bootstrap .*Run Command/m, 'an error in the journal, echoed to the console');
-  const done = await runDisable(t, 0);
-  assert.equal(done.run.status, 0, done.run.stderr);
-  assert.match(done.run.stdout, /the-next-step-ran/, 'control: a disable that works goes on');
-  assert.equal(done.logged, '', 'control: nothing is reported');
+interface Fixture {
+  /** Paths under the fixture root; a trailing `/` makes a directory, otherwise an empty file. */
+  readonly paths?: readonly string[];
+  /** File contents under the fixture root. */
+  readonly files?: Readonly<Record<string, string>>;
+  /** Command lines of running processes, as /proc/<pid>/cmdline holds them (NUL between words). */
+  readonly processes?: readonly (readonly string[])[];
+}
+
+/** Lays a fixture tree out under `root` and gives `bin` a logger that records its arguments. Returns the root. */
+async function fixtureTree(t: TestContext, fixture: Fixture): Promise<{ readonly dir: string; readonly root: string }> {
+  const dir = await tempDir(t);
+  const root = join(dir, 'root');
+  mkdirSync(join(dir, 'bin'));
+  mkdirSync(root);
+  const put = (path: string, content: string): void => {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), content);
+  };
+  for (const p of fixture.paths ?? []) {
+    if (p.endsWith('/')) mkdirSync(join(root, p), { recursive: true });
+    else put(p, '');
+  }
+  for (const [p, content] of Object.entries(fixture.files ?? {})) put(p, content);
+  for (const [i, words] of (fixture.processes ?? []).entries()) put(`/proc/${100 + i}/cmdline`, `${words.join('\0')}\0`);
+  writeFileSync(join(dir, 'bin', 'logger'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${join(dir, 'logged')}"\n`, { mode: 0o755 });
+  return { dir, root };
+}
+
+/** Runs an item over a fixture tree at `$KB_FS_ROOT` (the items' one test seam: empty on a real box), then `echo the-next-step-ran`. */
+function runItem(item: string, tree: { readonly dir: string; readonly root: string }): CheckWorld {
+  const run = runShell(`PATH="${join(tree.dir, 'bin')}:$PATH"\nKB_FS_ROOT="${tree.root}"\n${item}\necho the-next-step-ran`, tree.dir);
+  const logged = existsSync(join(tree.dir, 'logged')) ? readFileSync(join(tree.dir, 'logged'), 'utf8') : '';
+  return { run, logged, root: tree.root };
+}
+
+const runCheck = async (t: TestContext, fixture: Fixture): Promise<CheckWorld> => runItem(runcmdItem(/bootstrap-facts\.json/), await fixtureTree(t, fixture));
+
+interface Facts {
+  readonly directories: readonly { readonly path: string; readonly names: readonly string[] }[];
+  readonly found: { readonly sudoers: readonly string[]; readonly processes: readonly string[] };
+}
+const factsOf = (w: CheckWorld): Facts => JSON.parse(readFileSync(join(w.root, FACTS_PATH), 'utf8')) as Facts;
+
+test('KBOX-1 with no sudoers grant and no running Run Command the check goes on even though the plugin files are there, reports nothing, and writes the facts 0644: each searched directory that exists with the names directly under it', async (t) => {
+  const w = await runCheck(t, {
+    paths: ['/snap/oracle-cloud-agent/current/plugins/runcommand/', '/var/log/oracle-cloud-agent/agent.log', '/etc/oracle-cloud-agent/'],
+    files: { '/etc/sudoers': 'root ALL=(ALL:ALL) ALL\n# ocarun ALL=(ALL) NOPASSWD:ALL\n', '/etc/sudoers.d/90-cloud-init-users': 'ubuntu ALL=(ALL) NOPASSWD:ALL\n' },
+    processes: [['/sbin/init'], ['/usr/bin/oracle-cloud-agent']],
+  });
+  assert.equal(w.run.status, 0, w.run.stderr);
+  assert.match(w.run.stdout, /the-next-step-ran/);
+  assert.equal(w.logged, '', 'nothing is reported: files are facts, not a refusal reason');
+  assert.deepEqual(factsOf(w), {
+    directories: [
+      { path: '/snap/oracle-cloud-agent', names: ['current'] },
+      { path: '/var/log/oracle-cloud-agent', names: ['agent.log'] },
+      { path: '/etc/oracle-cloud-agent', names: [] },
+    ],
+    found: { sudoers: [], processes: [] },
+  });
+  assert.equal(statSync(join(w.root, FACTS_PATH)).mode & 0o7777, 0o644);
+});
+
+test('KBOX-1 a sudoers line naming ocarun, in /etc/sudoers or any /etc/sudoers.d file, stops the bootstrap loudly after the facts are written: error in the journal and on the console, a failed result, nothing after it runs', async (t) => {
+  const grants: readonly (readonly [string, string])[] = [
+    ['/etc/sudoers', 'root ALL=(ALL:ALL) ALL\nocarun ALL=(ALL) NOPASSWD:ALL\n'],
+    ['/etc/sudoers.d/ocarun', 'ocarun ALL=(ALL) NOPASSWD: ALL\n'],
+    ['/etc/sudoers.d/90-agent', 'Defaults:ocarun !requiretty\n'],
+    ['/etc/sudoers.d/91-agent', '  User_Alias PLUGINS = ubuntu,ocarun\n'],
+  ];
+  for (const [path, line] of grants) {
+    const w = await runCheck(t, { paths: ['/snap/oracle-cloud-agent/'], files: { [path]: line } });
+    assert.notEqual(w.run.status, 0, `${path}: the bootstrap fails (cloud-init records the error)`);
+    assert.doesNotMatch(w.run.stdout, /the-next-step-ran/, `${path}: nothing after it is installed`);
+    assert.match(w.logged, /^-s -p user\.err -t keybox-bootstrap .*Run Command/m, `${path}: an error in the journal, echoed to the console`);
+    assert.deepEqual(factsOf(w).found.sudoers, [path], `${path}: the facts name the file that stopped it`);
+    assert.equal(statSync(join(w.root, FACTS_PATH)).mode & 0o7777, 0o644, `${path}: the failed box still records why`);
+    assert.deepEqual(factsOf(w).directories, [{ path: '/snap/oracle-cloud-agent', names: [] }], `${path}: and what it looked at`);
+  }
+  const near = await runCheck(t, { files: { '/etc/sudoers': 'ocarunner ALL=(ALL) ALL\nmyocarun ALL=(ALL) ALL\nocarun-x ALL=(ALL) ALL\n' } });
+  assert.equal(near.run.status, 0, 'control: other user names that only contain ocarun are not it');
+});
+
+test('KBOX-1 a running process whose command line names runcommand (any case, in any word) stops the bootstrap loudly and is recorded by program only', async (t) => {
+  for (const words of [['runcommand'], ['/snap/oracle-cloud-agent/current/plugins/RunCommand/runcommand', '--serve', '--token=not-recorded']]) {
+    const w = await runCheck(t, { paths: ['/snap/oracle-cloud-agent/'], processes: [['/sbin/init'], words] });
+    assert.notEqual(w.run.status, 0, words.join(' '));
+    assert.doesNotMatch(w.run.stdout, /the-next-step-ran/, words.join(' '));
+    assert.match(w.logged, /^-s -p user\.err -t keybox-bootstrap .*Run Command/m, words.join(' '));
+    assert.deepEqual(factsOf(w).found.processes, [words[0]], 'the program is recorded, its arguments are not');
+  }
+  const arg = await runCheck(t, { processes: [['/usr/bin/vim', 'notes-on-RUNCOMMAND.txt']] });
+  assert.notEqual(arg.run.status, 0, 'a command line that names it is enough');
+});
+
+test('KBOX-1 the facts stay valid JSON for names with quotes, backslashes and non-ASCII, and missing agent directories are not an error', async (t) => {
+  const w = await runCheck(t, { paths: ['/usr/lib/oracle-cloud-agent/a"b\\c', '/usr/lib/oracle-cloud-agent/åäö plugin'] });
+  assert.equal(w.run.status, 0, w.run.stderr);
+  const dirs = factsOf(w).directories;
+  assert.deepEqual(dirs.map((d) => d.path), ['/usr/lib/oracle-cloud-agent']);
+  assert.deepEqual([...(dirs[0]?.names ?? [])].sort(), ['a"b\\c', 'åäö plugin']);
+  for (const dir of AGENT_DIRS) assert.ok(cloudInit.includes(dir), `${dir} is searched`);
+});
+
+// --- KBOX-48: the host firewall opens 443 only -------------------------------------------------------------------------
+
+/** Rules as Oracle's Ubuntu image ships them: the INPUT chain ends in a catch-all REJECT after an ACCEPT for port 22; OUTPUT has its own rules. */
+const oracleRules = (reject: string): string =>
+  [
+    '# CLOUD_IMG: This file was created/modified by the Cloud Image build process',
+    '*filter',
+    ':INPUT ACCEPT [0:0]',
+    ':FORWARD ACCEPT [0:0]',
+    ':OUTPUT ACCEPT [463:55124]',
+    '-A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT',
+    '-A INPUT -p icmp -j ACCEPT',
+    '-A INPUT -i lo -j ACCEPT',
+    '-A INPUT -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT',
+    `-A INPUT -j REJECT --reject-with ${reject}`,
+    `-A FORWARD -j REJECT --reject-with ${reject}`,
+    '-A OUTPUT -d 169.254.0.0/16 -j InstanceServices',
+    '-A InstanceServices -d 169.254.0.2/32 -p tcp -m owner --uid-owner 0 -m tcp --dport 3260 -m comment --comment "See the Oracle-Provided Images section in the Oracle Cloud Infrastructure documentation for security impact of modifying or removing this rule" -j ACCEPT',
+    'COMMIT',
+    '',
+  ].join('\n');
+const opened = (rules: string, reject: string): string =>
+  rules.replace('-A INPUT -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT\n', '').replace(`-A INPUT -j REJECT --reject-with ${reject}`, `-A INPUT -p tcp -m state --state NEW -m tcp --dport 443 -j ACCEPT\n-A INPUT -j REJECT --reject-with ${reject}`);
+
+/** A restore tool that records its arguments and, when not testing, the rules it was given. */
+function fakeRestore(dir: string, name: string): void {
+  writeFileSync(join(dir, 'bin', name), `#!/bin/sh\nprintf '%s %s\\n' "${name}" "$*" >> "${join(dir, 'restore.log')}"\ncase " $* " in *" --test "*) cat > /dev/null;; *) cat > "${join(dir, `applied.${name}`)}";; esac\n`, { mode: 0o755 });
+}
+
+async function runFirewall(t: TestContext, fixture: Fixture): Promise<CheckWorld & { readonly dir: string }> {
+  const tree = await fixtureTree(t, fixture);
+  fakeRestore(tree.dir, 'iptables-restore');
+  fakeRestore(tree.dir, 'ip6tables-restore');
+  return { ...runItem(runcmdItem(/etc\/iptables\/rules\.v/), tree), dir: tree.dir };
+}
+const V4_REJECT = 'icmp-host-prohibited';
+const V6_REJECT = 'icmp6-adm-prohibited';
+
+test('KBOX-48 the firewall step opens TCP 443 before the catch-all REJECT of rules.v4 and rules.v6, drops the port 22 rule, leaves OUTPUT as the image has it, applies the rules and keeps them for the next boot', async (t) => {
+  const w = await runFirewall(t, { files: { '/etc/iptables/rules.v4': oracleRules(V4_REJECT), '/etc/iptables/rules.v6': oracleRules(V6_REJECT) } });
+  assert.equal(w.run.status, 0, w.run.stderr);
+  assert.match(w.run.stdout, /the-next-step-ran/);
+  assert.equal(readFileSync(join(w.root, '/etc/iptables/rules.v4'), 'utf8'), opened(oracleRules(V4_REJECT), V4_REJECT));
+  assert.equal(readFileSync(join(w.root, '/etc/iptables/rules.v6'), 'utf8'), opened(oracleRules(V6_REJECT), V6_REJECT));
+  assert.equal(readFileSync(join(w.dir, 'applied.iptables-restore'), 'utf8'), opened(oracleRules(V4_REJECT), V4_REJECT), 'the live rules are the saved ones');
+  assert.equal(readFileSync(join(w.dir, 'applied.ip6tables-restore'), 'utf8'), opened(oracleRules(V6_REJECT), V6_REJECT));
+  const log = readFileSync(join(w.dir, 'restore.log'), 'utf8');
+  assert.match(log, /^iptables-restore --test$/m, 'the new rules are checked before they replace the old');
+  assert.match(log, /^ip6tables-restore --test$/m);
+  assert.equal(w.logged, '');
+});
+
+test('KBOX-48 the firewall step is safe to run twice, and a chain with no catch-all REJECT still gets the 443 rule, before COMMIT', async (t) => {
+  const once = opened(oracleRules(V4_REJECT), V4_REJECT);
+  const again = await runFirewall(t, { files: { '/etc/iptables/rules.v4': once, '/etc/iptables/rules.v6': opened(oracleRules(V6_REJECT), V6_REJECT) } });
+  assert.equal(again.run.status, 0, again.run.stderr);
+  assert.equal(readFileSync(join(again.root, '/etc/iptables/rules.v4'), 'utf8'), once, 'no second 443 rule');
+  const bare = '*filter\n:INPUT ACCEPT [0:0]\n-A INPUT -i lo -j ACCEPT\nCOMMIT\n*nat\n:PREROUTING ACCEPT [0:0]\nCOMMIT\n';
+  const w = await runFirewall(t, { files: { '/etc/iptables/rules.v4': bare, '/etc/iptables/rules.v6': bare } });
+  assert.equal(w.run.status, 0, w.run.stderr);
+  assert.equal(readFileSync(join(w.root, '/etc/iptables/rules.v4'), 'utf8'), '*filter\n:INPUT ACCEPT [0:0]\n-A INPUT -i lo -j ACCEPT\n-A INPUT -p tcp -m state --state NEW -m tcp --dport 443 -j ACCEPT\nCOMMIT\n*nat\n:PREROUTING ACCEPT [0:0]\nCOMMIT\n', 'only the filter table is touched');
+});
+
+test('KBOX-48 a missing rules file, or rules the restore tool refuses, stops the bootstrap loudly and leaves the saved rules as they were', async (t) => {
+  const missing = await runFirewall(t, { files: { '/etc/iptables/rules.v4': oracleRules(V4_REJECT) } });
+  assert.notEqual(missing.run.status, 0);
+  assert.doesNotMatch(missing.run.stdout, /the-next-step-ran/);
+  assert.match(missing.logged, /^-s -p user\.err -t keybox-bootstrap .*KBOX-48/m);
+  const tree = await fixtureTree(t, { files: { '/etc/iptables/rules.v4': oracleRules(V4_REJECT), '/etc/iptables/rules.v6': oracleRules(V6_REJECT) } });
+  fakeRestore(tree.dir, 'ip6tables-restore');
+  writeFileSync(join(tree.dir, 'bin', 'iptables-restore'), '#!/bin/sh\nexit 2\n', { mode: 0o755 });
+  const refused = runItem(runcmdItem(/etc\/iptables\/rules\.v/), tree);
+  assert.notEqual(refused.run.status, 0);
+  assert.doesNotMatch(refused.run.stdout, /the-next-step-ran/);
+  assert.match(refused.logged, /^-s -p user\.err -t keybox-bootstrap .*KBOX-48/m);
+  assert.equal(readFileSync(join(tree.root, '/etc/iptables/rules.v4'), 'utf8'), oracleRules(V4_REJECT), 'the saved rules are untouched');
+});
+
+test('KBOX-48 the bootstrap text opens 443, never 80, and drops 22', () => {
+  const item = runcmdItem(/etc\/iptables\/rules\.v/).split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+  assert.match(item, /--dport 443 /);
+  assert.doesNotMatch(item, /--dport 80\b|dport 80\b/);
+  assert.match(item, /--dport 22\b/);
+  assert.equal(cloudInit.split('\n').some((l) => !/^\s*#/.test(l) && /dport 80\b/.test(l)), false, 'no step anywhere opens port 80');
+});
+
+test('KBOX-1 core\'s route table holds GET /api/bootstrap-facts for a control token, and the name passes the shell/exec/debug/eval/console check', async (t) => {
+  const w = await approveWorld(t);
+  const updater = createUpdater({ stagingDir: '/nonexistent', resultsDir: '/nonexistent', currentLink: '/nonexistent', propose: (i) => w.core.approvals.propose(i), approvals: () => w.core.approvals, events: w.parts.events });
+  const routes = coreRoutes(w.parts.routes, w.core.routes, updater.routes);
+  const facts = routes.filter((r) => r.path === '/api/bootstrap-facts');
+  assert.deepEqual(facts.map((r) => [r.method, r.scope]), [['GET', 'control']]);
+  assert.equal(/shell|exec|debug|eval|console|cmd|run\b/i.test('/api/bootstrap-facts'), false);
 });
 
 test('KBOX-1 core\'s route table has no shell, exec, debug, eval or console route', async (t) => {
