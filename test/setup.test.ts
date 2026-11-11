@@ -1,11 +1,12 @@
 // KBOX-49: the first approver: the setup code root made, the phone's passkey and device key, and the one COSE map the box parses.
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { softApprover } from './kit/approver.ts';
 import { approveWorld, challenges, newApproverBody, registerAt, setupCodeFrom, wire, RP } from './support/approve-world.ts';
 import { cborEncode } from './kit/cbor.ts';
+import { drive, startNode, tempDir } from './kit/index.ts';
 import { decodeCoseEs256 } from '../src/pure/cose.ts';
 import { FIXED } from '../src/pure/words.ts';
 
@@ -182,4 +183,41 @@ test('KBOX-9 the phone page builds the same approval, view, operation and regist
   same(got.coseKey, cose, 'COSE key');
   assert.equal(client.attestedKey(authData.subarray(0, 60)), undefined, 'truncated authenticator data');
   assert.equal(client.attestedKey(Uint8Array.from([...authData.subarray(0, 32), 0x05, ...authData.subarray(33)])), undefined, 'AT flag clear');
+});
+
+test('KBOX-49 the running core with KB_DOMAIN serves the phone app, and until the root installer is wired its trust port refuses: setup does not complete', async (t) => {
+  const dir = await tempDir(t);
+  const stateDir = join(dir, 'state');
+  mkdirSync(stateDir);
+  const socket = join(dir, 'http.sock');
+  const core = startNode(t, [new URL('../src/main-core.ts', import.meta.url).pathname], dir, { KB_STATE_DIR: stateDir, KB_SOCKET: socket, KB_DOMAIN: 'box.example' });
+  await core.ready('keybox core listening');
+  const driver = drive(socket);
+  const call = (path: string, body?: unknown) =>
+    driver.request({ path, method: body === undefined ? 'GET' : 'POST', headers: { 'x-kb-client-ip': '203.0.113.9', ...(body === undefined ? {} : { 'content-type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  assert.equal((await call('/setup')).status, 200);
+  assert.equal((await call('/app/push-key')).status, 200);
+  const nonceReply = await call('/app/nonce?purpose=register');
+  assert.equal(nonceReply.status, 200, nonceReply.body);
+  const n = Uint8Array.from(Buffer.from((nonceReply.json() as { nonce_b64: string }).nonce_b64, 'base64url'));
+  const owner = softApprover();
+  const reply = await call('/setup', { code: 'abandon '.repeat(11) + 'about', approver: newApproverBody(owner), proof: wire(n, owner.prove(challenges.register(n), RP)), phrase: 'p' });
+  assert.equal(reply.status, 403, reply.body);
+  assert.equal((await call('/setup')).status, 200, 'still no approver');
+  const exit = await core.stop();
+  assert.equal(exit.status, 0, exit.stderr);
+});
+
+test('KBOX-49 the running core without KB_DOMAIN serves the machine API only: no phone route answers', async (t) => {
+  const dir = await tempDir(t);
+  const stateDir = join(dir, 'state');
+  mkdirSync(stateDir);
+  const socket = join(dir, 'http.sock');
+  const core = startNode(t, [new URL('../src/main-core.ts', import.meta.url).pathname], dir, { KB_STATE_DIR: stateDir, KB_SOCKET: socket });
+  await core.ready('keybox core listening');
+  const reply = await drive(socket).request({ path: '/setup', method: 'GET', headers: { 'x-kb-client-ip': '203.0.113.9' } });
+  assert.equal(reply.status, 404);
+  const exit = await core.stop();
+  assert.equal(exit.status, 0, exit.stderr);
+  assert.match(exit.stderr, /keybox core: no_domain/);
 });

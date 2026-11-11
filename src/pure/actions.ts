@@ -8,7 +8,7 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const SCOPE_ITEM = /^[A-Za-z0-9_.:/-]{1,128}$/;
 const HASH = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
-const DOMAIN = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+export const DOMAIN_NAME = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 const SETTING = /^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$/;
 const SETTING_VALUE = /^[\x20-\x7e]{0,256}$/;
 const TARGET = /^[A-Za-z0-9_./:@-]{0,256}$/;
@@ -84,7 +84,7 @@ const FLAT: { readonly [K in ActionKind]: Schema } = {
   remove_destination: { kind: text(/^remove_destination$/), keyref: KEYREF },
   set_allow_rules: { kind: text(/^set_allow_rules$/), keyref: KEYREF },
   set_schedule: { kind: text(/^set_schedule$/), keyref: KEYREF, rotate_every_days: int(1, 3650), grace_hours: int(0, 24 * 365) },
-  vercel_set_domain: { kind: text(/^vercel_set_domain$/), project: text(NAME), op: oneOf('add', 'remove', 'move'), domain: text(DOMAIN), to_project: optional(text(NAME)) },
+  vercel_set_domain: { kind: text(/^vercel_set_domain$/), project: text(NAME), op: oneOf('add', 'remove', 'move'), domain: text(DOMAIN_NAME), to_project: optional(text(NAME)) },
   vercel_set_team_setting: { kind: text(/^vercel_set_team_setting$/), setting: text(SETTING), value: text(SETTING_VALUE) },
   approver_add: { kind: text(/^approver_add$/) },
   approver_remove: { kind: text(/^approver_remove$/), approver_id: text(APPROVER_ID) },
