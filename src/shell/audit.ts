@@ -4,6 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { AuditEvent, AuditLog, AuditRow, ChainVerdict } from '../ports/audit.ts';
 import { canonicalJson } from '../pure/canonical.ts';
 import { WriteRefused } from '../pure/errors.ts';
+import { inTransaction } from './db.ts';
 import { AUDIT_ACTOR, AUDIT_SCHEMAS, NAME, isAuditAction, parseObject, text, int } from '../pure/schemas.ts';
 import type { Schema } from '../pure/schemas.ts';
 
@@ -54,17 +55,12 @@ export function createAuditLog(db: DatabaseSync): AuditLog {
   return {
     append(event: AuditEvent): void {
       const entry = closed(event);
-      db.exec('BEGIN IMMEDIATE');
-      try {
+      inTransaction(db, () => {
         const prev = (last.get() as { hash: string } | undefined)?.hash ?? ZERO_HASH;
         const seq = (nextSeq.get() as { seq: number }).seq;
         const row = { seq, at: entry.at, actor: entry.actor, action: entry.action, ref: entry.ref, detail: entry.detail, prev_hash: prev };
         insert.run(seq, entry.at, entry.actor, entry.action, entry.ref, canonicalJson(entry.detail), prev, hashOf(row));
-        db.exec('COMMIT');
-      } catch (error) {
-        db.exec('ROLLBACK');
-        throw error;
-      }
+      });
     },
 
     read(since: number, limit?: number): { entries: readonly AuditRow[]; more: boolean } {

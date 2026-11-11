@@ -94,3 +94,26 @@ export function openMetaDatabase(path: string, random: Random): DatabaseSync {
   db.prepare("INSERT OR IGNORE INTO box_info (id, release, share_version, epoch) VALUES (1, 'unreleased', 0, ?)").run(hex(random.bytes(4)));
   return db;
 }
+
+/** One write transaction: it takes the write lock at once, so two processes on the file queue behind each other. */
+export function inTransaction<T>(db: DatabaseSync, work: () => T): T {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const result = work();
+    db.exec('COMMIT');
+    return result;
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+/** One read transaction: everything read inside it comes from the same moment of the database. */
+export function inReadTransaction<T>(db: DatabaseSync, work: () => T): T {
+  db.exec('BEGIN');
+  try {
+    return work();
+  } finally {
+    db.exec('COMMIT');
+  }
+}
