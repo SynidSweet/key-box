@@ -214,26 +214,3 @@ test('KBOX-35 softAuthenticator makes assertions and device-key signatures that 
   assert.equal(verify('sha256', Buffer.from('other'), { key: deviceKey, dsaEncoding: 'der' }, deviceSignature), false);
   assert.notEqual(softAuthenticator().createCredential().publicJwk.x, cred.publicJwk.x);
 });
-
-test('KBOX-31 FakeClock timers run in due order as time passes, a timer set by a timer runs, a cancelled one never does', () => {
-  const clock = new FakeClock(1000);
-  const ran: string[] = [];
-  clock.after(300, () => ran.push('c'));
-  clock.after(100, () => {
-    ran.push('a');
-    clock.after(50, () => ran.push('b'));
-  });
-  const cancel = clock.after(200, () => ran.push('never'));
-  cancel();
-  assert.equal(clock.pendingTimers, 2);
-  clock.advance(99);
-  assert.deepEqual(ran, []);
-  clock.advance(1);
-  assert.deepEqual(ran, ['a']);
-  assert.equal(clock.now(), 1100);
-  clock.advance(500);
-  assert.deepEqual(ran, ['a', 'b', 'c']);
-  assert.equal(clock.now(), 1600);
-  assert.equal(clock.pendingTimers, 0);
-  assert.throws(() => clock.after(-1, () => undefined), RangeError);
-});

@@ -1,4 +1,4 @@
-// A started core frame on a unix socket in a temp directory: the same parts main-core wires, a FakeClock, and tokens to call it with.
+// A started core frame on a unix socket in a temp directory: the same parts main-core wires, a TimedClock, and tokens to call it with.
 import { join } from 'node:path';
 import type { TestContext } from 'node:test';
 import type { TokenScope, TokenStore } from '../../src/ports/meta.ts';
@@ -9,7 +9,7 @@ import { createApiServer } from '../../src/shell/http.ts';
 import type { Route } from '../../src/shell/http.ts';
 import { drive } from './drive.ts';
 import type { DriveReply, Driver } from './drive.ts';
-import { FakeClock } from './clock.ts';
+import { TimedClock } from './timed-clock.ts';
 import { seededRandom } from './random.ts';
 import { tempDir } from './temp.ts';
 
@@ -37,7 +37,7 @@ export interface CallOptions {
 export interface RunningCore extends CoreParts {
   readonly stateDir: string;
   readonly socket: string;
-  readonly clock: FakeClock;
+  readonly clock: TimedClock;
   readonly journal: readonly string[];
   readonly driver: Driver;
   /** Enrols a machine and returns its token. */
@@ -48,7 +48,7 @@ export interface RunningCore extends CoreParts {
 
 export async function startCore(t: TestContext, options: CoreOptions = {}): Promise<RunningCore> {
   const stateDir = options.stateDir ?? join(await tempDir(t), 'state');
-  const clock = new FakeClock(1_000_000);
+  const clock = new TimedClock(1_000_000);
   const random = seededRandom(options.seed ?? 7);
   const journal: string[] = [];
   const parts = openCore({ stateDir, clock, scheduler: clock, random });

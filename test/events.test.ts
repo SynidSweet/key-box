@@ -10,16 +10,16 @@ import { EVENT_KINDS, EVENT_SCHEMAS } from '../src/pure/schemas.ts';
 import type { EventRow } from '../src/ports/events.ts';
 import { openMetaDatabase } from '../src/shell/db.ts';
 import { createEventHub, createEventLog, createEventPoller } from '../src/shell/events.ts';
-import { FakeClock, canary, checkProperty, seedFor, seededRandom, settle, startCore, tempDir, waitUntil } from './kit/index.ts';
+import { TimedClock, canary, checkProperty, seedFor, seededRandom, settle, startCore, tempDir, waitUntil } from './kit/index.ts';
 import type { RunningCore } from './kit/index.ts';
 
 const seed = seedFor(process.env);
 
-async function world(t: import('node:test').TestContext): Promise<{ db: DatabaseSync; path: string; clock: FakeClock; log: ReturnType<typeof createEventLog>; poller: ReturnType<typeof createEventPoller> }> {
+async function world(t: import('node:test').TestContext): Promise<{ db: DatabaseSync; path: string; clock: TimedClock; log: ReturnType<typeof createEventLog>; poller: ReturnType<typeof createEventPoller> }> {
   const path = join(await tempDir(t), 'meta.db');
   const db = openMetaDatabase(path, seededRandom(seed));
   t.after(() => db.close());
-  const clock = new FakeClock(5000);
+  const clock = new TimedClock(5000);
   const hub = createEventHub();
   const log = createEventLog(db, clock, hub);
   return { db, path, clock, log, poller: createEventPoller(log, hub, clock, 25_000) };
@@ -43,7 +43,7 @@ test('KBOX-31 sequence numbers are strictly increasing from 1 and continue after
   assert.deepEqual(log.after(3), []);
   const again = openMetaDatabase(path, seededRandom(seed));
   t.after(() => again.close());
-  const log2 = createEventLog(again, new FakeClock(6000), createEventHub());
+  const log2 = createEventLog(again, new TimedClock(6000), createEventHub());
   assert.equal(log2.head(), 3);
   assert.equal(log2.append('key.changed', key(3)), 4);
 });
