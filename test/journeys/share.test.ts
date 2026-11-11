@@ -34,7 +34,7 @@ test('J6 a share file is written at start, announced, fetched over the machine A
   const ordinary = fakeKey(rng, 'OPENAI_API_KEY', 48);
   const w = await shareWorld(t, {
     noStart: true,
-    source: (core) => createMetaShareSource({ meta: core.meta, vault: core.vault, shapeOf: (platform) => SHAPES[platform] }),
+    source: (core) => createMetaShareSource({ meta: core.meta, values: core.share.values, shapeOf: (platform) => SHAPES[platform] }),
   });
   const { core } = w;
   const put = (keyref: string, gen: number, value: string): void => core.vault.put(keyref, gen, Buffer.from(value));
@@ -87,7 +87,7 @@ test('J6 a key with several projects has an entry set per project, and a key wit
   const key = fakeKey(rng, 'OPENAI_ADMIN_KEY', 48);
   const w = await shareWorld(t, {
     noStart: true,
-    source: (core) => createMetaShareSource({ meta: core.meta, vault: core.vault, shapeOf: (platform) => SHAPES[platform] }),
+    source: (core) => createMetaShareSource({ meta: core.meta, values: core.share.values, shapeOf: (platform) => SHAPES[platform] }),
   });
   w.core.vault.put('openai/admin', 1, Buffer.from(key.value));
   w.core.meta.putKey(row('openai/admin', 'openai', 'OPENAI_ADMIN_KEY', 'admin', 1, ['shop', 'site']));
@@ -106,7 +106,7 @@ test('J6 a key with several projects has an entry set per project, and a key wit
 test('J6 a vault value that is not UTF-8 text, or is missing, is not watched and does not stop the file', async (t) => {
   const w = await shareWorld(t, {
     noStart: true,
-    source: (core) => createMetaShareSource({ meta: core.meta, vault: core.vault, shapeOf: (platform) => SHAPES[platform] }),
+    source: (core) => createMetaShareSource({ meta: core.meta, values: core.share.values, shapeOf: (platform) => SHAPES[platform] }),
   });
   w.core.vault.put('openai/binary', 1, Uint8Array.from([0xff, 0xfe, 0x00, 0x80]));
   w.core.meta.putKey(row('openai/binary', 'openai', 'OPENAI_BINARY_KEY', 'admin', 1));

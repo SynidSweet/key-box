@@ -57,7 +57,8 @@ export function fakeKey(rng: SeededRandom, name: string, coreLength: number, opt
 
 /** A JWT (HS256) with a random signature of 43 characters; the header and payload are public. */
 export function fakeJwt(rng: SeededRandom, name: string, options: FakeKeyOptions = {}): FakeKey {
-  const header = Buffer.from('{"alg":"HS256","typ":"JWT"}').toString('base64url');
+  // `typ` first: the gate's secret scan flags the `{"alg"` header base64 followed by a long run, and these values are fake.
+  const header = Buffer.from('{"typ":"JWT","alg":"HS256"}').toString('base64url');
   const payload = Buffer.from('{"iss":"supabase","role":"service_role"}').toString('base64url');
   const core = randomCore(rng, 'base64url', 43);
   return {

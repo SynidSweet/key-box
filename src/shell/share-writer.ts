@@ -1,5 +1,5 @@
 // KBOX-33: the share writer. At start and on every `key.changed` of an admin or master key it reads the store, builds the share
-// file (src/pure/share-build.ts), signs it with a key of its own kept in the vault as a master value, writes it durably (temp
+// file (src/pure/share-build.ts), signs it with a key of its own (a master value in the key store), writes it durably (temp
 // file, fsync, rename, fsync of the directory), and only then announces the version (one `share.version` event). A version is never
 // reused and never lower: it is above the database's last and above any file already on disk. A file the box cannot refresh is
 // served as stale (503), not as an old file that lacks a new generation.
@@ -11,17 +11,13 @@ import type { Clock } from '../ports/clock.ts';
 import type { EventLog, EventSignal } from '../ports/events.ts';
 import type { MetaStore } from '../ports/meta.ts';
 import type { Random } from '../ports/random.ts';
-import type { ShareSource } from '../ports/share.ts';
-import type { Vault } from '../ports/vault.ts';
-import { ApiError, ShareError, VaultError, osErrorCode } from '../pure/errors.ts';
+import type { ShareSigningKey, ShareSource } from '../ports/share.ts';
+import { ApiError, ShareError, osErrorCode } from '../pure/errors.ts';
 import type { FileSummary } from '../pure/share-build.ts';
 import { buildShare, sealEnvelope, summaryOf } from '../pure/share-build.ts';
 import { route } from './http.ts';
 import type { Route } from './http.ts';
 
-/** The signing key: a 32-byte Ed25519 seed, generation 1 of this vault ref, a master value like any other. */
-const SIGNING_REF = 'keybox/share-signing';
-const SIGNING_GEN = 1;
 const SEED_BYTES = 32;
 const FILE_NAME = 'share.json';
 const TEMP_NAME = '.share.json.tmp';
@@ -54,7 +50,8 @@ export interface ShareWriterDeps {
   /** Where `share.json` lives. */
   readonly dir: string;
   readonly meta: ShareMeta;
-  readonly vault: Vault;
+  /** The writer's own Ed25519 seed: made at the first start, reused after. */
+  readonly signingKey: ShareSigningKey;
   readonly source: ShareSource;
   readonly events: EventLog;
   readonly hub: EventSignal;
@@ -132,16 +129,6 @@ function readFileIfAny(dir: string): Buffer | null {
   }
 }
 
-/** The signing seed, or null when the vault has none yet. */
-async function readSeed(vault: Vault): Promise<Uint8Array | null> {
-  try {
-    return await vault.lend(SIGNING_REF, SIGNING_GEN).use((bytes) => Promise.resolve(Uint8Array.from(bytes)));
-  } catch (error) {
-    if (error instanceof VaultError && error.failure === 'unknown_key') return null;
-    throw new ShareError('signing_key_unreadable');
-  }
-}
-
 export function createShareWriter(deps: ShareWriterDeps): ShareWriter {
   let signer: ShareSigner | undefined;
   let current: ShareFile | undefined;
@@ -150,10 +137,10 @@ export function createShareWriter(deps: ShareWriterDeps): ShareWriter {
   let stopListening: (() => void) | undefined;
 
   async function loadSigner(): Promise<ShareSigner> {
-    let seed = await readSeed(deps.vault);
+    let seed = await deps.signingKey.read();
     if (seed === null) {
       seed = deps.random.bytes(SEED_BYTES);
-      deps.vault.put(SIGNING_REF, SIGNING_GEN, seed);
+      deps.signingKey.create(seed);
     }
     if (seed.length !== SEED_BYTES) throw new ShareError('signing_key_unreadable');
     const made = shareSigner(seed);

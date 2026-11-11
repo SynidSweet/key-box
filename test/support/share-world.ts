@@ -69,7 +69,7 @@ export async function shareWorld(t: TestContext, options: ShareWorldOptions = {}
   const writer = createShareWriter({
     dir: shareDir,
     meta: options.meta === undefined ? core.meta : options.meta(core.meta),
-    vault: core.vault,
+    signingKey: core.share.signingKey,
     source: options.source === undefined ? fake : options.source(core),
     events: core.events,
     hub: core.hub,

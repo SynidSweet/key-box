@@ -63,8 +63,8 @@ async function main(): Promise<void> {
   const shares = createShareWriter({
     dir: join(config.stateDir, 'share'),
     meta: parts.meta,
-    vault: parts.vault,
-    source: createMetaShareSource({ meta: parts.meta, vault: parts.vault, shapeOf: noShapeYet }),
+    signingKey: parts.share.signingKey,
+    source: createMetaShareSource({ meta: parts.meta, values: parts.share.values, shapeOf: noShapeYet }),
     events: parts.events,
     hub: parts.hub,
     clock: systemClock,
