@@ -43,7 +43,7 @@ BAD=0
 plant 'Date.now in pure' 'pure core' src/pure/planted.ts $'export const t = Date.now();\n' || BAD=1
 plant 'node:fs in pure' 'pure core' src/pure/planted.ts $'import * as fs from \'node:fs\';\nexport { fs };\n' || BAD=1
 plant 'shell import from ports' 'layers' src/ports/planted.ts $'import { x } from \'../shell/nothing.ts\';\nexport { x };\n' || BAD=1
-plant 'import cycle' 'import cycles' src/pure/planted-a.ts $'import { b } from \'./planted-b.ts\';\nexport const a = b;\n' || BAD=1
+plant 'import cycle' 'import cycles' src/pure/planted.ts $'import { a as me } from \'./planted.ts\';\nexport const a: number = me;\n' || BAD=1
 plant 'silent catch' 'catches' src/shell/planted.ts $'export const f = (g: () => void): void => {\n  try {\n    g();\n  } catch {\n  }\n};\n' || BAD=1
 plant 'package import' 'import specifiers' src/shell/planted.ts $'import x from \'lodash\';\nexport { x };\n' || BAD=1
 plant 'enum' 'erasable syntax' src/shell/planted.ts $'export enum E {\n  A,\n}\n' || BAD=1
