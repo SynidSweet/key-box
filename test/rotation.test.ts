@@ -1024,3 +1024,40 @@ test('KBOX-17 overlap:false: a destination that refuses the re-push after the pl
     ['rollback_vercel_env', 'repush_refused', true],
   ], 'the first card went out before the platform took the old value back; the second after');
 });
+
+// --- a run reconcile cannot settle files one card, once (review N8) ---------------------------------------------------------------
+
+/** An `issuing` run left by a crash between issue and store, whose stray key was removed: only a listing can settle it. */
+async function unsettled(t: TestContext): Promise<{ w: RotationWorld; keyref: string; runId: string }> {
+  const { w, keyref, oldId } = await seeded(t);
+  w.checkpoints.arm('issued');
+  const first = w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  await w.platform.issuer.revoke((await w.live()).find((id) => id !== oldId) ?? '', w.platform.master());
+  w.checkpoints.crashAt = undefined;
+  w.build();
+  return { w, keyref, runId: first.runId };
+}
+
+for (const [why, plant] of [
+  ['an incomplete listing', (w: RotationWorld) => void (w.faults.listingIncomplete = true)],
+  ['a listing that never matches the recorded region', (w: RotationWorld) => void (w.faults.listerAt = { region: 'us' })],
+] as const) {
+  test(`KBOX-51 KBOX-17 a run that reconcile cannot settle (${why}) files exactly one card the first time, with reconcile_unsettled, and never again`, async (t) => {
+    const { w, runId } = await unsettled(t);
+    plant(w);
+    await w.reconciler.run();
+    assert.equal(w.store.run(runId)?.state, 'issuing', 'nothing is restarted while the platform may hold the key');
+    assert.deepEqual(cards(w), [['issuing', 'reconcile_unsettled', true]]);
+    await w.reconciler.run();
+    await w.reconciler.run();
+    assert.equal(cards(w).length, 1, 'later reconciles file no second card');
+  });
+}
+
+test('KBOX-51 a run that reconcile settles at once files no card', async (t) => {
+  const { w, runId } = await unsettled(t);
+  await w.reconciler.run();
+  assert.equal(w.store.run(runId)?.state, 'abandoned');
+  assert.deepEqual(cards(w), []);
+});

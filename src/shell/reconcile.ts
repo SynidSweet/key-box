@@ -88,8 +88,20 @@ export function createReconciler(deps: ReconcileDeps): Reconciler {
         if (keys !== undefined) await sweepPlatform(platform, keys);
       }
       for (const run of store.activeRuns()) {
-        if (run.state === 'issuing' && !orchestrator.isLeased(run.keyref) && (await mayGoAgain(run))) orchestrator.retake(run.runId);
+        if (run.state !== 'issuing' || orchestrator.isLeased(run.keyref)) continue;
+        if (await mayGoAgain(run)) orchestrator.retake(run.runId);
+        else noticeUnsettled(run);
       }
     },
   };
+
+  /**
+   * A run reconcile cannot settle (an incomplete listing, one that never matches the recorded location) would stay open with no word (review
+   * N8): the first time, it files the run's one card, recorded before it goes out, and never again. The old key works meanwhile.
+   */
+  function noticeUnsettled(run: RunRow): void {
+    if (run.failedNotified) return;
+    store.update(run.runId, { failedNotified: true });
+    deps.events.append('rotation.failed', { run_id: run.runId, keyref: run.keyref, step: 'issuing', reason_code: 'reconcile_unsettled', old_key_works: run.genOld > 0 });
+  }
 }
