@@ -69,3 +69,17 @@ export function releaseHash(files: readonly HashedFile[]): string {
 export function fileSha256(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
+
+/** What a release tree changes against another, file by file: a file whose bytes or execute bit differ is changed. */
+export function countChanges(before: readonly HashedFile[], after: readonly HashedFile[]): { readonly added: number; readonly changed: number; readonly removed: number } {
+  const old = new Map(before.map((f) => [f.path, f]));
+  const now = new Set(after.map((f) => f.path));
+  let added = 0;
+  let changed = 0;
+  for (const f of after) {
+    const o = old.get(f.path);
+    if (o === undefined) added += 1;
+    else if (o.sha256 !== f.sha256 || o.executable !== f.executable) changed += 1;
+  }
+  return { added, changed, removed: before.filter((f) => !now.has(f.path)).length };
+}

@@ -9,6 +9,7 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { FIXED } from '../src/pure/words.ts';
 import { parseRuntimeLock } from '../src/pure/runtime-lock.ts';
+import type { PinnedBinary } from '../src/pure/runtime-lock.ts';
 import { coreRoutes } from '../src/main-core.ts';
 import { createUpdater } from '../src/shell/updater.ts';
 import { directives, missingDirectives, runShell, tempDir } from './kit/index.ts';
@@ -88,7 +89,7 @@ test('KBOX-44 the bootstrap checks the very binaries and archives runtime.lock p
   assert.ok(lock, 'runtime.lock parses');
   const zero = '0'.repeat(64);
   for (const [name, env] of [['node', 'NODE'], ['caddy', 'CADDY']] as const) {
-    const pin = lock.find((b) => b.name === name);
+    const pin: PinnedBinary | undefined = lock.find((b) => b.name === name);
     assert.ok(pin !== undefined, name);
     assert.notEqual(pin.sha256, zero, `${name}: a real binary hash`);
     assert.equal(envHash(`${env}_SHA256`), pin.sha256, `${env}_SHA256 is the binary runtime.lock pins`);

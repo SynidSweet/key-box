@@ -129,6 +129,8 @@ export interface WorldOptions {
   readonly routes?: readonly Route[];
   /** Executors of kinds other units own (the update unit's install_update). */
   readonly executors?: Parameters<typeof openApproveCore>[0]['executors'];
+  /** install_update: what the page counts against the running release (the updater's count). */
+  readonly updateChanges?: Parameters<typeof openApproveCore>[0]['updateChanges'];
   /** Root's code directory and boot id, when a journey shares them with a real kb-code process. */
   readonly codes?: { readonly dir: string; readonly bootId: () => string };
 }
@@ -145,7 +147,7 @@ export async function approveWorld(t: TestContext, options: WorldOptions = {}): 
   const journalLines: string[] = [];
   const codes = createCodeRoot({ dir: options.codes?.dir ?? join(dir, 'codes'), sink: (line) => void consoleLines.push(line), random, clock, wordlist: WORDLIST });
   const trust = new FakeTrust(codes, options.codes?.bootId ?? (() => BOOT));
-  const core = openApproveCore({ parts, approverStore: priv, trust, push, clock, random, domain: DOMAIN, wordlist: WORDLIST, vet: options.vet ?? (() => 'ok'), ...(options.executors === undefined ? {} : { executors: options.executors }) });
+  const core = openApproveCore({ parts, approverStore: priv, trust, push, clock, random, domain: DOMAIN, wordlist: WORDLIST, vet: options.vet ?? (() => 'ok'), ...(options.executors === undefined ? {} : { executors: options.executors }), ...(options.updateChanges === undefined ? {} : { updateChanges: options.updateChanges }) });
   const server = createApiServer({ routes: [...parts.routes, ...core.routes, ...(options.routes ?? [])], tokens: core.tokens.tokenStore, audit: parts.audit, random, clock, journal: (code) => void journalLines.push(code) });
   const socket = join(dir, 'http.sock');
   await server.listen(socket);

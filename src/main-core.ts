@@ -106,7 +106,7 @@ async function main(): Promise<void> {
     const push = createPush({ store: privateStore, transport: createHttpPushTransport(), scheduler: systemScheduler, clock: systemClock, random: systemRandom, audit: parts.audit, subject: `https://keys.${config.domain}` });
     const wordlist = parseWordlist(readFileSync(new URL('./data/wordlist.txt', import.meta.url), 'utf8'));
     idle = createIdleWatch({ files: { stat: '/proc/stat', meminfo: '/proc/meminfo', netdev: '/proc/net/dev' }, clock: systemClock, push, linkMbps: linkMbps(), notifier: { notice: journal } });
-    approve = openApproveCore({ parts, approverStore: privateStore, trust, push, clock: systemClock, random: systemRandom, domain: config.domain, wordlist, vet: vetWithoutAdapters, executors: { install_update: updater.executor } });
+    approve = openApproveCore({ parts, approverStore: privateStore, trust, push, clock: systemClock, random: systemRandom, domain: config.domain, wordlist, vet: vetWithoutAdapters, executors: { install_update: updater.executor }, updateChanges: (action) => updater.changes(action) });
   }
   const shares = createShareWriter({
     dir: join(config.stateDir, 'share'),

@@ -155,7 +155,7 @@ async function updateWorld(t: TestContext) {
     approvals: () => must().core.approvals,
     events: { append: (kind, data) => must().parts.events.append(kind, data) },
   });
-  world = await approveWorld(t, { routes: updater.routes, executors: { install_update: updater.executor } });
+  world = await approveWorld(t, { routes: updater.routes, executors: { install_update: updater.executor }, updateChanges: (action) => updater.changes(action) });
   const w = world;
   iw.writeTrust([{ id: w.ownerId, a: w.owner }]);
   const control = w.token('ctl-1', 'control');
@@ -397,4 +397,29 @@ test('KBOX-6 a trust answer core has read is removed by root at its next run', a
   await iw.run();
   assert.deepEqual(readdirSync(iw.paths.results).filter((f) => f.startsWith('trust-') && f !== 'trust-spent'), []);
   assert.deepEqual(stagingNames(iw), []);
+});
+
+// --- the page counts what the update changes against the running release -----------------------------------------------
+
+test('KBOX-6 the install page counts the files added, changed and removed against the running release, and says the binaries stay', async (t) => {
+  const { w, post } = await updateWorld(t);
+  const { approval_id } = (await post(tarOf(BUNDLE))).json() as { approval_id: string };
+  const item = (await w.queue()).find((q) => q.approval_id === approval_id);
+  assert.ok(item);
+  // RELEASE_0 holds runtime.lock, src/main-core.ts ('old core') and README.md; the bundle adds run.sh, changes
+  // src/main-core.ts and drops README.md. bin/ is not in a bundle, so it counts as nothing.
+  assert.ok(item.lines.includes('Files: 1 added, 1 changed, 1 removed.'), item.lines.join('\n'));
+  assert.ok(item.lines.includes('The Node and Caddy binaries stay as they are.'));
+});
+
+test('KBOX-6 the install page names each pinned binary whose hash changes, with its version, hash and official download', async (t) => {
+  const { w, post } = await updateWorld(t);
+  const newNode = Buffer.from('#!/bin/sh\necho fake node 25\n');
+  const bundle = BUNDLE.map((e) => (e.name === 'runtime.lock' ? { ...e, body: lockFor(newNode, CADDY_BIN) } : e));
+  const { approval_id } = (await post(tarOf(bundle))).json() as { approval_id: string };
+  const item = (await w.queue()).find((q) => q.approval_id === approval_id);
+  assert.ok(item);
+  const binaryLines = item.lines.filter((l) => /binary/.test(l));
+  assert.equal(binaryLines.length, 1, item.lines.join('\n'));
+  assert.ok(binaryLines[0]?.includes('node') && binaryLines[0].includes(sha(newNode).slice(0, 12)) && binaryLines[0].includes('https://nodejs.org/dist/'), binaryLines[0]);
 });

@@ -3,13 +3,16 @@
 // is still H0 and writes `<H>.request` for kb-install with the proof the phone sent; core itself writes nothing under
 // /opt/keybox. `settle` reads root's answer and emits `update.state`.
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 import type { EventLog } from '../ports/events.ts';
 import type { Action } from '../pure/actions.ts';
 import { ApiError } from '../pure/errors.ts';
 import { parseRootResult } from '../pure/install-request.ts';
 import type { InstallRequest } from '../pure/install-request.ts';
-import { RELEASE_HASH, RELEASE_LIMITS, fileSha256, releaseHash } from '../pure/release-hash.ts';
+import { RELEASE_HASH, RELEASE_LIMITS, countChanges, fileSha256, releaseHash } from '../pure/release-hash.ts';
+import type { HashedFile } from '../pure/release-hash.ts';
+import { parseRuntimeLock } from '../pure/runtime-lock.ts';
+import type { UpdateChanges } from '../pure/words.ts';
 import { parseTar } from '../pure/tar.ts';
 import type { Requester } from '../pure/slots.ts';
 import type { Approvals, Executor, Proposed } from './approvals.ts';
@@ -43,6 +46,8 @@ export interface Updater {
   running(): string | undefined;
   /** Reads root's answers to the installs it waits for; emits `update.state` and ends each approval. */
   settle(): void;
+  /** What an install changes against the release it replaces, for its page (KBOX-6). */
+  changes(action: Extract<Action, { readonly kind: 'install_update' }>): UpdateChanges | undefined;
 }
 
 export function createUpdater(deps: UpdaterDeps): Updater {
@@ -105,6 +110,37 @@ export function createUpdater(deps: UpdaterDeps): Updater {
     return Promise.resolve({ result: 'waiting' });
   };
 
+  /** The files of a release tree on disk, hashed; `bin/` (the pinned binaries, never in a bundle) is left out. */
+  const treeFiles = (dir: string): HashedFile[] =>
+    readdirSync(dir, { recursive: true, withFileTypes: true })
+      .filter((e) => e.isFile())
+      .map((e) => {
+        const file = join(e.parentPath, e.name);
+        return { path: relative(dir, file), executable: (statSync(file).mode & 0o100) !== 0, sha256: fileSha256(readFileSync(file)) };
+      })
+      .filter((f) => f.path !== 'bin' && !f.path.startsWith('bin/'));
+  const lockOf = (files: readonly HashedFile[], dir: string): ReturnType<typeof parseRuntimeLock> =>
+    files.some((f) => f.path === 'runtime.lock') ? parseRuntimeLock(readFileSync(join(dir, 'runtime.lock'), 'utf8')) : undefined;
+  const counted = new Map<string, UpdateChanges>();
+
+  /** What an install changes against the release it would replace, for its page; undefined when either tree is gone. */
+  const changes = (action: Extract<Action, { readonly kind: 'install_update' }>): UpdateChanges | undefined => {
+    const key = `${action.install} ${action.base}`;
+    const known = counted.get(key);
+    if (known !== undefined) return known;
+    if (!existsSync(deps.currentLink)) return undefined;
+    const staged = join(deps.stagingDir, action.install);
+    const base = join(dirname(realpathSync(deps.currentLink)), action.base);
+    if (!existsSync(staged) || !existsSync(base)) return undefined;
+    const after = treeFiles(staged);
+    const before = treeFiles(base);
+    const oldLock = lockOf(before, base) ?? [];
+    const binaries = (lockOf(after, staged) ?? []).filter((b) => !oldLock.some((o) => o.name === b.name && o.sha256 === b.sha256)).map((b) => ({ name: b.name, version: b.version, sha256: b.sha256, url: b.url }));
+    const result = { ...countChanges(before, after), binaries };
+    counted.set(key, result);
+    return result;
+  };
+
   /** Removes every staged tree and `<H>.bin` no install proposal still needs: one is pending (the slot holds one) or
    * approved and waiting for root. Settled, denied, expired and replaced proposals leave nothing behind. */
   const prune = (): void => {
@@ -135,5 +171,5 @@ export function createUpdater(deps: UpdaterDeps): Updater {
     prune();
   };
 
-  return { routes: [intakeRoute], executor, release, running, settle };
+  return { routes: [intakeRoute], executor, release, running, settle, changes };
 }
