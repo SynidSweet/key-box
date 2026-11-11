@@ -49,6 +49,30 @@ export const lockFor = (node: Uint8Array, caddy: Uint8Array): string =>
 
 export const RELEASE_0: Tree = { 'runtime.lock': lockFor(NODE_BIN, CADDY_BIN), 'src/main-core.ts': 'old core\n', 'README.md': 'v0\n' };
 
+/** A kept approval proof (KBOX-9) for an action, signed by `approver` over the `kbox-v1` challenge built here from the spec. */
+export function keptProof(approver: SoftApprover, approverId: string, action: object, o: { readonly approvalId?: string; readonly quirks?: Quirks; readonly deviceOf?: SoftApprover } = {}): ApprovalProof {
+  const approvalId = o.approvalId ?? `apr_${b64u(randomBytes(12))}`;
+  const nonce = Uint8Array.from(randomBytes(32));
+  // RFC 8785 restricted to the flat string members these actions have: sorted keys, no whitespace.
+  const canonical = `{${Object.entries(action as Record<string, string>)
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([k, v]) => `${JSON.stringify(k)}:${JSON.stringify(v)}`)
+    .join(',')}}`;
+  const challenge = Uint8Array.from(sha('kbox-v1', approvalId, sha(canonical), nonce));
+  const parts = approver.prove(challenge, RP, o.quirks);
+  const device = o.deviceOf === undefined ? parts.deviceSignature : o.deviceOf.deviceSign(challenge);
+  return {
+    approval_id: approvalId,
+    approver_id: approverId,
+    nonce_b64: b64u(nonce),
+    credential_id_b64: b64u(parts.credentialId),
+    authenticator_data_b64: b64u(parts.authenticatorData),
+    client_data_json_b64: b64u(parts.clientDataJSON),
+    signature_b64: b64u(parts.signature),
+    device_signature_b64: b64u(device),
+  };
+}
+
 export interface FakeUnits extends ReleaseUnits {
   readonly restarts: string[];
   /** Whether the next health checks pass. */
@@ -152,29 +176,7 @@ export async function installWorld(t: TestContext, options: { readonly trust?: f
       writeTree(join(paths.staging, name ?? h), tree);
       return h;
     },
-    proof(action, o = {}) {
-      const approver = o.approver ?? owner;
-      const approvalId = o.approvalId ?? `apr_${b64u(randomBytes(12))}`;
-      const nonce = Uint8Array.from(randomBytes(32));
-      // RFC 8785 restricted to the flat string members these actions have: sorted keys, no whitespace.
-      const canonical = `{${Object.entries(action as Record<string, string>)
-        .sort(([a], [b]) => (a < b ? -1 : 1))
-        .map(([k, v]) => `${JSON.stringify(k)}:${JSON.stringify(v)}`)
-        .join(',')}}`;
-      const challenge = Uint8Array.from(sha('kbox-v1', approvalId, sha(canonical), nonce));
-      const parts = approver.prove(challenge, RP, o.quirks);
-      const device = o.deviceOf === undefined ? parts.deviceSignature : o.deviceOf.deviceSign(challenge);
-      return {
-        approval_id: approvalId,
-        approver_id: o.approverId ?? ownerId,
-        nonce_b64: b64u(nonce),
-        credential_id_b64: b64u(parts.credentialId),
-        authenticator_data_b64: b64u(parts.authenticatorData),
-        client_data_json_b64: b64u(parts.clientDataJSON),
-        signature_b64: b64u(parts.signature),
-        device_signature_b64: b64u(device),
-      };
-    },
+    proof: (action, o = {}) => keptProof(o.approver ?? owner, o.approverId ?? ownerId, action, o),
     request(name, body) {
       writeFileSync(join(paths.staging, `${name}.request`), JSON.stringify(body));
     },
