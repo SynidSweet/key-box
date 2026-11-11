@@ -1,3 +1,8 @@
-# Placeholder format (scaffold). The update unit defines the real format.
-# One line per pinned binary: <name> <version> <arch> <sha256> <download url>
-node 24.0.0 arm64 0000000000000000000000000000000000000000000000000000000000000000 https://nodejs.org/dist/v24.0.0/node-v24.0.0-linux-arm64.tar.xz
+# KBOX-6, KBOX-44: the pinned binaries. Inside H; kb-install checks every binary against this file on every install.
+# <name> <version> <arch> <sha256 of the installed binary> <official download url>
+# Each binary's sha256 is of the file extracted from the official archive, whose own sha256 was checked against the
+# project's published checksums (named below); the bootstrap's env carries the same four values.
+# node archive sha256 0dc93ec5c798b0d347f068db6d205d03dea9a71765e6a53922b682b91265d71f (from https://nodejs.org/dist/v24.11.1/SHASUMS256.txt)
+# caddy archive sha256 501e955fa634c5aab63247458c3ac655cfdd6cbf1e0436528f41248451c190ac (from https://github.com/caddyserver/caddy/releases/download/v2.10.2/caddy_2.10.2_checksums.txt)
+node 24.11.1 arm64 9189756f81aa0d5c706826f2a7763227a5abba0b5ca8c770096a25f35cf10e55 https://nodejs.org/dist/v24.11.1/node-v24.11.1-linux-arm64.tar.gz
+caddy 2.10.2 arm64 6f297c7f4807d9e4d54137de4dc26fe51e9ddf9c2dae69bc6762d05330a77984 https://github.com/caddyserver/caddy/releases/download/v2.10.2/caddy_2.10.2_linux_arm64.tar.gz

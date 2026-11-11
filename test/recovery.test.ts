@@ -256,28 +256,46 @@ test('KBOX-20 approver_add and approver_remove go to root first: core\'s table i
 test('KBOX-20 a refused approver_add registration leaves core\'s table unchanged and the registration code spent', async (t) => {
   const w = await approveWorld(t);
   const cookie = await w.view();
+  // FORCED-FLIP: as of the spec revision 4 the new phone registers first (pending) and root is asked when the owner approves.
   const opened = await w.call('/app/propose-approver-add', { method: 'POST', cookie });
-  const id = (opened.json() as { approval_id: string }).approval_id;
-  const item = (await w.queue()).find((q) => q.approval_id === id);
+  const code = (opened.json() as { registration_code: string }).registration_code;
+  assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 201);
+  const item = (await w.queue()).find((q) => q.kind === 'approver_add');
   assert.ok(item);
-  const code = ((await w.decide(id, 'approve', w.proofFor(item))).json() as { registration_code: string }).registration_code;
   w.trust.refuseNext('io_error');
-  assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 403);
+  assert.equal(((await w.decide(item.approval_id, 'approve', w.proofFor(item))).json() as { result: string }).result, 'failed');
   assert.deepEqual(w.core.approvers.ids(), [w.ownerId]);
   assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 403, 'the code is spent by the attempt root refused');
 });
 
-// --- the approver_add registration code: it ends with the approval, one way or another (KBOX-53, KBOX-20) -------------------
+// --- the approver_add registration code and the pending device (KBOX-53, KBOX-20; spec revision 4) ------------------------
+// FORCED-FLIP: as of the spec revision 4 the code is asked for first, from a view session; the new phone registers with it
+// and is held as pending; the box then proposes the approver_add naming its keys. The code's life no longer ends an approval.
 
-/** Proposes approver_add from the owner's view session, approves it as `by`, and returns the approval id and its registration code. */
-async function approvedAdd(w: World, by: SoftApprover = w.owner): Promise<{ readonly id: string; readonly code: string }> {
+/** Asks for a registration code from `by`'s view session. */
+async function askCode(w: World, by: SoftApprover = w.owner): Promise<string> {
   const opened = await w.call('/app/propose-approver-add', { method: 'POST', cookie: await w.view(by) });
-  const id = (opened.json() as { approval_id: string }).approval_id;
+  assert.equal(opened.status, 201, opened.body);
+  return (opened.json() as { registration_code: string }).registration_code;
+}
+
+/** Asks for a code as `by`, registers a new phone with it, and returns the box's approver_add approval id and the code. */
+async function approvedAdd(w: World, by: SoftApprover = w.owner): Promise<{ readonly id: string; readonly code: string }> {
+  const code = await askCode(w, by);
+  const registered = await registerAt(w, '/recover/register', code, softApprover());
+  assert.equal(registered.status, 201, registered.body);
+  const item = (await w.queue(by)).find((q) => q.kind === 'approver_add');
+  assert.ok(item);
+  return { id: item.approval_id, code };
+}
+
+/** Approves an approver_add as `by` and returns the execution result the route answers. */
+async function approveAdd(w: World, id: string, by: SoftApprover = w.owner): Promise<string> {
   const item = (await w.queue(by)).find((q) => q.approval_id === id);
   assert.ok(item);
   const approved = await w.decide(id, 'approve', w.proofFor(item, by));
   assert.equal(approved.status, 200, approved.body);
-  return { id, code: (approved.json() as { registration_code: string }).registration_code };
+  return (approved.json() as { result: string }).result;
 }
 
 /** What the audit says each approver_add approval ended as: `[approval id, result, reason]` for every `approval.executed` row. */
@@ -290,88 +308,114 @@ test('KBOX-53 an approver_add whose registration root refuses ends as failed wit
   const w = await approveWorld(t);
   const refused = await approvedAdd(w);
   w.trust.refuseNext('io_error');
-  assert.equal((await registerAt(w, '/recover/register', refused.code, softApprover())).status, 403);
+  assert.equal(await approveAdd(w, refused.id), 'failed'); // FORCED-FLIP: as of the spec revision 4 root is asked at the approval
   assert.deepEqual(outcomes(w), [[refused.id, 'failed', 'root_refused']]);
   const good = await approvedAdd(w);
-  assert.equal((await registerAt(w, '/recover/register', good.code, softApprover())).status, 201);
+  assert.equal(await approveAdd(w, good.id), 'done');
   assert.deepEqual(outcomes(w).at(-1), [good.id, 'done', 'ok']);
 });
 
-test('KBOX-53 an approver_add registration refused for its own keys (not the code) ends the approval as failed too', async (t) => {
+// FORCED-FLIP: as of the spec revision 4 the registration comes before any approval, so a refused one ends none.
+test('KBOX-53 an approver_add registration refused for its own keys (not the code) opens no approval, and the code is spent', async (t) => {
   const w = await approveWorld(t);
-  const add = await approvedAdd(w);
+  const code = await askCode(w);
   const stranger = softApprover();
   const n = await w.nonce('register');
-  const body = { code: add.code, approver: { ...newApproverBody(stranger) }, proof: wire(n, softApprover().prove(challenges.register(n), RP)), phrase: 'blue kettle' };
+  const body = { code, approver: { ...newApproverBody(stranger) }, proof: wire(n, softApprover().prove(challenges.register(n), RP)), phrase: 'blue kettle' };
   assert.equal((await w.call('/recover/register', { json: body })).status, 403, 'the proof is not by the keys sent');
-  assert.deepEqual(outcomes(w), [[add.id, 'failed', 'proof_refused']]);
+  // FORCED-FLIP: as of the spec revision 4 a refused registration never reaches a proposal, so no approval ends.
+  assert.deepEqual(outcomes(w), []);
+  assert.equal((await w.queue()).some((q) => q.kind === 'approver_add'), false, 'no approver_add was proposed');
+  assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 403, 'the code is spent by the refused attempt');
 });
 
-test('KBOX-53 a registration code that the owner never uses ends the approval as failed at 10 minutes, seen by the next sweep and by a late attempt', async (t) => {
+// FORCED-FLIP: as of the spec revision 4 a code's end ends no approval: none exists until a phone registers.
+test('KBOX-53 a registration code that is never used is refused at 10 minutes plus 1 ms, and root is never asked', async (t) => {
   const w = await approveWorld(t);
-  const add = await approvedAdd(w);
+  // FORCED-FLIP: as of the spec revision 4 the code comes before any approval, so its end ends no approval.
+  const onTime = await askCode(w);
   w.clock.advance(10 * MINUTE);
-  await w.queue();
-  assert.deepEqual(outcomes(w), [], 'still open at 10 minutes');
-  w.clock.advance(1);
-  await w.queue();
-  assert.deepEqual(outcomes(w), [[add.id, 'failed', 'code_expired']]);
-  assert.equal((await registerAt(w, '/recover/register', add.code, softApprover())).status, 403);
-  assert.equal(addCalls(w), 0, 'root is never asked about an expired code');
-  const late = await approvedAdd(w);
+  assert.equal((await registerAt(w, '/recover/register', onTime, softApprover())).status, 201, 'still good at 10 minutes');
+  const code = await askCode(w);
   w.clock.advance(10 * MINUTE + 1);
-  assert.equal((await registerAt(w, '/recover/register', late.code, softApprover())).status, 403, 'a late attempt is refused');
-  assert.deepEqual(outcomes(w).at(-1), [late.id, 'failed', 'code_expired']);
+  await w.queue();
+  // FORCED-FLIP: as of the spec revision 4 an expired code is refused at registration; no approval exists to end code_expired.
+  assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 403);
+  assert.equal(addCalls(w), 0, 'root is never asked about an expired code');
+  // FORCED-FLIP: as of the spec revision 4 the late attempt above is the refusal; no approval ended.
+  assert.deepEqual(outcomes(w), []);
 });
 
-test('KBOX-53 a second approved approver_add replaces the first: the first code is dead and its approval ends as failed', async (t) => {
+// FORCED-FLIP: as of the spec revision 4 a newer code replaces the outstanding one; there is no approval to end superseded.
+test('KBOX-53 a second registration code replaces the first: the first code is dead', async (t) => {
   const w = await approveWorld(t);
-  const first = await approvedAdd(w);
-  const second = await approvedAdd(w);
-  assert.deepEqual(outcomes(w), [[first.id, 'failed', 'superseded']]);
-  assert.equal((await registerAt(w, '/recover/register', first.code, softApprover())).status, 403);
-  assert.equal((await registerAt(w, '/recover/register', second.code, softApprover())).status, 201);
+  // FORCED-FLIP: as of the spec revision 4 a newer code (not a newer approval) replaces the outstanding one.
+  const first = await askCode(w);
+  const second = await askCode(w);
+  assert.equal((await registerAt(w, '/recover/register', first, softApprover())).status, 403);
+  assert.equal((await registerAt(w, '/recover/register', second, softApprover())).status, 201);
 });
 
-test('KBOX-53 removing the approver who approved an approver_add cancels the registration code: root is not asked and no device is added', async (t) => {
+// FORCED-FLIP: as of the spec revision 4 the code belongs to the approver who asked for it, and no approval exists to end cancelled.
+test('KBOX-53 removing the approver who asked for a registration code cancels the code: root is not asked and no device is added', async (t) => {
   const w = await approveWorld(t);
   const second = await w.addApprover();
-  const add = await approvedAdd(w);
+  // FORCED-FLIP: as of the spec revision 4 the code is tied to the approver who asked for it, not to an approval.
+  const code = await askCode(w);
   const calls = addCalls(w);
   const removal = w.propose({ kind: 'approver_remove', approver_id: w.ownerId }, 'box');
   const item = (await w.queue(second.approver)).find((q) => q.approval_id === removal.approval_id);
   assert.ok(item);
   assert.equal((await w.decide(item.approval_id, 'approve', w.proofFor(item, second.approver))).status, 200);
   assert.deepEqual(w.core.approvers.ids(), [second.approverId]);
-  assert.equal((await registerAt(w, '/recover/register', add.code, softApprover())).status, 403);
+  assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 403);
   assert.equal(addCalls(w), calls, 'root was not asked');
   assert.deepEqual(w.core.approvers.ids(), [second.approverId], 'no device was added');
-  assert.deepEqual(outcomes(w).filter(([id]) => id === add.id), [[add.id, 'failed', 'cancelled']]);
+  // FORCED-FLIP: as of the spec revision 4 the code was cancelled before any approval existed, so no approval ends cancelled.
 });
 
-test('KBOX-53 a recovery cancels the registration code of an approver_add the old approvers approved: the code registers nothing', async (t) => {
+// FORCED-FLIP: as of the spec revision 4 a recovery cancels the outstanding code; no approval exists to end cancelled.
+test('KBOX-53 a recovery cancels the registration code the old approvers asked for: the code registers nothing', async (t) => {
   const w = await approveWorld(t);
-  const add = await approvedAdd(w);
+  // FORCED-FLIP: as of the spec revision 4 the code is asked for before any approval exists.
+  const code = await askCode(w);
   const calls = addCalls(w);
   const newcomer = softApprover();
   assert.equal((await registerAt(w, '/recover', w.recoveryCode(), newcomer)).status, 201);
-  assert.equal((await registerAt(w, '/recover/register', add.code, softApprover())).status, 403);
+  assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 403);
   assert.equal(addCalls(w), calls, 'root was not asked');
   assert.equal(w.core.approvers.ids().length, 1, 'only the recovered approver is registered');
-  assert.deepEqual(outcomes(w), [[add.id, 'failed', 'cancelled']]);
+  assert.deepEqual(outcomes(w), []);
 });
 
-test('KBOX-53 removing some other approver leaves the registration code alone: the proof that opened it is still good', async (t) => {
+// FORCED-FLIP: as of the spec revision 4 a recovery also drops a phone that registered and waits for approval (the next test keeps the other-approver case).
+test('KBOX-53 a recovery drops a pending device: approving its approver_add afterwards adds nothing and root is not asked', async (t) => {
+  const w = await approveWorld(t);
+  const add = await approvedAdd(w);
+  const newcomer = softApprover();
+  assert.equal((await registerAt(w, '/recover', w.recoveryCode(), newcomer)).status, 201);
+  const calls = addCalls(w);
+  assert.equal(await approveAdd(w, add.id, newcomer), 'failed');
+  assert.deepEqual(outcomes(w), [[add.id, 'failed', 'no_registration']]);
+  assert.equal(addCalls(w), calls, 'root was not asked');
+  assert.equal(w.core.approvers.ids().length, 1);
+});
+
+test('KBOX-53 removing some other approver leaves the registration code alone', async (t) => {
   const w = await approveWorld(t);
   const second = await w.addApprover();
-  const add = await approvedAdd(w);
+  // FORCED-FLIP: as of the spec revision 4 the code is asked for first and the add is approved after the registration.
+  const code = await askCode(w);
   const removal = w.propose({ kind: 'approver_remove', approver_id: second.approverId }, 'box');
   const item = (await w.queue()).find((q) => q.approval_id === removal.approval_id);
   assert.ok(item);
   assert.equal((await w.decide(item.approval_id, 'approve', w.proofFor(item))).status, 200);
   assert.deepEqual(w.core.approvers.ids(), [w.ownerId]);
-  assert.equal((await registerAt(w, '/recover/register', add.code, softApprover())).status, 201);
-  assert.deepEqual(outcomes(w).filter(([id]) => id === add.id), [[add.id, 'done', 'ok']]);
+  assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 201);
+  const add = (await w.queue()).find((q) => q.kind === 'approver_add');
+  assert.ok(add);
+  assert.equal(await approveAdd(w, add.approval_id), 'done');
+  assert.deepEqual(outcomes(w).filter(([id]) => id === add.approval_id), [[add.approval_id, 'done', 'ok']]);
 });
 
 test('KBOX-20 the code directory is made 0700 and an existing one with looser modes is tightened to 0700 before a hash is written', async (t) => {

@@ -43,10 +43,12 @@ MODE=gate; ARG_WT=""
 for a in "$@"; do case $a in --preflight) MODE=preflight;; *) ARG_WT=$a;; esac; done
 
 # --- adapt these per project (env overrides win) ------------------------------
-# The host suite is every test file except the root-only journey, which the gate runs as root in a container (see process-split below).
-SPLIT_FILE=${SPLIT_FILE:-test/journeys/process-split.test.ts}
-# Every file type `node --test` runs (.ts .mts .js .mjs .cjs), so a test in another type cannot go unrun; only SPLIT_FILE is left out.
-HOST_SUITE='node --test $(find test -type f \( -name "*.ts" -o -name "*.mts" -o -name "*.js" -o -name "*.mjs" -o -name "*.cjs" \) ! -path '"$SPLIT_FILE"' | sort)'
+# The host suite is every test file except the root-only files, which the gate runs as root in a container (see process-split below):
+# the KBOX-45 uid journey and kb-install's uid half (KBOX-6). SPLIT_FILE is a space-separated list.
+SPLIT_FILE=${SPLIT_FILE:-test/journeys/process-split.test.ts test/install-root.test.ts}
+# Every file type `node --test` runs (.ts .mts .js .mjs .cjs), so a test in another type cannot go unrun; only the SPLIT_FILE files are left out.
+SPLIT_EXCLUDES=""; for f in $SPLIT_FILE; do SPLIT_EXCLUDES="$SPLIT_EXCLUDES ! -path $f"; done
+HOST_SUITE='node --test $(find test -type f \( -name "*.ts" -o -name "*.mts" -o -name "*.js" -o -name "*.mjs" -o -name "*.cjs" \)'"$SPLIT_EXCLUDES"' | sort)'
 SUITE_CMD=${SUITE_CMD:-$HOST_SUITE}        # exit 0 = suite green
 SUITE_FAILING_IDS_CMD=${SUITE_FAILING_IDS_CMD:-}
                                          # prints failing test IDs, one per line,

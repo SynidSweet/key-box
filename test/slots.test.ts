@@ -24,8 +24,9 @@ const SLOT_TABLE: readonly (readonly [name: string, same: [Action, Action], othe
   ['enrol (the source address)', [{ kind: 'enrol', label: 'ws-1', token_sha256: 'a'.repeat(64), address: '198.51.100.1' }, { kind: 'enrol', label: 'ws-2', token_sha256: 'b'.repeat(64), address: '198.51.100.1' }], { kind: 'enrol', label: 'ws-1', token_sha256: 'a'.repeat(64), address: '198.51.100.2' }],
   ['vercel_set_domain (project and operation)', [{ kind: 'vercel_set_domain', project: 'shop', op: 'add', domain: 'a.example.com' }, { kind: 'vercel_set_domain', project: 'shop', op: 'add', domain: 'b.example.com' }], { kind: 'vercel_set_domain', project: 'shop', op: 'remove', domain: 'a.example.com' }],
   ['vercel_set_team_setting (the setting name)', [{ kind: 'vercel_set_team_setting', setting: 'deploymentProtection', value: 'on' }, { kind: 'vercel_set_team_setting', setting: 'deploymentProtection', value: 'off' }], { kind: 'vercel_set_team_setting', setting: 'previewComments', value: 'on' }],
-  ['approver_add (one slot)', [{ kind: 'approver_add' }, { kind: 'approver_add' }], { kind: 'install_update', install: '1'.repeat(64), commit: '2'.repeat(40), base: '3'.repeat(64) }],
-  ['install_update (one slot)', [{ kind: 'install_update', install: '1'.repeat(64), commit: '2'.repeat(40), base: '3'.repeat(64) }, { kind: 'install_update', install: '4'.repeat(64), commit: '2'.repeat(40), base: '3'.repeat(64) }], { kind: 'approver_add' }],
+  // FORCED-FLIP: as of the spec revision 4 approver_add names the new approver's key hashes.
+  ['approver_add (one slot)', [{ kind: 'approver_add', cose_sha256: '5'.repeat(64), device_sha256: '6'.repeat(64) }, { kind: 'approver_add', cose_sha256: '7'.repeat(64), device_sha256: '8'.repeat(64) }], { kind: 'install_update', install: '1'.repeat(64), commit: '2'.repeat(40), base: '3'.repeat(64) }],
+  ['install_update (one slot)', [{ kind: 'install_update', install: '1'.repeat(64), commit: '2'.repeat(40), base: '3'.repeat(64) }, { kind: 'install_update', install: '4'.repeat(64), commit: '2'.repeat(40), base: '3'.repeat(64) }], { kind: 'approver_add', cose_sha256: '5'.repeat(64), device_sha256: '6'.repeat(64) }],
 ];
 
 const slotTaken = (pendingId: string) => (e: unknown): boolean => e instanceof ApiError && e.code === 'slot_taken' && JSON.stringify(e.detail) === JSON.stringify({ pending_approval_id: pendingId });

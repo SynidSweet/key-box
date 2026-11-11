@@ -9,7 +9,7 @@ import type { TrustPort } from '../ports/trust.ts';
 import type { Action, ActionKind, Destination } from '../pure/actions.ts';
 import { ApiError } from '../pure/errors.ts';
 import { createApprovals } from './approvals.ts';
-import type { Approvals, ExecuteResult, Executor } from './approvals.ts';
+import type { Approvals, ApprovalsDeps, ExecuteResult, Executor } from './approvals.ts';
 import { createApprovers } from './approvers.ts';
 import type { Approvers } from './approvers.ts';
 import type { CoreParts } from './core.ts';
@@ -31,6 +31,8 @@ export interface ApproveCoreDeps {
   readonly vet: (action: Action) => 'ok' | 'rejected';
   /** Executors of kinds other units own (rotation, update, Vercel). */
   readonly executors?: Partial<Readonly<Record<ActionKind, Executor>>>;
+  /** What an install_update changes, for its page (the update unit counts it). */
+  readonly updateChanges?: ApprovalsDeps['updateChanges'];
 }
 
 export interface ApproveCore {
@@ -88,6 +90,12 @@ export function openApproveCore(deps: ApproveCoreDeps): ApproveCore {
       if (action.kind !== 'enrol') return Promise.resolve({ result: 'failed', reason: 'wrong_kind' });
       return Promise.resolve(attempt(() => parts.meta.addMachine({ label: action.label, scope: 'relay', tokenSha256: action.token_sha256, enrolledAt: deps.clock.now() }), 'label_taken'));
     },
+    approver_add: async (a) => {
+      const action = a.action;
+      if (action.kind !== 'approver_add' || a.proof === undefined) return { result: 'failed', reason: 'wrong_kind' };
+      const added = await approvers.add(action, a.proof);
+      return added === 'done' ? { result: 'done' } : { result: 'failed', reason: added };
+    },
     approver_remove: async (a) => {
       const action = a.action;
       if (action.kind !== 'approver_remove' || a.proof === undefined) return { result: 'failed', reason: 'wrong_kind' };
@@ -105,6 +113,7 @@ export function openApproveCore(deps: ApproveCoreDeps): ApproveCore {
     approvers,
     vet: deps.vet,
     executors: { ...deps.executors, ...own },
+    ...(deps.updateChanges === undefined ? {} : { updateChanges: deps.updateChanges }),
   });
   const tokens = createMachineTokens({ meta: parts.meta, events: parts.events, approvals, push: deps.push, audit: parts.audit, clock: deps.clock });
   return { approvals, approvers, tokens, routes: approveRoutes({ approvals, approvers, tokens, meta: parts.meta, push: deps.push }) };

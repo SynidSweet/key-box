@@ -2,6 +2,9 @@
 // pending per slot. Who may replace a pending proposal, and when a push goes out, is decided here and nowhere else.
 import type { Action } from './actions.ts';
 
+/** Pending proposals expire after 14 days (KBOX-7); a new device waiting on its approver_add is held as long (revision 4). */
+export const PROPOSAL_TTL_MS = 14 * 24 * 3600_000;
+
 /** Who asked: a machine token by its label, the box itself (a schedule, a platform expiry), or an unauthenticated enrol. */
 export type Requester =
   | { readonly kind: 'token'; readonly label: string }

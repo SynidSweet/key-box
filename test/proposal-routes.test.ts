@@ -7,8 +7,9 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { softApprover } from './kit/approver.ts';
+import type { SoftApprover } from './kit/approver.ts';
 import { seededRandom } from './kit/index.ts';
-import { RP, approveWorld, challenges, registerAt, wire } from './support/approve-world.ts';
+import { RP, WORDLIST, approveWorld, challenges, registerAt, wire } from './support/approve-world.ts';
 import type { World } from './support/approve-world.ts';
 import { parseAction } from '../src/pure/actions.ts';
 
@@ -34,7 +35,7 @@ const VALID: readonly Json[] = [
   { kind: 'demote', keyref: 'k-demote' },
   { kind: 'vercel_set_domain', project: 'shop', op: 'move', domain: 'shop.example.com', to_project: 'shop-2' },
   { kind: 'vercel_set_team_setting', setting: 'sensitiveEnvironmentVariablePolicy', value: 'on' },
-  { kind: 'approver_add' },
+  { kind: 'approver_add', cose_sha256: 'e'.repeat(64), device_sha256: 'f'.repeat(64) }, // FORCED-FLIP: as of the spec revision 4
 ];
 
 /** Members that may be left out. */
@@ -261,17 +262,23 @@ test('KBOX-53 KBOX-9 every state-changing phone route refuses the view cookie al
   assert.deepEqual(w.core.approvers.ids(), [w.ownerId]);
 });
 
+// FORCED-FLIP: as of the spec revision 4 the registration code is asked for from a view session, before any proposal; the
+// new phone registers with it first and the box then proposes the approver_add naming its keys.
 async function approvedAddCode(w: World): Promise<string> {
   const opened = await w.call('/app/propose-approver-add', { method: 'POST', cookie: await w.view() });
   assert.equal(opened.status, 201, opened.body);
-  const id = (opened.json() as { approval_id: string }).approval_id;
-  const item = (await w.queue()).find((q) => q.approval_id === id);
-  assert.ok(item);
-  const reply = await w.decide(id, 'approve', w.proofFor(item));
-  assert.equal(reply.status, 200, reply.body);
-  const code = (reply.json() as { registration_code?: string }).registration_code;
+  // FORCED-FLIP: as of the spec revision 4 this route answers the code itself; no approval is opened or approved for it.
+  const code = (opened.json() as { registration_code?: string }).registration_code;
   assert.match(code ?? '', /^[a-z]+( [a-z]+){11}$/, 'twelve words');
   return code ?? '';
+}
+
+/** Approves the box's pending approver_add (the one the last registration opened). */
+async function approvePendingAdd(w: World): Promise<void> {
+  const item = (await w.queue()).find((q) => q.kind === 'approver_add');
+  assert.ok(item);
+  const reply = await w.decide(item.approval_id, 'approve', w.proofFor(item));
+  assert.equal(reply.status, 200, reply.body);
 }
 
 test('KBOX-53 the approver-add registration code is valid at 10 minutes and once; refused at 10 minutes plus 1 ms and on second use', async (t) => {
@@ -280,10 +287,77 @@ test('KBOX-53 the approver-add registration code is valid at 10 minutes and once
   w.clock.advance(10 * MINUTE);
   assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 201);
   assert.equal((await registerAt(w, '/recover/register', code, softApprover())).status, 403, 'second use');
+  await approvePendingAdd(w);
   const late = await approvedAddCode(w);
   w.clock.advance(10 * MINUTE + 1);
   assert.equal((await registerAt(w, '/recover/register', late, softApprover())).status, 403, '10 minutes plus 1 ms');
   assert.equal(w.core.approvers.ids().length, 2);
+});
+
+/** The fingerprint as the spec states it, written here independently: 6 words over SHA-256(SHA-256(cose) ‖ SHA-256(device)). */
+function fingerprintOf(cose: Uint8Array, device: Uint8Array): string {
+  const digest = createHash('sha256').update(createHash('sha256').update(cose).digest()).update(createHash('sha256').update(device).digest()).digest();
+  let bits = 0n;
+  for (const b of digest.subarray(0, 9)) bits = (bits << 8n) | BigInt(b); // 72 bits, of which the first 66 are the words
+  bits >>= 6n;
+  return [5, 4, 3, 2, 1, 0].map((i) => WORDLIST[Number((bits >> BigInt(11 * i)) & 0x7ffn)]).join(' ');
+}
+
+test('KBOX-53 the fingerprint the new phone shows is the one its approver_add page shows beside "Compare with the new phone", and it changes with either key', async (t) => {
+  const w = await approveWorld(t);
+  const a = softApprover();
+  const b = softApprover();
+  /** Registers a new phone whose passkey is `passkeyOf`'s and whose device key is `deviceOf`'s; the fingerprint it is shown. */
+  const register = async (passkeyOf: SoftApprover, deviceOf: SoftApprover): Promise<string> => {
+    const code = await approvedAddCode(w);
+    const n = await w.nonce('register');
+    const challenge = challenges.register(n);
+    const parts = { ...passkeyOf.prove(challenge, RP), deviceSignature: deviceOf.deviceSign(challenge) };
+    const approver = { credential_id: Buffer.from(passkeyOf.credentialId).toString('base64url'), cose_key: Buffer.from(passkeyOf.coseKey).toString('base64url'), device_public_key: Buffer.from(deviceOf.devicePublicKey).toString('base64url') };
+    const reply = await w.call('/recover/register', { json: { code, approver, proof: wire(n, parts), phrase: 'blue kettle' } });
+    assert.equal(reply.status, 201, reply.body);
+    const shown = (reply.json() as { fingerprint: string }).fingerprint;
+    const page = (await w.queue()).find((q) => q.kind === 'approver_add');
+    assert.ok(page);
+    assert.ok(page.lines.includes(`Compare with the new phone: ${shown}`), `the approving page shows the same words: ${page.lines.join(' | ')}`);
+    return shown;
+  };
+  const both = await register(a, a);
+  assert.equal(both, fingerprintOf(a.coseKey, a.devicePublicKey), 'the words are the spec\'s, over the keys registered');
+  assert.match(both, /^[a-z]+( [a-z]+){5}$/, 'six words');
+  const otherDevice = await register(a, b);
+  const otherPasskey = await register(b, a);
+  assert.notEqual(otherDevice, both, 'another device key, another fingerprint');
+  assert.notEqual(otherPasskey, both, 'another passkey, another fingerprint');
+  assert.notEqual(otherPasskey, otherDevice);
+});
+
+test('KBOX-53 a pending device (registered, its approver_add not yet approved) is refused at every approval and view route', async (t) => {
+  const w = await approveWorld(t);
+  const pending = softApprover();
+  assert.equal((await registerAt(w, '/recover/register', await approvedAddCode(w), pending)).status, 201);
+  const item = (await w.queue()).find((q) => q.kind === 'approver_add');
+  assert.ok(item);
+  const n = await w.nonce('view');
+  assert.equal((await w.call('/app/view', { json: { proof: wire(n, pending.prove(challenges.view(n), RP)) } })).status, 403, 'view');
+  for (const decision of ['approve', 'deny'] as const) {
+    const reply = await w.call(`/app/${decision}/${item.approval_id}`, { json: { proof: w.proofFor(item, pending, undefined, decision) } });
+    assert.equal(reply.status, 403, `${decision} of its own approver_add`);
+  }
+  const other = w.propose({ kind: 'grant', keyref: 'openai/admin', machine: 'ws-1' });
+  const grant = (await w.queue()).find((q) => q.approval_id === other.approval_id);
+  assert.ok(grant);
+  assert.equal((await w.call(`/app/approve/${grant.approval_id}`, { json: { proof: w.proofFor(grant, pending) } })).status, 403, 'approve of another approval');
+  const op = { kind: 'token_revoke', label: 'ctl-1' };
+  const n2 = await w.nonce('op');
+  assert.equal((await w.call('/app/op', { json: { op, proof: wire(n2, pending.prove(challenges.op(op, n2), RP)) } })).status, 403, 'signed operation');
+  assert.deepEqual(w.core.approvers.ids(), [w.ownerId], 'trusted by nothing');
+
+  const fresh = (await w.queue()).find((q) => q.kind === 'approver_add');
+  assert.ok(fresh);
+  assert.equal(((await w.decide(fresh.approval_id, 'approve', w.proofFor(fresh))).json() as { result: string }).result, 'done', 'control: the owner approves it');
+  const n3 = await w.nonce('view');
+  assert.equal((await w.call('/app/view', { json: { proof: wire(n3, pending.prove(challenges.view(n3), RP)) } })).status, 200, 'control: once approved it opens a view');
 });
 
 test('KBOX-19 an executed grant and an executed destination approval each write key.changed for the key and show in GET /api/meta', async (t) => {

@@ -18,6 +18,10 @@ PrivateTmp=yes
 ReadWritePaths=/run/keyrelay
 InaccessiblePaths=/var/lib/keybox
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# KBOX-46 egress layer 2: no link-local (the cloud metadata service included), private or loopback address, except the
+# resolver stub. Layer 3 is the in-code egress gate (KBOX-47).
+IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 fc00::/7 fe80::/10
+IPAddressAllow=127.0.0.53/32
 
 [Install]
 WantedBy=multi-user.target

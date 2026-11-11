@@ -1,6 +1,6 @@
 // The app shell (KBOX-8, KBOX-9, KBOX-11): a view session opens the queue; each approval, each denial and each signed
 // operation asks for the passkey and the device key again over its own challenge. Box words are shown as text only.
-import { approvalChallenge, browser, byId, call, denialChallenge, fromB64u, nonce, notifier, operationChallenge, prove, viewChallenge } from './webauthn-client.js';
+import { approvalChallenge, browser, byId, call, denialChallenge, fromB64u, nonce, notifier, operationChallenge, post, prove, viewChallenge } from './webauthn-client.js';
 
 /** @typedef {{ approval_id: string, kind: string, title: string, lines: string[], digest_b64: string, nonce_b64: string }} Item */
 
@@ -17,9 +17,8 @@ async function decide(item, decision) {
     const n = fromB64u(item.nonce_b64);
     const challenge = decision === 'approve' ? approvalChallenge : denialChallenge;
     const proof = await prove(n, await challenge(item.approval_id, fromB64u(item.digest_b64), n));
-    const answer = /** @type {{ registration_code?: unknown }} */ (await call(`/app/${decision}/${item.approval_id}`, { proof }));
-    if (typeof answer.registration_code === 'string') notifier.say(`On the new phone, open /recover and enter: ${answer.registration_code}`);
-    else notifier.say(decision === 'approve' ? 'Approved.' : 'Denied.');
+    await call(`/app/${decision}/${item.approval_id}`, { proof });
+    notifier.say(decision === 'approve' ? 'Approved.' : 'Denied.');
     await openQueue();
   } catch (error) {
     notifier.failed(error);
@@ -87,6 +86,15 @@ async function operation(kind) {
 
 byId('window').addEventListener('click', () => void operation('enrol_window_open'));
 byId('revoke').addEventListener('click', () => void operation('token_revoke'));
+// Adding a phone (spec revision 4): this phone asks for a one-time code; the new phone registers with it and shows a
+// fingerprint; the approval then appears in this queue with the same fingerprint beside "Compare with the new phone".
 byId('add-phone').addEventListener('click', () => {
-  void call('/app/propose-approver-add').then(openQueue, (error) => notifier.failed(error));
+  void post('/app/propose-approver-add').then(
+    (answer) => {
+      const code = /** @type {{ registration_code?: unknown }} */ (answer).registration_code;
+      if (typeof code !== 'string') throw new Error('the box sent no registration code');
+      notifier.say(`On the new phone, open /recover and enter within 10 minutes: ${code}. Then approve here only if the words match the new phone.`);
+    },
+    (error) => notifier.failed(error),
+  ).catch((error) => notifier.failed(error));
 });

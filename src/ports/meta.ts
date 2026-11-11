@@ -92,6 +92,8 @@ export interface ShareState {
 export interface MetaStore {
   /** The epoch chosen when meta.db was created. */
   epoch(): string;
+  /** Records the running release H (KBOX-6): `/healthz` and `GET /api/meta` show it. Core sets it at every start. */
+  setRelease(release: string): void;
   shareState(): ShareState;
   /** Publishes the share signing key's public half. Setting the same key again is allowed; a different one is refused. */
   setSharePublicKey(keyB64: string): void;

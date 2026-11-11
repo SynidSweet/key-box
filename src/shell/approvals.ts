@@ -14,16 +14,13 @@ import { parseAction } from '../pure/actions.ts';
 import type { Action, ActionKind } from '../pure/actions.ts';
 import { actionDigest, approvalChallenge, denialChallenge } from '../pure/challenge.ts';
 import { ApiError } from '../pure/errors.ts';
-import { decideSlot, parseRequester, pushOnOpen, requesterText, slotOf } from '../pure/slots.ts';
+import { PROPOSAL_TTL_MS, decideSlot, parseRequester, pushOnOpen, requesterText, slotOf } from '../pure/slots.ts';
 import type { Requester, SlotDecision } from '../pure/slots.ts';
 import { renderPage, titleOf } from '../pure/words.ts';
-import type { Reason } from '../pure/words.ts';
+import type { PageContext, Reason, UpdateChanges } from '../pure/words.ts';
 import { inTransaction } from './db.ts';
 import { insertEvent } from './events.ts';
 import type { Approvers, ProofBytes } from './approvers.ts';
-
-/** Pending proposals expire after 14 days (KBOX-7). */
-export const PROPOSAL_TTL_MS = 14 * 24 * 3600_000;
 
 /** Kinds whose approval proof is kept with the approval, because root verifies it again itself (KBOX-6, KBOX-9). */
 const PROOF_KEPT: readonly ActionKind[] = ['install_update', 'approver_add', 'approver_remove'];
@@ -53,6 +50,8 @@ export interface ApprovalsDeps {
   /** Proposal-time checks that need a platform's profile (a `mustDeny` match, an operation the profile does not declare). */
   readonly vet: (action: Action) => 'ok' | 'rejected';
   readonly executors: Partial<Readonly<Record<ActionKind, Executor>>>;
+  /** What an install_update changes against the running release, for its page (KBOX-6); the update unit counts it. */
+  readonly updateChanges?: (action: Extract<Action, { readonly kind: 'install_update' }>) => UpdateChanges | undefined;
 }
 
 export interface Proposed {
@@ -74,7 +73,7 @@ export interface QueueItem {
   readonly expires_at: number;
 }
 
-export type DecideOutcome = { readonly decision: 'approved'; readonly execution: ExecuteResult; readonly registrationCode?: string } | { readonly decision: 'denied' };
+export type DecideOutcome = { readonly decision: 'approved'; readonly execution: ExecuteResult } | { readonly decision: 'denied' };
 
 export interface Approvals {
   propose(input: { readonly action: Action; readonly requester: Requester; readonly reason?: Reason }): Proposed;
@@ -85,7 +84,11 @@ export interface Approvals {
   enrolStatus(tokenSha256: string): 'pending' | 'approved' | 'denied' | 'expired' | undefined;
   /** The proof kept with an approved install_update, approver_add or approver_remove. */
   storedProof(approvalId: string): ApprovalProof | undefined;
-  /** Marks a waiting execution (approver_add) finished. */
+  /** Approved actions of one kind whose execution has no result yet (an install root has not answered), oldest first. */
+  waiting(kind: ActionKind): readonly { readonly approvalId: string; readonly action: Action; readonly decidedAt: number }[];
+  /** Proposals of one kind that wait for the owner. */
+  pending(kind: ActionKind): readonly { readonly approvalId: string; readonly action: Action }[];
+  /** Marks a waiting execution (an install root has answered) finished. */
   executed(approvalId: string, result: 'done' | 'failed', reason: string): void;
   /** Expires every pending proposal older than 14 days. */
   sweep(): void;
@@ -213,6 +216,13 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
     return { approval_id: outcome.approvalId, status: 'pending', slot, revision: outcome.revision, replaced: decision !== 'open' };
   };
 
+  /** The facts a page shows beside the stored action: the new phone's fingerprint, an update's changes. */
+  const pageFacts = (action: Action): Pick<PageContext, 'fingerprint' | 'update'> => {
+    if (action.kind === 'approver_add') return { fingerprint: deps.approvers.fingerprint(action) };
+    const update = action.kind === 'install_update' ? deps.updateChanges?.(action) : undefined;
+    return update === undefined ? {} : { update };
+  };
+
   const queue = (): readonly QueueItem[] => {
     sweep();
     enrolPushUnseen = false;
@@ -220,7 +230,7 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
       const action = actionOf(r);
       const reason = r.reason_json === null ? undefined : (JSON.parse(r.reason_json) as Reason);
       const cov = coverage(action);
-      const page = renderPage(action, { requester: requesterOf(r), ...(reason === undefined ? {} : { reason }), ...(cov === undefined ? {} : { coverage: cov }) });
+      const page = renderPage(action, { requester: requesterOf(r), ...(reason === undefined ? {} : { reason }), ...(cov === undefined ? {} : { coverage: cov }), ...pageFacts(action) });
       const nonce = deps.approvers.nonce({ kind: 'decide', approvalId: r.approval_id, revision: r.revision });
       return {
         approval_id: r.approval_id,
@@ -268,10 +278,6 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
     if (decision === 'deny') return { decision: 'denied' };
 
     const stored: StoredApproval = { approvalId, revision: held.revision, action, requester: requesterOf(held), proof: PROOF_KEPT.includes(action.kind) ? kept : undefined };
-    if (action.kind === 'approver_add') {
-      const registrationCode = deps.approvers.startAdd(kept, (result, reason) => executed(approvalId, result, result === 'done' ? 'ok' : reason));
-      return { decision: 'approved', execution: { result: 'waiting' }, registrationCode };
-    }
     const executor = deps.executors[action.kind];
     const execution: ExecuteResult = executor === undefined ? { result: 'failed', reason: 'no_executor' } : await executor(stored);
     if (execution.result !== 'waiting') executed(approvalId, execution.result, execution.result === 'done' ? 'ok' : execution.reason);
@@ -295,6 +301,15 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
       if (found === undefined) return undefined;
       // An approved enrol whose machine could not be added (its label was taken meanwhile) did not enrol anything.
       return found.status === 'pending' ? 'pending' : found.status === 'expired' ? 'expired' : 'denied';
+    },
+    waiting(kind) {
+      const rows = db.prepare(`SELECT ${COLUMNS}, decided_at FROM approvals WHERE kind = ? AND status = 'approved' AND result IS NULL ORDER BY decided_at, approval_id`).all(kind) as unknown as (Row & { decided_at: number })[];
+      return rows.map((r) => ({ approvalId: r.approval_id, action: actionOf(r), decidedAt: r.decided_at }));
+    },
+    pending(kind) {
+      return pendingRows()
+        .filter((r) => r.kind === kind)
+        .map((r) => ({ approvalId: r.approval_id, action: actionOf(r) }));
     },
     storedProof(approvalId) {
       const r = row(approvalId);

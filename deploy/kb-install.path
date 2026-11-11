@@ -1,0 +1,10 @@
+[Unit]
+Description=Start kb-install when core leaves a request in staging (KBOX-6)
+StartLimitIntervalSec=0
+
+[Path]
+PathExistsGlob=/var/lib/keybox/staging/*.request
+Unit=kb-install.service
+
+[Install]
+WantedBy=multi-user.target

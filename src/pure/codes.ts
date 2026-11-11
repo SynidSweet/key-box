@@ -19,15 +19,32 @@ export function parseWordlist(text: string): readonly string[] {
   return words;
 }
 
+/** `count` words for the first `count * 11` bits of `bytes`, most significant first. */
+function wordsOf(bytes: Uint8Array, count: number, wordlist: readonly string[]): string {
+  let bits = 0n;
+  for (const b of bytes) bits = (bits << 8n) | BigInt(b);
+  bits >>= BigInt(bytes.length * 8 - count * BITS_PER_WORD);
+  const words: string[] = [];
+  for (let i = count - 1; i >= 0; i -= 1) words.push(wordlist[Number((bits >> BigInt(i * BITS_PER_WORD)) & 0x7ffn)] ?? '');
+  return words.join(' ');
+}
+
 /** The 12 words for the first 132 bits of `bytes`. */
 export function codeFromBytes(bytes: Uint8Array, wordlist: readonly string[]): string {
   if (bytes.length !== CODE_BYTES) throw new RangeError(`a code is drawn from ${CODE_BYTES} random bytes`);
-  let bits = 0n;
-  for (const b of bytes) bits = (bits << 8n) | BigInt(b);
-  bits >>= BigInt(CODE_BYTES * 8 - CODE_WORDS * BITS_PER_WORD);
-  const words: string[] = [];
-  for (let i = CODE_WORDS - 1; i >= 0; i -= 1) words.push(wordlist[Number((bits >> BigInt(i * BITS_PER_WORD)) & 0x7ffn)] ?? '');
-  return words.join(' ');
+  return wordsOf(bytes, CODE_WORDS, wordlist);
+}
+
+/** A new approver's fingerprint is this many words (spec revision 4). */
+export const FINGERPRINT_WORDS = 6;
+
+/**
+ * The fingerprint both phones show for an approver_add (spec revision 4): 6 words of the code list over
+ * SHA-256(cose_sha256 ‖ device_sha256), the two hashes taken as their 32 bytes each.
+ */
+export function approverFingerprint(coseSha256: string, deviceSha256: string, wordlist: readonly string[]): string {
+  const digest = createHash('sha256').update(Buffer.from(coseSha256, 'hex')).update(Buffer.from(deviceSha256, 'hex')).digest();
+  return wordsOf(digest, FINGERPRINT_WORDS, wordlist);
 }
 
 /** A typed code in its one hashed form: lower case, single spaces, exactly 12 words of the list; undefined otherwise. */

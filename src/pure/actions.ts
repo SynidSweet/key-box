@@ -1,5 +1,6 @@
 // KBOX-53, KBOX-7: the closed action kinds and their typed members. An action is parsed once, at the edge, into one of
 // these; the box stores it as typed data and builds its words, slot and digest from it, never from requester text.
+import { createHash } from 'node:crypto';
 import { LABEL, NAME, parseObject, text, int, oneOf, optional, isTrue } from './schemas.ts';
 import type { Parsed, Schema } from './schemas.ts';
 
@@ -40,7 +41,7 @@ export type Action =
   | { readonly kind: 'set_schedule'; readonly keyref: string; readonly rotate_every_days: number; readonly grace_hours: number }
   | { readonly kind: 'vercel_set_domain'; readonly project: string; readonly op: 'add' | 'remove' | 'move'; readonly domain: string; readonly to_project?: string }
   | { readonly kind: 'vercel_set_team_setting'; readonly setting: string; readonly value: string }
-  | { readonly kind: 'approver_add' }
+  | { readonly kind: 'approver_add'; readonly cose_sha256: string; readonly device_sha256: string }
   | { readonly kind: 'approver_remove'; readonly approver_id: string }
   | { readonly kind: 'install_update'; readonly install: string; readonly commit: string; readonly base: string }
   | { readonly kind: 'enrol'; readonly label: string; readonly token_sha256: string; readonly address: string };
@@ -86,7 +87,7 @@ const FLAT: { readonly [K in ActionKind]: Schema } = {
   set_schedule: { kind: text(/^set_schedule$/), keyref: KEYREF, rotate_every_days: int(1, 3650), grace_hours: int(0, 24 * 365) },
   vercel_set_domain: { kind: text(/^vercel_set_domain$/), project: text(NAME), op: oneOf('add', 'remove', 'move'), domain: text(DOMAIN_NAME), to_project: optional(text(NAME)) },
   vercel_set_team_setting: { kind: text(/^vercel_set_team_setting$/), setting: text(SETTING), value: text(SETTING_VALUE) },
-  approver_add: { kind: text(/^approver_add$/) },
+  approver_add: { kind: text(/^approver_add$/), cose_sha256: text(HASH), device_sha256: text(HASH) },
   approver_remove: { kind: text(/^approver_remove$/), approver_id: text(APPROVER_ID) },
   install_update: { kind: text(/^install_update$/), install: text(HASH), commit: text(COMMIT), base: text(HASH) },
   enrol: { kind: text(/^enrol$/), label: text(ENROL_LABEL), token_sha256: text(HASH), address: text(ADDRESS_TEXT) },
@@ -128,6 +129,18 @@ function rules(v: unknown): readonly AllowRule[] | undefined {
     out.push({ op: r['op'], params });
   }
   return out;
+}
+
+export type ApproverAdd = Extract<Action, { readonly kind: 'approver_add' }>;
+
+/**
+ * The approver_add that names a new approver's keys (spec revision 4): lowercase hex SHA-256 of the COSE public key and of
+ * the device public key, as registered. Core builds the proposal with it and root rebuilds it from the keys it is asked to
+ * add, so a kept approval adds only the keys the owner compared.
+ */
+export function approverAddOf(coseKey: Uint8Array, devicePublicKey: Uint8Array): ApproverAdd {
+  const sha = (b: Uint8Array): string => createHash('sha256').update(b).digest('hex');
+  return { kind: 'approver_add', cose_sha256: sha(coseKey), device_sha256: sha(devicePublicKey) };
 }
 
 const isKind = (k: unknown): k is ActionKind => typeof k === 'string' && (ACTION_KINDS as readonly string[]).includes(k);

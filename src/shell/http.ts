@@ -38,6 +38,8 @@ export interface RouteInput {
   readonly params: Readonly<Record<string, string>>;
   /** The raw Cookie header of a phone request (the view session). The machine API refuses any cookie before a route runs. */
   readonly cookie: string | undefined;
+  /** The raw body of a route that declares `rawBody`. */
+  readonly raw?: Uint8Array;
 }
 
 export interface Route {
@@ -50,6 +52,8 @@ export interface Route {
   /** An `api` route that takes no token: only the unauthenticated enrol routes (KBOX-53). */
   readonly open: boolean;
   readonly takesBody: boolean;
+  /** A body of raw bytes of exactly this media type, up to `limit` bytes, instead of JSON (the update tar, KBOX-6). */
+  readonly rawBody?: { readonly type: string; readonly limit: number };
   run(input: RouteInput): Promise<Reply> | Reply;
 }
 
@@ -172,11 +176,11 @@ const header = (req: IncomingMessage, name: string): string | undefined => {
   return Array.isArray(value) ? value.join(', ') : value;
 };
 
-async function readBody(req: IncomingMessage): Promise<Uint8Array> {
+async function readBody(req: IncomingMessage, limit: number): Promise<Uint8Array> {
   const declared = header(req, 'content-length');
   if (declared !== undefined) {
     if (!/^\d{1,15}$/.test(declared)) throw new ApiError('bad_request');
-    if (Number(declared) > BODY_LIMIT) throw new ApiError('too_large');
+    if (Number(declared) > limit) throw new ApiError('too_large');
   }
   const chunks: Buffer[] = [];
   let total = 0;
@@ -184,13 +188,13 @@ async function readBody(req: IncomingMessage): Promise<Uint8Array> {
     for await (const chunk of req) {
       const piece = chunk as Buffer;
       total += piece.length;
-      if (total > BODY_LIMIT) break;
+      if (total > limit) break;
       chunks.push(piece);
     }
   } catch {
     throw new ApiError('bad_request');
   }
-  if (total > BODY_LIMIT) throw new ApiError('too_large');
+  if (total > limit) throw new ApiError('too_large');
   return Buffer.concat(chunks);
 }
 
@@ -237,9 +241,14 @@ export function createApiServer(deps: ApiServerDeps): ApiServer {
     trace.ref = found.path;
     if (found.scope !== undefined && found.scope !== scope) throw new ApiError('forbidden');
 
-    const bytes = await readBody(req);
+    const bytes = await readBody(req, found.rawBody?.limit ?? BODY_LIMIT);
     let body: unknown;
-    if (found.takesBody) {
+    let raw: Uint8Array | undefined;
+    if (found.rawBody !== undefined) {
+      // A route that takes raw bytes of one fixed type (the update tar, KBOX-6) gets them as they came, bounded by its limit.
+      if ((header(req, 'content-type') ?? '').toLowerCase() !== found.rawBody.type) throw new ApiError('unsupported_media');
+      raw = bytes;
+    } else if (found.takesBody) {
       if (!JSON_TYPE.test(header(req, 'content-type') ?? '')) throw new ApiError('unsupported_media');
       const decoded = decodeJsonBody(bytes);
       if (!decoded.ok) throw new ApiError('bad_request');
@@ -248,7 +257,7 @@ export function createApiServer(deps: ApiServerDeps): ApiServer {
       throw new ApiError('bad_request');
     }
     const cookie = surface === 'phone' ? header(req, 'cookie') : undefined;
-    const reply = await found.run({ actor: trace.actor, source, abort, query: url.searchParams, body, params, cookie });
+    const reply = await found.run({ actor: trace.actor, source, abort, query: url.searchParams, body, params, cookie, ...(raw === undefined ? {} : { raw }) });
     const common = { status: reply.status ?? 200, code: undefined, cause: undefined, headers: reply.headers ?? {} };
     return 'raw' in reply ? { ...common, body: undefined, raw: reply.raw } : { ...common, body: reply.json, raw: undefined };
   }
