@@ -2,7 +2,7 @@
 // pages against the demo (test/support/demo-pages.ts): setup with the setup code, the queue, an approval, a denial, the pending phone's approval,
 // the paste page (a refused value, then a good one) and recovery. A PNG per state goes to the output directory; every console error, page error and
 // failed or refused request is printed at the end. It needs Chromium, so it is no test file: the gate does not collect it.
-// Run `node test/browser/phone-run.ts <output dir>`. Under `node --test` this file does nothing.
+// Run `node test/browser/phone-run.ts <output dir>`; it exits non-zero when a step fails. Under `node --test` this file does nothing.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DEMO_PASTE_VALUE, startDemo } from '../support/demo-pages.ts';
@@ -257,34 +257,37 @@ async function walk(phone: Phone, demo: Demo, notes: string[]): Promise<void> {
   await phone.shot('recover-done');
 }
 
-async function main(out: string): Promise<number> {
+async function main(out: string): Promise<void> {
   mkdirSync(out, { recursive: true });
   const demo = await startDemo();
   const notes: string[] = [];
+  // The seeding of the pending phone fails on its own clock: it is reported with the notes, and awaited again where the walk needs it.
+  void demo.pendingPhone.then(
+    () => undefined,
+    (error: unknown) => void notes.push(`the pending phone was not seeded: ${error instanceof Error ? error.message : String(error)}`),
+  );
   let browser: Awaited<ReturnType<typeof launchChromium>> | undefined;
-  let failure: unknown;
   let phone: Phone | undefined;
   try {
     browser = await launchChromium('keys.localhost', demo.port);
     phone = await Phone.open(browser.cdp, out);
     await walk(phone, demo, notes);
   } catch (error) {
-    failure = error;
-    await phone?.shot('where-it-stopped').catch(() => undefined);
+    if (phone !== undefined) {
+      await phone.shot('where-it-stopped').catch((shotError: unknown) => {
+        throw new AggregateError([error, shotError], 'the run stopped, and the screenshot of where it stopped failed');
+      });
+    }
+    throw error;
   } finally {
     browser?.cdp.close();
     await browser?.stop();
     await demo.stop();
+    for (const s of phone?.shots ?? []) process.stdout.write(`shot\t${s.file}\toverflow ${s.overflowPx}px\n`);
+    for (const n of notes) process.stdout.write(`note\t${n}\n`);
+    for (const t of phone?.trouble ?? []) process.stdout.write(`trouble\t${t.kind}\t${t.text}\n`);
   }
-  for (const s of phone?.shots ?? []) process.stdout.write(`shot\t${s.file}\toverflow ${s.overflowPx}px\n`);
-  for (const n of notes) process.stdout.write(`note\t${n}\n`);
-  for (const t of phone?.trouble ?? []) process.stdout.write(`trouble\t${t.kind}\t${t.text}\n`);
-  if (failure !== undefined) {
-    process.stderr.write(`the run stopped: ${failure instanceof Error ? failure.message : String(failure)}\n`);
-    return 1;
-  }
-  return 0;
 }
 
 const out = process.argv[2];
-if (import.meta.main && !process.env['NODE_TEST_CONTEXT'] && out !== undefined) process.exitCode = await main(out);
+if (import.meta.main && !process.env['NODE_TEST_CONTEXT'] && out !== undefined) await main(out);

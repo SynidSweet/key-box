@@ -267,8 +267,6 @@ export async function startDemo(options: DemoOptions = {}): Promise<Demo> {
       { name: 'paste a key', url: `https://${HOST}/paste.html#${pasteId}` },
     ];
     const pendingPhone = seedPendingPhone(driver, approve.approvers, closers);
-    // A seeding that fails is reported to whoever awaits it; an unawaited one must not end the process.
-    pendingPhone.catch(() => undefined);
     return { port, certificatePath: join(certDir, 'cert.pem'), setupCode, recoveryCode, pages, pendingPhone, stop };
   } catch (error) {
     await stop();
