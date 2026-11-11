@@ -93,6 +93,7 @@ interface Fresh {
 /** The process stopped at a checkpoint (a test's crash): the drive ends there and recovery is the next start's. */
 class Stopped extends Error {}
 
+const codeOf = (error: unknown): string => (error instanceof ApiError ? error.code : 'internal');
 const underscored = (kind: string): string => kind.replace(/[^a-z0-9]+/g, '_');
 const hex = (b: Uint8Array): string => Buffer.from(b).toString('hex');
 
@@ -119,6 +120,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
   const launch = (runId: string): void => {
     const job: Promise<void> = drive(runId).catch((error: unknown) => {
+      deps.audit.append({ action: 'rotation.drive_failed', subject: runId, at: now(), detail: { run_id: runId, code: error instanceof Stopped ? 'stopped' : codeOf(error) } });
       recover(runId, error);
     });
     inflight.add(job);
@@ -126,23 +128,18 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   };
 
   /**
-   * A throw outside `attempt()` (the master key unreadable, the store refusing a write) is never silent (review M2): it is audited, a retry
+   * A throw outside `attempt()` (the master key unreadable, the store refusing a write) is never silent (review M2): launch audits it, a retry
    * timer is kept, and the run gets its one notice: before promote the run fails and rolls back (`rotation.failed`); from promote on, the new
    * key works and the old one stays on (`rotation.old_key_still_on`); while rolling back, the failure's notice was already sent.
    */
   function recover(runId: string, error: unknown): void {
-    if (error instanceof Stopped) {
-      deps.audit.append({ action: 'rotation.drive_failed', subject: runId, at: now(), detail: { run_id: runId, code: 'stopped' } });
-      return;
-    }
+    if (error instanceof Stopped) return;
     const count = (faults.get(runId) ?? 0) + 1;
     faults.set(runId, count);
     later(runId, retryDelayMs(count - 1));
-    const code = error instanceof ApiError ? error.code : 'internal';
     try {
       const run = store.run(runId);
-      deps.audit.append({ action: 'rotation.drive_failed', subject: run?.keyref ?? runId, at: now(), detail: { run_id: runId, code } });
-      if (run !== undefined) noticeStuck(run, code);
+      if (run !== undefined) noticeStuck(run, codeOf(error));
     } catch {
       // The store refused even this: the timer above tries the whole run again; the audit says so.
       deps.audit.append({ action: 'rotation.drive_failed', subject: runId, at: now(), detail: { run_id: runId, code: 'notice_failed' } });
