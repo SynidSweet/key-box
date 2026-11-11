@@ -98,16 +98,17 @@ for (const [form, render] of Object.entries(FORMS)) {
     const planted = `before ${render(Buffer.from(c.bytes))} after`;
     const clean = 'nothing to see here';
     assert.deepEqual([...new Set(c.findIn({ log: planted, db: clean }).map((h) => h.surface))], ['log']);
-    let message = '';
-    try {
-      c.assertAbsent({ log: planted, db: clean });
-    } catch (e) {
-      message = e instanceof Error ? e.message : String(e);
-    }
-    assert.match(message, /log/);
-    assert.match(message, new RegExp(form));
-    assert.equal(message.includes(render(Buffer.from(c.bytes))), false);
-    assert.equal(message.includes(Buffer.from(c.bytes).toString('hex')), false);
+    assert.throws(
+      () => c.assertAbsent({ log: planted, db: clean }),
+      (e: unknown) => {
+        const message = e instanceof Error ? e.message : String(e);
+        assert.match(message, /log/);
+        assert.match(message, new RegExp(form));
+        assert.equal(message.includes(render(Buffer.from(c.bytes))), false);
+        assert.equal(message.includes(Buffer.from(c.bytes).toString('hex')), false);
+        return true;
+      },
+    );
   });
 }
 

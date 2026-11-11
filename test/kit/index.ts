@@ -10,3 +10,5 @@ export type { SeededRandom } from './random.ts';
 export { softAuthenticator } from './soft-authenticator.ts';
 export type { SoftAssertion, SoftAuthenticator, SoftCredential } from './soft-authenticator.ts';
 export { tempDir } from './temp.ts';
+export { runNode } from './proc.ts';
+export type { NodeRun } from './proc.ts';
