@@ -35,25 +35,32 @@ export const ERROR_TABLE: Readonly<Record<ErrorCode, { readonly status: number; 
 /** A names-only reason that rides along with a code, such as `epoch_changed`. */
 export const DETAIL_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
+/** The approval id a 409 `slot_taken` names (KBOX-53). */
+const PENDING_ID = /^apr_[A-Za-z0-9_-]{16}$/;
+
+/** A names-only reason code, or the pending approval that holds a slot. */
+export type ErrorDetail = { readonly code: string } | { readonly pending_approval_id: string };
+
 export interface ErrorBody {
   readonly error: {
     readonly code: ErrorCode;
     readonly message: string;
-    readonly detail?: { readonly code: string };
+    readonly detail?: ErrorDetail;
   };
 }
 
 /** A failure with a code of the table. The message is the table's fixed text and nothing else. */
 export class ApiError extends Error {
   readonly code: ErrorCode;
-  readonly detailCode: string | undefined;
+  readonly detail: ErrorDetail | undefined;
 
-  constructor(code: ErrorCode, detailCode?: string) {
+  constructor(code: ErrorCode, detail?: string | { readonly pending_approval_id: string }) {
     super(ERROR_TABLE[code].message);
-    if (detailCode !== undefined && !DETAIL_CODE.test(detailCode)) throw new RangeError('an error detail code is a lower-case snake_case name');
+    if (typeof detail === 'string' && !DETAIL_CODE.test(detail)) throw new RangeError('an error detail code is a lower-case snake_case name');
+    if (typeof detail === 'object' && !PENDING_ID.test(detail.pending_approval_id)) throw new RangeError('a pending approval id is a box-made name');
     this.name = 'ApiError';
     this.code = code;
-    this.detailCode = detailCode;
+    this.detail = detail === undefined ? undefined : typeof detail === 'string' ? { code: detail } : { pending_approval_id: detail.pending_approval_id };
   }
 }
 
@@ -135,22 +142,22 @@ export type InternalCause = 'adapter_failed' | 'adapter_bad_response' | 'vault_f
 
 export interface MappedError {
   readonly code: ErrorCode;
-  readonly detailCode: string | undefined;
+  readonly detail: ErrorDetail | undefined;
   /** Set for `internal` only. */
   readonly cause: InternalCause | undefined;
 }
 
 /** Turns anything that was thrown into the code to answer with; unknown things become `internal`. */
 export function mapError(thrown: unknown): MappedError {
-  if (thrown instanceof ApiError) return { code: thrown.code, detailCode: thrown.detailCode, cause: undefined };
-  const internal = (cause: InternalCause): MappedError => ({ code: 'internal', detailCode: undefined, cause });
+  if (thrown instanceof ApiError) return { code: thrown.code, detail: thrown.detail, cause: undefined };
+  const internal = (cause: InternalCause): MappedError => ({ code: 'internal', detail: undefined, cause });
   if (thrown instanceof AdapterError) return internal(thrown.reason === 'bad_response' ? 'adapter_bad_response' : 'adapter_failed');
   if (thrown instanceof VaultError) return internal('vault_failed');
   if (thrown instanceof WriteRefused) return internal('write_refused');
   return internal('unhandled');
 }
 
-export function errorBody(code: ErrorCode, detailCode?: string): ErrorBody {
+export function errorBody(code: ErrorCode, detail?: ErrorDetail): ErrorBody {
   const base = { code, message: ERROR_TABLE[code].message };
-  return { error: detailCode === undefined ? base : { ...base, detail: { code: detailCode } } };
+  return { error: detail === undefined ? base : { ...base, detail } };
 }

@@ -12,7 +12,7 @@ import type { ClientAddress } from '../pure/address.ts';
 import { ApiError, ERROR_TABLE, errorBody, mapError } from '../pure/errors.ts';
 import type { ErrorCode, InternalCause } from '../pure/errors.ts';
 import { HTTP_METHODS, decodeJsonBody, parseObject, parseQuery } from '../pure/schemas.ts';
-import type { Infer, Schema } from '../pure/schemas.ts';
+import type { Infer, Parsed, Schema } from '../pure/schemas.ts';
 import { findToken, parseBearer } from '../pure/tokens.ts';
 
 /** A mechanical safety bound for parsing, not a policy limit (KBOX-29). */
@@ -21,10 +21,10 @@ const JSON_TYPE = /^application\/json(?:\s*;\s*charset=utf-?8)?$/i;
 
 // --- routes -------------------------------------------------------------------------------------------------------------
 
-export interface Reply {
-  readonly status?: number;
-  readonly json: unknown;
-}
+/** A JSON answer, or (phone pages and assets) raw bytes of a fixed type. `headers` are added to the frame's own (Set-Cookie). */
+export type Reply =
+  | { readonly status?: number; readonly json: unknown; readonly headers?: Readonly<Record<string, string>> }
+  | { readonly status?: number; readonly raw: { readonly type: string; readonly bytes: Uint8Array }; readonly headers?: Readonly<Record<string, string>> };
 
 export interface RouteInput {
   /** The token's label on the machine API; `box` on a phone route. */
@@ -34,47 +34,99 @@ export interface RouteInput {
   readonly query: URLSearchParams;
   /** The parsed JSON body; undefined for a route that takes none. */
   readonly body: unknown;
+  /** The values of the route's `:name` path segments. */
+  readonly params: Readonly<Record<string, string>>;
+  /** The raw Cookie header of a phone request (the view session). The machine API refuses any cookie before a route runs. */
+  readonly cookie: string | undefined;
 }
 
 export interface Route {
   readonly method: string;
+  /** Exact segments, or `:name` for one segment of `[A-Za-z0-9_-]{1,128}`. */
   readonly path: string;
   /** `api` is the machine API (bearer token, no browser); `phone` is a page or phone route (no bearer token). */
   readonly surface: 'api' | 'phone';
   readonly scope: TokenScope | undefined;
+  /** An `api` route that takes no token: only the unauthenticated enrol routes (KBOX-53). */
+  readonly open: boolean;
   readonly takesBody: boolean;
   run(input: RouteInput): Promise<Reply> | Reply;
 }
 
 type Empty = Readonly<Record<never, never>>;
 
+interface Context<Q, B> {
+  readonly actor: string;
+  readonly source: ClientAddress;
+  readonly abort: AbortSignal;
+  readonly query: Q;
+  readonly body: B;
+  readonly params: Readonly<Record<string, string>>;
+  readonly cookie: string | undefined;
+}
+
 export interface RouteSpec<Q extends Schema, B extends Schema> {
   readonly method: string;
   readonly path: string;
   readonly surface: 'api' | 'phone';
-  /** Required on an `api` route. */
+  /** Required on an `api` route unless it is `open`. */
   readonly scope?: TokenScope;
+  readonly open?: true;
   readonly query?: Q;
   readonly body?: B;
-  handle(context: { readonly actor: string; readonly source: ClientAddress; readonly abort: AbortSignal; readonly query: Infer<Q>; readonly body: Infer<B> }): Promise<Reply> | Reply;
+  handle(context: Context<Infer<Q>, Infer<B>>): Promise<Reply> | Reply;
 }
 
 /** A route whose query and body are parsed into the given closed schemas before the handler sees them. */
 export function route<Q extends Schema = Empty, B extends Schema = Empty>(spec: RouteSpec<Q, B>): Route {
-  if (spec.surface === 'api' && spec.scope === undefined) throw new RangeError('an api route names the token scope it needs');
+  if (spec.surface === 'api' && (spec.scope === undefined) === (spec.open === undefined)) throw new RangeError('an api route names the token scope it needs, or is open');
   return {
     method: spec.method,
     path: spec.path,
     surface: spec.surface,
     scope: spec.scope,
+    open: spec.open === true,
     takesBody: spec.body !== undefined,
     run: (input) => {
       const query = parseQuery((spec.query ?? {}) as Q, input.query);
       const body = spec.body === undefined ? { ok: true as const, value: {} as Infer<B> } : parseObject(spec.body, input.body);
       if (!query.ok || !body.ok) throw new ApiError('bad_request');
-      return spec.handle({ actor: input.actor, source: input.source, abort: input.abort, query: query.value, body: body.value });
+      return spec.handle({ actor: input.actor, source: input.source, abort: input.abort, query: query.value, body: body.value, params: input.params, cookie: input.cookie });
     },
   };
+}
+
+/** A route with a nested JSON body: `parse` turns the raw body into its closed type at the edge, or refuses it. */
+export function parsedRoute<Q extends Schema, T>(spec: Omit<RouteSpec<Q, Empty>, 'body' | 'handle'> & { readonly parse: (raw: unknown) => Parsed<T>; handle(context: Context<Infer<Q>, T>): Promise<Reply> | Reply }): Route {
+  const base = route<Q>({ ...spec, handle: () => ({ json: null }) });
+  return {
+    ...base,
+    takesBody: true,
+    run: (input) => {
+      const query = parseQuery((spec.query ?? {}) as Q, input.query);
+      const body = spec.parse(input.body);
+      if (!query.ok || !body.ok) throw new ApiError('bad_request');
+      return spec.handle({ actor: input.actor, source: input.source, abort: input.abort, query: query.value, body: body.value, params: input.params, cookie: input.cookie });
+    },
+  };
+}
+
+const SEGMENT = /^[A-Za-z0-9_-]{1,128}$/;
+
+/** The `:name` values when `pathname` matches the route's pattern; undefined otherwise. */
+function matchPath(pattern: string, pathname: string): Record<string, string> | undefined {
+  const want = pattern.split('/');
+  const got = pathname.split('/');
+  if (want.length !== got.length) return undefined;
+  const params: Record<string, string> = {};
+  for (const [i, w] of want.entries()) {
+    const g = got[i] ?? '';
+    if (w.startsWith(':')) {
+      if (!SEGMENT.test(g)) return undefined;
+      params[w.slice(1)] = g;
+    } else if (w !== g) return undefined;
+  }
+  return params;
 }
 
 // --- the server --------------------------------------------------------------------------------------------------------
@@ -104,13 +156,15 @@ interface Trace {
 interface Outcome {
   readonly status: number;
   readonly body: unknown;
+  readonly raw: { readonly type: string; readonly bytes: Uint8Array } | undefined;
+  readonly headers: Readonly<Record<string, string>>;
   readonly code: ErrorCode | undefined;
   readonly cause: InternalCause | undefined;
 }
 
 const failed = (thrown: unknown): Outcome => {
   const mapped = mapError(thrown);
-  return { status: ERROR_TABLE[mapped.code].status, body: errorBody(mapped.code, mapped.detailCode), code: mapped.code, cause: mapped.cause };
+  return { status: ERROR_TABLE[mapped.code].status, body: errorBody(mapped.code, mapped.detail), raw: undefined, headers: {}, code: mapped.code, cause: mapped.cause };
 };
 
 const header = (req: IncomingMessage, name: string): string | undefined => {
@@ -169,12 +223,17 @@ export function createApiServer(deps: ApiServerDeps): ApiServer {
     if (source === undefined) throw new ApiError('bad_request');
     trace.source = source.address;
 
+    const matching = (r: Route): boolean => r.surface === surface && r.method === req.method && matchPath(r.path, url.pathname) !== undefined;
     let scope: TokenScope | undefined;
-    if (surface === 'api') scope = authenticate(req, trace, source);
-    else if (req.headers.authorization !== undefined) throw new ApiError('forbidden');
+    if (surface === 'api') {
+      const openRoute = deps.routes.find((r) => r.open && matching(r));
+      if (openRoute === undefined) scope = authenticate(req, trace, source);
+      else if (req.headers.authorization !== undefined) throw new ApiError('forbidden');
+    } else if (req.headers.authorization !== undefined) throw new ApiError('forbidden');
 
-    const found = deps.routes.find((r) => r.surface === surface && r.path === url.pathname && r.method === req.method);
+    const found = deps.routes.find(matching);
     if (found === undefined) throw new ApiError('not_found');
+    const params = matchPath(found.path, url.pathname) ?? {};
     trace.ref = found.path;
     if (found.scope !== undefined && found.scope !== scope) throw new ApiError('forbidden');
 
@@ -188,8 +247,10 @@ export function createApiServer(deps: ApiServerDeps): ApiServer {
     } else if (bytes.length > 0) {
       throw new ApiError('bad_request');
     }
-    const reply = await found.run({ actor: trace.actor, source, abort, query: url.searchParams, body });
-    return { status: reply.status ?? 200, body: reply.json, code: undefined, cause: undefined };
+    const cookie = surface === 'phone' ? header(req, 'cookie') : undefined;
+    const reply = await found.run({ actor: trace.actor, source, abort, query: url.searchParams, body, params, cookie });
+    const common = { status: reply.status ?? 200, code: undefined, cause: undefined, headers: reply.headers ?? {} };
+    return 'raw' in reply ? { ...common, body: undefined, raw: reply.raw } : { ...common, body: reply.json, raw: undefined };
   }
 
   /** One audit row per request. If the row cannot be written the answer is `internal`, and the journal gets a fixed code. */
@@ -218,9 +279,10 @@ export function createApiServer(deps: ApiServerDeps): ApiServer {
   };
 
   const send = (res: ServerResponse, outcome: Outcome, requestId: string): void => {
-    const payload = Buffer.from(JSON.stringify(outcome.body), 'utf8');
+    const payload = outcome.raw === undefined ? Buffer.from(JSON.stringify(outcome.body), 'utf8') : Buffer.from(outcome.raw.bytes);
     res.writeHead(outcome.status, {
-      'content-type': 'application/json; charset=utf-8',
+      ...outcome.headers,
+      'content-type': outcome.raw === undefined ? 'application/json; charset=utf-8' : outcome.raw.type,
       'content-length': payload.length,
       'cache-control': 'no-store',
       'kb-api-version': '1',
