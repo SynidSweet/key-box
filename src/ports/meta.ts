@@ -81,11 +81,24 @@ export interface NewMachine {
   readonly enrolledAt: number;
 }
 
+/** The share file's version and the public half of its signing key, as GET /api/meta shows them (KBOX-33). */
+export interface ShareState {
+  /** 0 until the first share file is announced. */
+  readonly version: number;
+  /** Raw 32-byte Ed25519 public key, base64; null until the signing key is made. */
+  readonly publicKeyB64: string | null;
+}
+
 export interface MetaStore {
   /** The epoch chosen when meta.db was created. */
   epoch(): string;
   /** Records the running release H (KBOX-6): `/healthz` and `GET /api/meta` show it. Core sets it at every start. */
   setRelease(release: string): void;
+  shareState(): ShareState;
+  /** Publishes the share signing key's public half. Setting the same key again is allowed; a different one is refused. */
+  setSharePublicKey(keyB64: string): void;
+  /** Records a share version and writes one `share.version` event in the same transaction. A version not above the last is refused. */
+  announceShare(version: number): void;
   /** Everything GET /api/meta shows, read in one transaction, with the event cursor of that same moment. */
   snapshot(): MetaSnapshot;
   putKey(key: KeyRow): void;

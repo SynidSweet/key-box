@@ -15,6 +15,8 @@ import { createApiServer } from './shell/http.ts';
 import type { Route } from './shell/http.ts';
 import { createIdleWatch } from './shell/idle-watch.ts';
 import type { IdleWatch } from './shell/idle-watch.ts';
+import { createShareWriter, shareRoute } from './shell/share-writer.ts';
+import { createMetaShareSource } from './shell/share-source.ts';
 import { createPush } from './shell/push.ts';
 import { createHttpPushTransport } from './shell/push-transport.ts';
 import { openPrivateDatabase } from './shell/private-db.ts';
@@ -49,6 +51,9 @@ function readConfig(env: NodeJS.ProcessEnv): Config {
 /** The kinds whose proposal check needs a platform adapter's profile; with none registered they are refused. */
 const NEEDS_ADAPTER: ReadonlySet<Action['kind']> = new Set(['add_key', 'add_destination', 'set_allow_rules', 'vercel_set_domain', 'vercel_set_team_setting']);
 const vetWithoutAdapters = (action: Action): 'ok' | 'rejected' => (NEEDS_ADAPTER.has(action.kind) ? 'rejected' : 'ok');
+
+/** No platform adapter registers its key shape yet, so no admin or master key is watched; each adapter unit adds its `shape` here. */
+const noShapeYet = (): undefined => undefined;
 
 const SWEEP_EVERY_MS = 60 * 60_000;
 /** How often core looks for root's answer to an install it waits for. */
@@ -103,8 +108,22 @@ async function main(): Promise<void> {
     idle = createIdleWatch({ files: { stat: '/proc/stat', meminfo: '/proc/meminfo', netdev: '/proc/net/dev' }, clock: systemClock, push, linkMbps: linkMbps(), notifier: { notice: journal } });
     approve = openApproveCore({ parts, approverStore: privateStore, trust, push, clock: systemClock, random: systemRandom, domain: config.domain, wordlist, vet: vetWithoutAdapters, executors: { install_update: updater.executor } });
   }
+  const shares = createShareWriter({
+    dir: join(config.stateDir, 'share'),
+    meta: parts.meta,
+    signingKey: parts.share.signingKey,
+    source: createMetaShareSource({ meta: parts.meta, values: parts.share.values, shapeOf: noShapeYet }),
+    events: parts.events,
+    hub: parts.hub,
+    clock: systemClock,
+    scheduler: systemScheduler,
+    random: systemRandom,
+    audit: parts.audit,
+  });
+  // A first file that cannot be written does not stop the box: the file is served as stale (503) until the next key.changed makes one.
+  await shares.start().catch(() => parts.audit.append({ action: 'share.refresh_failed', subject: 'share', at: systemClock.now(), detail: { code: 'start_failed' } }));
   const server = createApiServer({
-    routes: coreRoutes(parts.routes, approve?.routes ?? [], approve === undefined || running === undefined ? [] : updater.routes),
+    routes: [...coreRoutes(parts.routes, approve?.routes ?? [], approve === undefined || running === undefined ? [] : updater.routes), shareRoute(shares)],
     tokens: approve?.tokens.tokenStore ?? parts.meta,
     audit: parts.audit,
     random: systemRandom,
@@ -136,6 +155,7 @@ async function main(): Promise<void> {
       cancelSettle();
       cancelIdle();
       idle?.stop();
+      shares.stop();
       void server.stop().then(() => {
         privateStore.close();
         parts.close();
