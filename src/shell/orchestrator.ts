@@ -184,12 +184,17 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     }
   }
 
-  const lendOrUndefined = (keyref: string, gen: number): Lent | undefined => {
+  /** A generation the vault no longer lends (retired, never stored) as a result: the caller decides what its absence means. */
+  const tryLend = (keyref: string, gen: number): { readonly ok: true; readonly value: Lent } | { readonly ok: false } => {
     try {
-      return deps.vault.lend(keyref, gen);
+      return { ok: true, value: deps.vault.lend(keyref, gen) };
     } catch {
-      return undefined;
+      return { ok: false };
     }
+  };
+  const lendOrUndefined = (keyref: string, gen: number): Lent | undefined => {
+    const lent = tryLend(keyref, gen);
+    return lent.ok ? lent.value : undefined;
   };
 
   // --- steps 3 and 4: create and store ----------------------------------------------------------------------------------------
