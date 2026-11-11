@@ -54,8 +54,20 @@ const SCHEMA = `
     title TEXT NOT NULL,
     slot TEXT NOT NULL,
     opened_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL
+    expires_at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'denied', 'expired')),
+    revision INTEGER NOT NULL DEFAULT 1,
+    requester TEXT NOT NULL DEFAULT 'box',
+    action_json TEXT NOT NULL DEFAULT '{}',
+    digest_hex TEXT NOT NULL DEFAULT '',
+    reason_json TEXT,
+    decided_at INTEGER,
+    decided_by TEXT,
+    proof_json TEXT,
+    result TEXT CHECK (result IS NULL OR result IN ('done', 'failed')),
+    result_code TEXT
   ) STRICT;
+  CREATE UNIQUE INDEX IF NOT EXISTS approvals_one_pending_per_slot ON approvals (slot) WHERE status = 'pending';
   CREATE TABLE IF NOT EXISTS events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     at INTEGER NOT NULL,

@@ -89,6 +89,12 @@ export interface MetaStore {
   putKey(key: KeyRow): void;
   putDestination(keyref: string, destination: MetaDestination): void;
   putGrant(keyref: string, machine: string): void;
+  /** Removes a grant; `not_found` when there was none. Writes `key.changed`. */
+  removeGrant(keyref: string, machine: string): void;
+  /** Removes a destination; `not_found` when there was none. Writes `key.changed`. */
+  removeDestination(keyref: string, kind: string, target: string): void;
+  /** The coverage of a stored key (`null` until measured), or undefined for no such key. */
+  coverageOf(keyref: string): Coverage | null | undefined;
   addMachine(machine: NewMachine): void;
   revokeMachine(label: string): void;
   putApproval(approval: MetaApproval): void;

@@ -182,6 +182,21 @@ export const AUDIT_SCHEMAS = {
     cause: optional(text(CODE)),
     source: optional(text(ADDRESS)),
   },
+  // kernel-approve (KBOX-7, KBOX-9, KBOX-11, KBOX-20, KBOX-49): the row's ref is the approval id, the approver id or the label.
+  'approval.proposed': { kind: text(CODE), slot: text(NAME), revision: int(1), decision: oneOf('open', 'replace', 'takeover') },
+  'approval.decided': { decision: oneOf('approved', 'denied', 'expired') },
+  'approval.executed': { result: oneOf('done', 'failed'), reason_code: text(CODE) },
+  /** A passkey assertion or device signature that did not hold: the purpose and a fixed code, nothing of the proof. */
+  'proof.refused': { purpose: oneOf('view', 'op', 'register', 'decide'), code: text(CODE) },
+  'view.opened': {},
+  'approver.registered': { via: oneOf('setup', 'recovery', 'approver_add') },
+  'approver.removed': { via: oneOf('recovery', 'approver_remove') },
+  /** Recovery replaced the approvers. No code, no text. */
+  'recovery.used': {},
+  'trust.refused': { change: oneOf('setup', 'recovery', 'approver_add', 'approver_remove'), code: text(CODE) },
+  'enrol.window_opened': {},
+  'enrol.accepted': { scope: oneOf('control', 'relay') },
+  'token.revoked': {},
   'key.issued': {},
   'key.revoked': {},
   /** A push service accepted one message. The row's ref is `push`; no endpoint, key or title is recorded. */

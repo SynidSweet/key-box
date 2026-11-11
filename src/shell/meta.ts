@@ -103,7 +103,7 @@ function readSnapshot(db: DatabaseSync): MetaSnapshot {
   const machines = (db.prepare('SELECT label, scope, enrolled_at, revoked, last_network FROM machines ORDER BY label').all() as unknown as (Omit<MetaMachine, 'revoked'> & { revoked: number })[]).map(
     (m): MetaMachine => ({ label: m.label, scope: m.scope, enrolled_at: m.enrolled_at, revoked: m.revoked === 1, last_network: m.last_network }),
   );
-  const approvals = (db.prepare('SELECT approval_id, kind, title, slot, opened_at, expires_at FROM approvals ORDER BY opened_at, approval_id').all() as unknown as MetaApproval[]).map((a): MetaApproval => ({ ...a }));
+  const approvals = (db.prepare("SELECT approval_id, kind, title, slot, opened_at, expires_at FROM approvals WHERE status = 'pending' ORDER BY opened_at, approval_id").all() as unknown as MetaApproval[]).map((a): MetaApproval => ({ ...a }));
   return { cursor, box, keys, machines, approvals };
 }
 
@@ -161,6 +161,27 @@ export function createMetaStore(db: DatabaseSync, clock: Clock, hub: EventSignal
         db.prepare('INSERT OR IGNORE INTO grants (keyref, machine) VALUES (?, ?)').run(g.keyref, g.machine);
         keyChanged(g.keyref);
       });
+    },
+
+    removeGrant(keyref: string, machine: string): void {
+      const g = closed(parseObject(GRANT_SCHEMA, { keyref, machine }));
+      write(() => {
+        if (db.prepare('DELETE FROM grants WHERE keyref = ? AND machine = ?').run(g.keyref, g.machine).changes === 0) throw new ApiError('not_found');
+        keyChanged(g.keyref);
+      });
+    },
+
+    removeDestination(keyref: string, kind: string, target: string): void {
+      const d = closed(parseObject({ keyref: text(NAME), kind: text(NAME), target: text(NAME) }, { keyref, kind, target }));
+      write(() => {
+        if (db.prepare('DELETE FROM destinations WHERE keyref = ? AND kind = ? AND target = ?').run(d.keyref, d.kind, d.target).changes === 0) throw new ApiError('not_found');
+        keyChanged(d.keyref);
+      });
+    },
+
+    coverageOf(keyref: string): Coverage | null | undefined {
+      const row = db.prepare('SELECT coverage FROM keys WHERE keyref = ?').get(keyref) as { coverage: Coverage | null } | undefined;
+      return row === undefined ? undefined : row.coverage;
     },
 
     addMachine(machine: NewMachine): void {

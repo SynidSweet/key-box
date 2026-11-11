@@ -26,7 +26,32 @@ export interface PushStore {
   putVapidKeyPair(row: VapidKeyPairRow): void;
 }
 
-export interface PrivateStore extends PushStore {
+// --- Approvers (KBOX-9, KBOX-49, KBOX-20): core's own table; it follows the root copy only after an `applied` ---------
+/** One approver: a passkey and a device key registered together, its phrase and its last signature counter. Public keys only. */
+export interface ApproverRecord {
+  readonly approverId: string;
+  /** base64url. */
+  readonly credentialId: string;
+  /** The passkey's COSE_Key, base64url. */
+  readonly coseKey: string;
+  /** The device key, uncompressed P-256 point, base64url. */
+  readonly devicePublicKey: string;
+  /** The short phrase typed at registration, shown on paste pages (KBOX-12). */
+  readonly phrase: string;
+  readonly signCount: number;
+}
+
+export interface ApproverStore {
+  /** Approvers with both keys; a row without a device key can never approve and is not listed. */
+  listApprovers(): readonly ApproverRecord[];
+  putApprover(record: ApproverRecord): void;
+  removeApprover(approverId: string): void;
+  /** Recovery: every approver is replaced by these, in one transaction. */
+  replaceApprovers(records: readonly ApproverRecord[]): void;
+  setSignCount(approverId: string, signCount: number): void;
+}
+
+export interface PrivateStore extends PushStore, ApproverStore {
   addPushSubscription(row: PushSubscriptionRow): void;
   addApprover(row: ApproverRow): void;
   close(): void;

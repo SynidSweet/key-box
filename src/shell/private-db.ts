@@ -1,7 +1,7 @@
 // KBOX-5: private.db holds Web Push subscriptions and approver credentials. Only core's main opens it, and no export
 // route can: this adapter is the one place that names the file.
 import { DatabaseSync } from 'node:sqlite';
-import type { ApproverRow, PrivateStore, PushSubscriptionRow, VapidKeyPairRow } from '../ports/private.ts';
+import type { ApproverRecord, ApproverRow, PrivateStore, PushSubscriptionRow, VapidKeyPairRow } from '../ports/private.ts';
 
 export function openPrivateDatabase(path: string): PrivateStore {
   const db = new DatabaseSync(path);
@@ -16,9 +16,25 @@ export function openPrivateDatabase(path: string): PrivateStore {
     CREATE TABLE IF NOT EXISTS approvers (
       approver_id TEXT PRIMARY KEY,
       credential_id TEXT NOT NULL,
-      public_key TEXT NOT NULL
+      public_key TEXT NOT NULL,
+      device_public_key TEXT,
+      phrase TEXT,
+      sign_count INTEGER NOT NULL DEFAULT 0
     ) STRICT;
   `);
+  const putApprover = (r: ApproverRecord): void => {
+    db.prepare('INSERT OR REPLACE INTO approvers (approver_id, credential_id, public_key, device_public_key, phrase, sign_count) VALUES (?, ?, ?, ?, ?, ?)').run(r.approverId, r.credentialId, r.coseKey, r.devicePublicKey, r.phrase, r.signCount);
+  };
+  const inTransaction = (work: () => void): void => {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      work();
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  };
   // Web Push (KBOX-22): the one VAPID key pair of this box.
   db.exec(`
     CREATE TABLE IF NOT EXISTS vapid_key (
@@ -49,6 +65,26 @@ export function openPrivateDatabase(path: string): PrivateStore {
       db.prepare('INSERT OR REPLACE INTO vapid_key (id, private_key, public_key) VALUES (1, ?, ?)').run(row.privateKey, row.publicKey);
     },
     // ---------------------------------------------------------------------------------------------------------------
+    // Approvers (KBOX-9, KBOX-49, KBOX-20) ----------------------------------------------------------------------------
+    listApprovers(): readonly ApproverRecord[] {
+      const rows = db
+        .prepare('SELECT approver_id, credential_id, public_key, device_public_key, phrase, sign_count FROM approvers WHERE device_public_key IS NOT NULL AND phrase IS NOT NULL ORDER BY approver_id')
+        .all() as unknown as { approver_id: string; credential_id: string; public_key: string; device_public_key: string; phrase: string; sign_count: number }[];
+      return rows.map((r) => ({ approverId: r.approver_id, credentialId: r.credential_id, coseKey: r.public_key, devicePublicKey: r.device_public_key, phrase: r.phrase, signCount: r.sign_count }));
+    },
+    putApprover,
+    removeApprover(approverId: string): void {
+      db.prepare('DELETE FROM approvers WHERE approver_id = ?').run(approverId);
+    },
+    replaceApprovers(records: readonly ApproverRecord[]): void {
+      inTransaction(() => {
+        db.exec('DELETE FROM approvers');
+        for (const r of records) putApprover(r);
+      });
+    },
+    setSignCount(approverId: string, signCount: number): void {
+      db.prepare('UPDATE approvers SET sign_count = ? WHERE approver_id = ?').run(signCount, approverId);
+    },
     close(): void {
       db.close();
     },

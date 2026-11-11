@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AuditLog } from '../ports/audit.ts';
 import type { Clock, Scheduler } from '../ports/clock.ts';
-import type { EventLog } from '../ports/events.ts';
+import type { EventLog, EventSignal } from '../ports/events.ts';
 import type { MetaStore, TokenStore } from '../ports/meta.ts';
 import type { Random } from '../ports/random.ts';
 import type { Vault } from '../ports/vault.ts';
@@ -33,6 +33,7 @@ export interface CoreParts {
   readonly meta: MetaStore & TokenStore;
   readonly audit: AuditLog;
   readonly events: EventLog;
+  readonly hub: EventSignal;
   readonly poller: EventPoller;
   readonly vault: Vault;
   readonly routes: readonly Route[];
@@ -50,5 +51,5 @@ export function openCore(deps: CoreDeps): CoreParts {
   const vaultRoot = join(deps.stateDir, 'vault');
   for (const ref of sweepOrphanTemps(vaultRoot)) audit.append({ action: 'vault.temp_swept', subject: ref, at: deps.clock.now() });
   const vault = createFileVault(vaultRoot);
-  return { db, meta, audit, events, poller, vault, routes: controlRoutes({ meta, audit, events, poller }), close: () => db.close() };
+  return { db, meta, audit, events, hub, poller, vault, routes: controlRoutes({ meta, audit, events, poller }), close: () => db.close() };
 }

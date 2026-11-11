@@ -1,0 +1,247 @@
+// A started core with its approval half on a unix socket in a temp directory: the real parts main-core wires, a TimedClock,
+// the fake TrustPort over root's real code store, a recording push, and soft approvers registered through the real setup and
+// approver-add flows. It lives outside test/kit because it reaches the verifier, which the kit must not (KBOX-35).
+// Run directly, this file does nothing.
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { TestContext } from 'node:test';
+import { softApprover } from '../kit/approver.ts';
+import type { ProofParts, Quirks, SoftApprover } from '../kit/approver.ts';
+import { TimedClock, drive, seededRandom, tempDir } from '../kit/index.ts';
+import type { DriveReply } from '../kit/index.ts';
+import { FakePush } from '../fakes/push.ts';
+import { FakeTrust } from '../fakes/trust.ts';
+import type { TokenScope } from '../../src/ports/meta.ts';
+import type { Action } from '../../src/pure/actions.ts';
+import { parseWordlist } from '../../src/pure/codes.ts';
+import { hashToken, newToken } from '../../src/pure/tokens.ts';
+import { openApproveCore } from '../../src/shell/approve-core.ts';
+import type { ApproveCore } from '../../src/shell/approve-core.ts';
+import type { QueueItem } from '../../src/shell/approvals.ts';
+import { createCodeRoot } from '../../src/shell/console.ts';
+import type { CodeRoot } from '../../src/shell/console.ts';
+import { openCore } from '../../src/shell/core.ts';
+import type { CoreParts } from '../../src/shell/core.ts';
+import { createApiServer } from '../../src/shell/http.ts';
+import { openPrivateDatabase } from '../../src/shell/private-db.ts';
+import type { PrivateStore } from '../../src/ports/private.ts';
+
+export const DOMAIN = 'box.example';
+export const RP = { rpId: `keys.${DOMAIN}`, origin: `https://keys.${DOMAIN}` } as const;
+export const WORDLIST = parseWordlist(readFileSync(new URL('../../src/data/wordlist.txt', import.meta.url), 'utf8'));
+const BOOT = 'b0070000-0000-4000-8000-000000000001';
+
+const b64u = (b: Uint8Array): string => Buffer.from(b).toString('base64url');
+const sha = (...parts: (string | Uint8Array)[]): Uint8Array => {
+  const h = createHash('sha256');
+  for (const p of parts) h.update(p);
+  return Uint8Array.from(h.digest());
+};
+
+/** The challenges, written again here from the spec text (KBOX-9), so the world is an independent oracle of the box's own. */
+export const challenges = {
+  approval: (id: string, digest: Uint8Array, nonce: Uint8Array): Uint8Array => sha('kbox-v1', id, digest, nonce),
+  view: (nonce: Uint8Array): Uint8Array => sha('kbox-v1-view', nonce),
+  op: (op: { kind: string; label: string }, nonce: Uint8Array): Uint8Array => sha('kbox-v1-op', sha(`{"kind":${JSON.stringify(op.kind)},"label":${JSON.stringify(op.label)}}`), nonce),
+  register: (nonce: Uint8Array): Uint8Array => sha('kbox-v1-register', nonce),
+};
+
+export interface WireProof {
+  readonly nonce: string;
+  readonly credential_id: string;
+  readonly authenticator_data: string;
+  readonly client_data_json: string;
+  readonly signature: string;
+  readonly device_signature: string;
+}
+
+export function wire(nonce: Uint8Array, parts: ProofParts): WireProof {
+  return {
+    nonce: b64u(nonce),
+    credential_id: b64u(parts.credentialId),
+    authenticator_data: b64u(parts.authenticatorData),
+    client_data_json: b64u(parts.clientDataJSON),
+    signature: b64u(parts.signature),
+    device_signature: b64u(parts.deviceSignature),
+  };
+}
+
+export const newApproverBody = (a: SoftApprover) => ({ credential_id: b64u(a.credentialId), cose_key: b64u(a.coseKey), device_public_key: b64u(a.devicePublicKey) });
+
+export interface CallOptions {
+  readonly method?: string;
+  readonly json?: unknown;
+  readonly token?: string;
+  readonly cookie?: string;
+  readonly ip?: string;
+  readonly headers?: Readonly<Record<string, string>>;
+}
+
+export interface World {
+  readonly parts: CoreParts;
+  readonly core: ApproveCore;
+  readonly priv: PrivateStore;
+  readonly clock: TimedClock;
+  readonly push: FakePush;
+  readonly trust: FakeTrust;
+  readonly console: string[];
+  readonly codes: CodeRoot;
+  readonly stateDir: string;
+  readonly owner: SoftApprover;
+  readonly ownerId: string;
+  call(path: string, options?: CallOptions): Promise<DriveReply>;
+  /** Enrols a machine directly in the store and returns its token. */
+  token(label: string, scope: TokenScope): string;
+  /** A nonce from the phone route. */
+  nonce(purpose: 'view' | 'op' | 'register'): Promise<Uint8Array>;
+  /** Opens a view session for an approver; the Cookie header value. */
+  view(approver?: SoftApprover): Promise<string>;
+  /** The queue as the phone sees it. */
+  queue(approver?: SoftApprover): Promise<readonly QueueItem[]>;
+  /** A proof for one queue item, as the phone would build it; `quirks` plants one fault under a valid signature. */
+  proofFor(item: QueueItem, approver?: SoftApprover, quirks?: Quirks): WireProof;
+  decide(id: string, decision: 'approve' | 'deny', proof: WireProof): Promise<DriveReply>;
+  /** Proposes through the service (no route), as a token, the box or an enrol would. */
+  propose(action: Action, requester?: string | 'box'): ReturnType<ApproveCore['approvals']['propose']>;
+  /** Adds a second approver through the real approver_add approval and the registration step. */
+  addApprover(): Promise<{ readonly approver: SoftApprover; readonly approverId: string }>;
+  /** Writes a fresh recovery code for this boot through root's code store and returns it. */
+  recoveryCode(): string;
+}
+
+export interface WorldOptions {
+  readonly seed?: number;
+  readonly vet?: (action: Action) => 'ok' | 'rejected';
+  /** Leave the box without an approver (setup tests). */
+  readonly noSetup?: boolean;
+}
+
+export async function approveWorld(t: TestContext, options: WorldOptions = {}): Promise<World> {
+  const dir = await tempDir(t);
+  const stateDir = join(dir, 'state');
+  const clock = new TimedClock(1_700_000_000_000);
+  const random = seededRandom(options.seed ?? 21);
+  const parts = openCore({ stateDir, clock, scheduler: clock, random });
+  const priv = openPrivateDatabase(join(stateDir, 'private.db'));
+  const push = new FakePush();
+  const consoleLines: string[] = [];
+  const codes = createCodeRoot({ dir: join(dir, 'codes'), sink: (line) => void consoleLines.push(line), random, clock, wordlist: WORDLIST });
+  const trust = new FakeTrust(codes, () => BOOT);
+  const core = openApproveCore({ parts, approverStore: priv, trust, push, clock, random, domain: DOMAIN, wordlist: WORDLIST, vet: options.vet ?? (() => 'ok') });
+  const server = createApiServer({ routes: [...parts.routes, ...core.routes], tokens: core.tokens.tokenStore, audit: parts.audit, random, clock, journal: () => undefined });
+  const socket = join(dir, 'http.sock');
+  await server.listen(socket);
+  t.after(async () => {
+    await server.stop();
+    priv.close();
+    parts.close();
+  });
+  const driver = drive(socket);
+  const lastCode = (): string => /([a-z]+(?: [a-z]+){11})/.exec(consoleLines.at(-1) ?? '')?.[1] ?? '';
+
+  const call: World['call'] = (path, o = {}) => {
+    const headers: Record<string, string> = { 'x-kb-client-ip': o.ip ?? '203.0.113.9', ...o.headers };
+    if (o.token !== undefined) headers['authorization'] = `Bearer ${o.token}`;
+    if (o.cookie !== undefined) headers['cookie'] = o.cookie;
+    if (o.json !== undefined) headers['content-type'] = 'application/json';
+    return driver.request({ path, method: o.method ?? (o.json === undefined ? 'GET' : 'POST'), headers, ...(o.json === undefined ? {} : { body: JSON.stringify(o.json) }) });
+  };
+  const nonce: World['nonce'] = async (purpose) => {
+    const reply = await call(`/app/nonce?purpose=${purpose}`);
+    assert.equal(reply.status, 200, reply.body);
+    return Uint8Array.from(Buffer.from((reply.json() as { nonce_b64: string }).nonce_b64, 'base64url'));
+  };
+
+  const register = async (path: '/setup' | '/recover' | '/recover/register', code: string, approver: SoftApprover): Promise<DriveReply> => {
+    const n = await nonce('register');
+    return call(path, { json: { code, approver: newApproverBody(approver), proof: wire(n, approver.prove(challenges.register(n), RP)), phrase: 'blue kettle' } });
+  };
+
+  const owner = softApprover();
+  let ownerId = '';
+  if (options.noSetup !== true) {
+    codes.writeSetupCode(false);
+    const reply = await register('/setup', lastCode(), owner);
+    assert.equal(reply.status, 201, reply.body);
+    ownerId = (reply.json() as { approver_id: string }).approver_id;
+  }
+
+  const view: World['view'] = async (approver = owner) => {
+    const n = await nonce('view');
+    const reply = await call('/app/view', { json: { proof: wire(n, approver.prove(challenges.view(n), RP)) } });
+    assert.equal(reply.status, 200, reply.body);
+    return (reply.headers['set-cookie'] ?? '').split(';')[0] ?? '';
+  };
+  const queue: World['queue'] = async (approver = owner) => {
+    const reply = await call('/app/queue', { cookie: await view(approver) });
+    assert.equal(reply.status, 200, reply.body);
+    return (reply.json() as { approvals: QueueItem[] }).approvals;
+  };
+  const proofFor: World['proofFor'] = (item, approver = owner, quirks) => {
+    const n = Uint8Array.from(Buffer.from(item.nonce_b64, 'base64url'));
+    const digest = Uint8Array.from(Buffer.from(item.digest_b64, 'base64url'));
+    return wire(n, approver.prove(challenges.approval(item.approval_id, digest, n), RP, quirks));
+  };
+  const decide: World['decide'] = (id, decision, proof) => call(`/app/${decision}/${id}`, { json: { proof } });
+  const requesterOf = (r: string): Parameters<ApproveCore['approvals']['propose']>[0]['requester'] =>
+    r === 'box' ? { kind: 'box' } : r.startsWith('enrol:') ? { kind: 'enrol', address: r.slice(6) } : { kind: 'token', label: r };
+
+  const world: World = {
+    parts,
+    core,
+    priv,
+    clock,
+    push,
+    trust,
+    console: consoleLines,
+    stateDir,
+      owner,
+    codes,
+    get ownerId() {
+      return ownerId;
+    },
+    call,
+    token(label, scope) {
+      const token = newToken(random);
+      parts.meta.addMachine({ label, scope, tokenSha256: hashToken(token), enrolledAt: clock.now() });
+      return token;
+    },
+    nonce,
+    view,
+    queue,
+    proofFor,
+    decide,
+    propose: (action, requester = 'ctl-1') => core.approvals.propose({ action, requester: requesterOf(requester) }),
+    async addApprover() {
+      const cookie = await view();
+      const opened = await call('/app/propose-approver-add', { method: 'POST', cookie });
+      assert.equal(opened.status, 201, opened.body);
+      const id = (opened.json() as { approval_id: string }).approval_id;
+      const item = (await queue()).find((q) => q.approval_id === id);
+      assert.ok(item);
+      const approved = await decide(id, 'approve', proofFor(item));
+      assert.equal(approved.status, 200, approved.body);
+      const code = (approved.json() as { registration_code: string }).registration_code;
+      const approver = softApprover();
+      const reply = await register('/recover/register', code, approver);
+      assert.equal(reply.status, 201, reply.body);
+      return { approver, approverId: (reply.json() as { approver_id: string }).approver_id };
+    },
+    recoveryCode() {
+      codes.consume('recovery');
+      codes.writeRecoveryCode(BOOT);
+      return lastCode();
+    },
+  };
+  return world;
+}
+
+/** Registers through a phone route as a new approver (setup, recovery or the approver-add step). */
+export async function registerAt(w: World, path: '/setup' | '/recover' | '/recover/register', code: string, approver: SoftApprover, phrase = 'blue kettle'): Promise<DriveReply> {
+  const n = await w.nonce('register');
+  return w.call(path, { json: { code, approver: newApproverBody(approver), proof: wire(n, approver.prove(challenges.register(n), RP)), phrase } });
+}
+
+export const setupCodeFrom = (lines: readonly string[]): string => /([a-z]+(?: [a-z]+){11})/.exec(lines.at(-1) ?? '')?.[1] ?? '';
