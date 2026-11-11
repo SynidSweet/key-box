@@ -52,4 +52,4 @@ runcmd:
     for u in keybox caddy; do mkdir -p "/etc/systemd/system/$u.service.d" && printf '[Service]\nEnvironment=KB_DOMAIN=%s\n' "$KB_DOMAIN" > "/etc/systemd/system/$u.service.d/domain.conf"; done
     systemd-tmpfiles --create /etc/tmpfiles.d/keybox.conf && systemctl daemon-reload
     /opt/keybox/current/bin/node /opt/keybox/current/src/cli/kb-code.ts setup
-    systemctl enable --now kb-code.service kb-install.path keybox.service keyrelay.service caddy.service
+    systemctl enable --now kb-code.service kb-install.path kb-install.service keybox.service keyrelay.service caddy.service

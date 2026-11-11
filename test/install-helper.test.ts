@@ -469,6 +469,94 @@ test('KBOX-6 a failure after the switch still rolls back: the hook after step 5 
   assert.equal(w.current(), w.h0);
 });
 
+// --- time: every phase inside the unit's TimeoutStartSec, and a kill mid-install -------------------------------------
+
+/** The unit's TimeoutStartSec as written in deploy/kb-install.service, in ms: the oracle for every bound below. */
+const unitTimeoutMs = (): number => {
+  const m = /^TimeoutStartSec=(\d+)s$/m.exec(readFileSync(new URL('../deploy/kb-install.service', import.meta.url), 'utf8'));
+  assert.ok(m?.[1] !== undefined, 'kb-install.service names its TimeoutStartSec in seconds');
+  return Number(m[1]) * 1000;
+};
+/** Health checks that use every millisecond they are given and fail. */
+const healthUsesAllItIsGiven = (w: InstallWorld): void => {
+  w.units.healthy = false;
+  w.units.onHealth = (until) => {
+    if (until !== undefined && until > w.clock.now()) w.clock.advance(until - w.clock.now());
+  };
+};
+
+test('KBOX-6 every phase is bounded by the time left under TimeoutStartSec: after a slow copy and a health check that uses all it is given, the rollback restart still ends inside it', async (t) => {
+  const w = await installWorld(t);
+  healthUsesAllItIsGiven(w);
+  const h = w.stage(RELEASE_1);
+  w.installRequest(h);
+  const start = w.clock.now();
+  let slowed = false;
+  await w.run({
+    afterRead: () => {
+      if (!slowed) w.clock.advance(50_000);
+      slowed = true;
+    },
+  });
+  assert.equal(w.result(h), 'rolled_back');
+  assert.deepEqual(w.units.restarts, [h, w.h0]);
+  assert.deepEqual(
+    w.units.bounds.map((b) => b.what),
+    ['restart', 'health', 'restart'],
+  );
+  for (const b of w.units.bounds) assert.ok(b.until !== undefined && b.until <= start + unitTimeoutMs(), `${b.what} is bounded inside the unit's timeout`);
+  const [, health, rollback] = w.units.bounds;
+  assert.ok(health?.until !== undefined && rollback?.until !== undefined && rollback.until > health.until, 'the rollback restart has time of its own after the health check');
+});
+
+test('KBOX-6 a second install in a run whose time the first used up is refused timeout, with nothing copied', async (t) => {
+  const w = await installWorld(t);
+  healthUsesAllItIsGiven(w);
+  const one = w.stage(RELEASE_1);
+  const two = w.stage({ ...RELEASE_1, 'README.md': 'v2\n' });
+  w.installRequest(one);
+  w.installRequest(two);
+  await w.run();
+  assert.deepEqual([w.result(one), w.result(two)].sort(), ['refused:timeout', 'rolled_back']);
+  assert.equal(w.current(), w.h0);
+  assert.deepEqual(w.releases(), [w.h0]);
+});
+
+/** Every file root keeps in the results directory, as text. */
+const resultsTexts = (w: InstallWorld): string[] => readdirSync(w.paths.results).map((f) => readFileSync(join(w.paths.results, f), 'utf8'));
+
+test('KBOX-6 a kill after the switch is rolled back by the next run: current is the base again, restarted, releases/<H> removed, result failed:interrupted', async (t) => {
+  const w = await installWorld(t);
+  const h = w.stage(RELEASE_1);
+  w.installRequest(h);
+  const killed = w.runKilledAt('afterSwitch');
+  assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+  assert.equal(w.current(), h, 'the kill came after the switch');
+  assert.ok(resultsTexts(w).some((text) => text.trim() === `switching ${h} from ${w.h0}`), 'the switching record names H and its base');
+  await w.run();
+  assert.equal(w.current(), w.h0);
+  assert.deepEqual(w.units.restarts, [w.h0], 'the units were restarted on the base');
+  assert.deepEqual(w.releases(), [w.h0]);
+  assert.equal(w.result(h), 'failed:interrupted');
+  assert.equal(resultsTexts(w).some((text) => text.startsWith('switching')), false, 'the record is gone once the base is back');
+  await w.run();
+  assert.deepEqual(w.units.restarts, [w.h0], 'a later run has nothing left to roll back');
+});
+
+test('KBOX-6 a kill between copy and switch leaves the base current and no releases/<H>; the next run removes the .tmp and answers failed:interrupted', async (t) => {
+  const w = await installWorld(t);
+  const h = w.stage(RELEASE_1);
+  w.installRequest(h);
+  const killed = w.runKilledAt('afterCopy');
+  assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+  assert.equal(w.current(), w.h0);
+  assert.deepEqual(w.releases(), [`${h}.tmp`, w.h0].sort(), 'only the .tmp copy exists');
+  await w.run();
+  assert.deepEqual(w.releases(), [w.h0]);
+  assert.equal(w.result(h), 'failed:interrupted');
+  assert.deepEqual(w.units.restarts, [], 'current never moved, so nothing is restarted');
+});
+
 // --- trust.json -------------------------------------------------------------------------------------------------------
 
 const newApprover = (w: InstallWorld, id: string) => w.trusted(id, softApprover());

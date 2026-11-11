@@ -40,18 +40,20 @@ export interface InstallPaths {
   readonly bootIdFile: string;
 }
 
-/** The three long-running units, as kb-install sees them. */
+/** The three long-running units, as kb-install sees them. Each call is bounded by `until` (clock ms), which kb-install
+ * takes from the time its run has left. */
 export interface ReleaseUnits {
-  restart(): Promise<void>;
-  /** True when both processes answer `GET /healthz` with this release within 60 s of the restart. */
-  healthCheck(release: string): Promise<boolean>;
+  restart(until: number): Promise<void>;
+  /** True when both processes answer `GET /healthz` with this release within 60 s of the restart and before `until`. */
+  healthCheck(release: string, until: number): Promise<boolean>;
 }
 
-/** Test seams between the steps of the safe copy and after the switch. Production passes none. */
+/** Test seams between the steps of the safe copy, after it and after the switch. Production passes none. */
 export interface InstallHooks {
   readonly afterList?: (rel: string) => void;
   readonly afterOpen?: (rel: string) => void;
   readonly afterRead?: (rel: string) => void;
+  readonly afterCopy?: () => void;
   readonly afterSwitch?: () => void;
 }
 
@@ -66,6 +68,15 @@ export interface InstallerDeps {
 }
 
 export const COPY_DEADLINE_MS = 60_000;
+/** kb-install.service has TimeoutStartSec=120s; a run plans to end 10 s before it (Node's start, the result files), so
+ * systemd never has to kill it. Every phase below is bounded by the time this leaves. */
+export const RUN_BUDGET_MS = 110_000;
+/** One `systemctl restart` of the three units, at most. */
+export const RESTART_WITHIN_MS = 15_000;
+/** The least time worth a health check. */
+const MIN_HEALTH_MS = 10_000;
+/** A copy ends early enough to leave a restart, a health check and a rollback restart inside the run. */
+const AFTER_COPY_MS = 2 * RESTART_WITHIN_MS + MIN_HEALTH_MS;
 /** A pinned binary is read into memory to be hashed; Node's and Caddy's builds are well under this. */
 const BINARY_LIMIT = 256 * 1024 * 1024;
 
@@ -95,6 +106,7 @@ const isRequestName = (name: Buffer): boolean => name.length > REQUEST_SUFFIX.le
 export async function runInstaller(deps: InstallerDeps): Promise<readonly { readonly name: string; readonly result: RootResult }[]> {
   const { paths } = deps;
   const hooks = deps.hooks ?? {};
+  const runDeadline = deps.clock.now() + RUN_BUDGET_MS;
   const noCodes = (): never => {
     throw new Error('kb-install checks codes and never makes one');
   };
@@ -270,6 +282,45 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     }
   };
 
+  // --- the switching record: a kill mid-install is rolled back by the next run or boot ------------------------------
+  // `switching <H> from <base>` is written (temp file and rename) before the copy, so before the switch, and removed only
+  // once the install is over either way. A run that finds it was killed in between: it puts `current` back on the base,
+  // restarts the units unless releases/<H> was never made (then nothing ever ran from H), removes H and answers
+  // `failed:interrupted`.
+  const switchingFile = join(paths.results, 'switching');
+  const writeSwitching = (h: string, base: string): void => {
+    const temp = `${switchingFile}.tmp`;
+    rmSync(temp, { force: true });
+    const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
+    try {
+      writeSync(fd, `switching ${h} from ${base}\n`);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(temp, switchingFile);
+  };
+  const clearSwitching = (): void => rmSync(switchingFile, { force: true });
+
+  /** A restart that cannot be made in time is journalled: `current` is already where it must be, nothing else is left to do. */
+  const restartBy = (until: number): Promise<void> => deps.units.restart(until).catch(() => deps.journal?.('restart_failed'));
+
+  const recoverInterrupted = async (): Promise<void> => {
+    if (!existsSync(switchingFile)) return;
+    const record = /^switching ([0-9a-f]{64}) from ([0-9a-f]{64})\n$/.exec(readFileSync(switchingFile, 'utf8'));
+    const h = record?.[1];
+    const base = record?.[2];
+    if (h === undefined || base === undefined || !existsSync(join(paths.releases, base))) throw new Error('the switching record does not name a release');
+    const release = join(paths.releases, h);
+    const ranFromH = existsSync(release);
+    if (!existsSync(paths.current) || runningRelease() !== base) switchCurrent(base);
+    if (ranFromH) await restartBy(Math.min(deps.clock.now() + RESTART_WITHIN_MS, runDeadline));
+    rmSync(`${release}.tmp`, { recursive: true, force: true });
+    rmSync(release, { recursive: true, force: true });
+    writeResult(h, 'failed:interrupted');
+    clearSwitching();
+  };
+
   const install = async (stagingFd: number, req: InstallRequest): Promise<RootResult> => {
     const h0 = runningRelease();
     if (req.base !== h0) return 'refused:base';
@@ -283,32 +334,36 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     const release = join(paths.releases, h);
     rmSync(temp, { recursive: true, force: true });
     rmSync(release, { recursive: true, force: true }); // never current: h is not h0
-    const deadline = deps.clock.now() + COPY_DEADLINE_MS;
-    let copy: Copy;
-    let binaries: readonly CopiedFile[];
+    const deadline = Math.min(deps.clock.now() + COPY_DEADLINE_MS, runDeadline - AFTER_COPY_MS);
+    if (deps.clock.now() >= deadline) return 'refused:timeout';
+    writeSwitching(h, h0);
     try {
-      copy = copyTree(stagingFd, h, deadline);
-      if (releaseHash(copy.files.map((f) => ({ path: f.path, executable: f.executable, sha256: fileSha256(f.bytes) }))) !== h) return 'refused:hash';
-      binaries = checkBinaries(stagingFd, h, h0, copy, deadline);
+      const copy = copyTree(stagingFd, h, deadline);
+      if (releaseHash(copy.files.map((f) => ({ path: f.path, executable: f.executable, sha256: fileSha256(f.bytes) }))) !== h) throw new Refusal('hash');
+      writeRelease(temp, copy, checkBinaries(stagingFd, h, h0, copy, deadline));
     } catch (error) {
+      rmSync(temp, { recursive: true, force: true });
+      clearSwitching();
       if (error instanceof Refusal) return `refused:${error.code}`;
       throw error;
     }
-    writeRelease(temp, copy, binaries);
+    hooks.afterCopy?.();
     renameSync(temp, release);
     // Spent before the switch: an approval that ever reached `current` never installs again, whatever follows.
     spend(req.approval.approval_id);
     switchCurrent(h);
     hooks.afterSwitch?.();
     const healthy = await deps.units
-      .restart()
-      .then(() => deps.units.healthCheck(h))
+      .restart(deps.clock.now() + RESTART_WITHIN_MS)
+      .then(() => deps.units.healthCheck(h, runDeadline - RESTART_WITHIN_MS))
       .catch(() => false);
-    if (healthy) return 'installed';
-    switchCurrent(h0);
-    await deps.units.restart();
-    rmSync(release, { recursive: true, force: true });
-    return 'rolled_back';
+    if (!healthy) {
+      switchCurrent(h0);
+      await restartBy(runDeadline);
+      rmSync(release, { recursive: true, force: true });
+    }
+    clearSwitching();
+    return healthy ? 'installed' : 'rolled_back';
   };
 
   // --- trust changes --------------------------------------------------------------------------------------------------
@@ -378,6 +433,7 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     }
   };
 
+  await recoverInterrupted();
   const stagingFd = openDirectory(paths.staging);
   const answered: { name: string; result: RootResult }[] = [];
   try {

@@ -292,3 +292,31 @@ test('KBOX-6 the health check passes only when core and relay both answer /healt
   const gone = systemdUnits({ systemctl: '/bin/true', units: [], healthSockets: [join(dir, 'none.sock')], clock, wait: (ms) => Promise.resolve(clock.advance(ms)) });
   assert.equal(await gone.healthCheck('a'.repeat(64)), false, 'no socket is no answer');
 });
+
+test('KBOX-6 a restart is bounded by the time kb-install gives it: a systemctl that hangs is killed and the restart fails', async (t) => {
+  const dir = await tempDir(t);
+  const hangs = join(dir, 'systemctl');
+  writeFileSync(hangs, '#!/bin/sh\nexec sleep 20\n', { mode: 0o755 });
+  const clock = new FakeClock(0);
+  const units = systemdUnits({ systemctl: hangs, units: ['keybox.service'], healthSockets: [], clock, wait: (ms) => Promise.resolve(clock.advance(ms)) });
+  await assert.rejects(units.restart(300));
+});
+
+test('KBOX-6 a health check gives up at the bound kb-install gives it when that comes before its own 60 s', async (t) => {
+  const dir = await tempDir(t);
+  const clock = new FakeClock(0);
+  const units = systemdUnits({ systemctl: '/bin/true', units: [], healthSockets: [join(dir, 'none.sock')], clock, wait: (ms) => Promise.resolve(clock.advance(ms)) });
+  assert.equal(await units.healthCheck('a'.repeat(64), 5_000), false);
+  assert.ok(clock.now() >= 5_000 && clock.now() < 60_000, `it stopped asking at its bound (${clock.now()} ms)`);
+});
+
+test('KBOX-6 settle ends an install root answered failed:interrupted (a kill mid-install, rolled back by the next run) as failed interrupted', async (t) => {
+  const { iw, w, post, updater, events } = await updateWorld(t);
+  const { approval_id } = (await post(tarOf(BUNDLE))).json() as { approval_id: string };
+  const item = (await w.queue()).find((q) => q.approval_id === approval_id);
+  assert.ok(item);
+  await w.decide(approval_id, 'approve', w.proofFor(item));
+  writeFileSync(join(iw.paths.results, `${BUNDLE_H}.result`), 'failed:interrupted');
+  updater.settle();
+  assert.deepEqual(events('approval.executed').at(-1), { approval_id, result: 'failed', reason_code: 'interrupted' });
+});

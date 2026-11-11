@@ -34,7 +34,7 @@ export type TrustRefusal =
   | 'not_regular'
   | 'size'
   | 'internal';
-export type RootResult = 'installed' | 'rolled_back' | 'applied' | `refused:${InstallRefusal | TrustRefusal}`;
+export type RootResult = 'installed' | 'rolled_back' | 'failed:interrupted' | 'applied' | `refused:${InstallRefusal | TrustRefusal}`;
 
 /** The base name of a request (`<name>.request`) and its result (`<name>.result`). */
 export const REQUEST_NAME = /^[A-Za-z0-9_-]{1,96}$/;
@@ -128,5 +128,5 @@ export function parseRootRequest(bytes: Uint8Array): RequestParse {
 /** A result file's text, parsed by core. */
 export function parseRootResult(text: string): RootResult | undefined {
   const t = text.trim();
-  return /^(installed|rolled_back|applied|refused:[a-z_]{1,32})$/.test(t) ? (t as RootResult) : undefined;
+  return /^(installed|rolled_back|failed:interrupted|applied|refused:[a-z_]{1,32})$/.test(t) ? (t as RootResult) : undefined;
 }

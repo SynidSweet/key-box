@@ -140,3 +140,9 @@ test('KBOX-6 kb-install.path starts the service on any *.request in staging, wit
   assert.deepEqual(directives(unit, 'Path').get('Unit'), ['kb-install.service']);
   assert.deepEqual(directives(unit, 'Unit').get('StartLimitIntervalSec'), ['0']);
 });
+
+test('KBOX-6 kb-install.service also runs at every boot, so a switch a kill or power cut left half done is rolled back to its base', () => {
+  assert.deepEqual(directives(read('deploy/kb-install.service'), 'Install').get('WantedBy'), ['multi-user.target']);
+  const enable = /^\s*systemctl enable --now (.*)$/m.exec(read('deploy/cloud-init.yaml'))?.[1]?.split(' ') ?? [];
+  assert.ok(enable.includes('kb-install.service'), 'cloud-init enables the service itself, not only its path unit');
+});

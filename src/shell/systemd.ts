@@ -1,9 +1,11 @@
-// KBOX-6: the three long-running units as kb-install sees them. A restart is `systemctl restart`; the health check passes when
-// core and the relay both answer `GET /healthz` on their unix sockets with the new release within 60 s of the restart.
-// kb-install runs with PrivateNetwork=yes, so the sockets are the only way to ask.
+// KBOX-6: the three long-running units as kb-install sees them. A restart is `systemctl restart`, killed when it is not over
+// by the bound kb-install gives it; the health check passes when core and the relay both answer `GET /healthz` on their
+// unix sockets with the new release within 60 s of the restart and before its bound. kb-install runs with
+// PrivateNetwork=yes, so the sockets are the only way to ask.
 import { spawnSync } from 'node:child_process';
 import { request } from 'node:http';
 import type { Clock } from '../ports/clock.ts';
+import { RESTART_WITHIN_MS } from './installer.ts';
 import type { ReleaseUnits } from './installer.ts';
 
 export const HEALTH_WITHIN_MS = 60_000;
@@ -17,6 +19,12 @@ export interface SystemdDeps {
   readonly healthSockets: readonly string[];
   readonly clock: Clock;
   readonly wait: (ms: number) => Promise<void>;
+}
+
+/** The units port, whose bounds default to its own limits (15 s for a restart, 60 s for a health check). */
+export interface SystemdUnits extends ReleaseUnits {
+  restart(until?: number): Promise<void>;
+  healthCheck(release: string, until?: number): Promise<boolean>;
 }
 
 /** True when the process on `socket` answers `/healthz` with `{release}` equal to the release given. */
@@ -37,20 +45,21 @@ export function answersRelease(socket: string, release: string): Promise<boolean
   });
 }
 
-export function systemdUnits(deps: SystemdDeps): ReleaseUnits {
+export function systemdUnits(deps: SystemdDeps): SystemdUnits {
   return {
-    restart() {
-      const done = spawnSync(deps.systemctl, ['restart', ...deps.units], { stdio: 'ignore' });
+    restart(until = deps.clock.now() + RESTART_WITHIN_MS) {
+      const timeout = Math.max(1, until - deps.clock.now());
+      const done = spawnSync(deps.systemctl, ['restart', ...deps.units], { stdio: 'ignore', timeout, killSignal: 'SIGKILL' });
       if (done.error !== undefined) return Promise.reject(done.error);
       return done.status === 0 ? Promise.resolve() : Promise.reject(new Error(`systemctl restart exited ${done.status ?? 'by a signal'}`));
     },
-    async healthCheck(release) {
-      const deadline = deps.clock.now() + HEALTH_WITHIN_MS;
+    async healthCheck(release, until = Number.POSITIVE_INFINITY) {
+      const deadline = Math.min(deps.clock.now() + HEALTH_WITHIN_MS, until);
       for (;;) {
         const answers = await Promise.all(deps.healthSockets.map((s) => answersRelease(s, release)));
         if (answers.every(Boolean)) return true;
         if (deps.clock.now() >= deadline) return false;
-        await deps.wait(ASK_EVERY_MS);
+        await deps.wait(Math.min(ASK_EVERY_MS, deadline - deps.clock.now()));
       }
     },
   };

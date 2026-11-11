@@ -114,7 +114,8 @@ export function createUpdater(deps: UpdaterDeps): Updater {
       if (result === 'installed' || result === 'rolled_back') {
         deps.events.append('update.state', { approval_id: w.approvalId, state: result });
         approvals.executed(w.approvalId, result === 'installed' ? 'done' : 'failed', result === 'installed' ? 'ok' : 'rolled_back');
-      } else approvals.executed(w.approvalId, 'failed', result?.startsWith('refused:') === true ? result.slice('refused:'.length) : 'bad_result');
+      } else if (result === 'failed:interrupted') approvals.executed(w.approvalId, 'failed', 'interrupted');
+      else approvals.executed(w.approvalId, 'failed', result?.startsWith('refused:') === true ? result.slice('refused:'.length) : 'bad_result');
     }
   };
 

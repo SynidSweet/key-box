@@ -12,7 +12,7 @@ export function spawnNode(args: readonly string[], cwd: string): Promise<NodeRun
     child.stdout.on('data', (c: Buffer) => out.push(c));
     child.stderr.on('data', (c: Buffer) => err.push(c));
     child.on('error', reject);
-    child.on('close', (status) => resolve({ status, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8') }));
+    child.on('close', (status, signal) => resolve({ status, signal, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8') }));
   });
 }
 
@@ -34,7 +34,7 @@ export function startNode(t: TestContext, args: readonly string[], cwd: string, 
   child.stderr.on('data', (c: Buffer) => err.push(c));
   const text = (parts: Buffer[]): string => Buffer.concat(parts).toString('utf8');
   const exited = new Promise<NodeRun>((resolve) => {
-    child.on('close', (status) => resolve({ status, stdout: text(out), stderr: text(err) }));
+    child.on('close', (status, signal) => resolve({ status, signal, stdout: text(out), stderr: text(err) }));
   });
   t.after(async () => {
     child.kill('SIGKILL');

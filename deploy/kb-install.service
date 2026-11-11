@@ -15,3 +15,8 @@ ProtectSystem=strict
 PrivateTmp=yes
 PrivateNetwork=yes
 ReadWritePaths=/opt/keybox /var/lib/keybox/staging /etc/keybox /var/lib/keybox-install
+
+# Also at every boot: a run that finds a `switching` record (a kill or power cut mid-install) puts `current` back on the
+# base before anything else. Not ordered before the units it restarts, so a restart from here never waits on boot.
+[Install]
+WantedBy=multi-user.target

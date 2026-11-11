@@ -9,6 +9,8 @@ import type { TestContext } from 'node:test';
 import { softApprover } from '../kit/approver.ts';
 import type { Quirks, SoftApprover } from '../kit/approver.ts';
 import { FakeClock, tempDir } from '../kit/index.ts';
+import { runNode } from '../kit/proc.ts';
+import type { NodeRun } from '../kit/proc.ts';
 import { WORDLIST } from './approve-world.ts';
 import { createCodeRoot } from '../../src/shell/console.ts';
 import type { CodeRoot } from '../../src/shell/console.ts';
@@ -75,19 +77,28 @@ export function keptProof(approver: SoftApprover, approverId: string, action: ob
 
 export interface FakeUnits extends ReleaseUnits {
   readonly restarts: string[];
+  /** Each bound kb-install gave the units, in order: the time by which a restart or a health check must be over. */
+  readonly bounds: { readonly what: 'restart' | 'health'; readonly until: number | undefined }[];
   /** Whether the next health checks pass. */
   healthy: boolean;
+  /** Called by each health check with its bound, e.g. to let it use all the time it is given. */
+  onHealth: ((until: number | undefined) => void) | undefined;
 }
 
 export function fakeUnits(current: () => string): FakeUnits {
-  const units = {
-    restarts: [] as string[],
+  const units: FakeUnits = {
+    restarts: [],
+    bounds: [],
     healthy: true,
-    restart(): Promise<void> {
+    onHealth: undefined,
+    restart(until?: number): Promise<void> {
       units.restarts.push(current());
+      units.bounds.push({ what: 'restart', until });
       return Promise.resolve();
     },
-    healthCheck(release: string): Promise<boolean> {
+    healthCheck(release: string, until?: number): Promise<boolean> {
+      units.bounds.push({ what: 'health', until });
+      units.onHealth?.(until);
       return Promise.resolve(units.healthy && current() === release);
     },
   };
@@ -113,6 +124,8 @@ export interface InstallWorld {
   /** The install request core would write for H over the running release. */
   installRequest(h: string, proof?: ApprovalProof | 'none', base?: string): void;
   run(hooks?: InstallHooks): Promise<void>;
+  /** A run in a process of its own that kills itself (SIGKILL) at the step given; its units always pass. */
+  runKilledAt(step: 'afterCopy' | 'afterSwitch'): NodeRun;
   result(name: string): string | undefined;
   current(): string;
   releases(): string[];
@@ -184,6 +197,7 @@ export async function installWorld(t: TestContext, options: { readonly trust?: f
       const approval = proof === 'none' ? undefined : (proof ?? world.proof({ kind: 'install_update', install: h, commit: COMMIT, base }));
       world.request(h, { kind: 'install', install: h, commit: COMMIT, base, ...(approval === undefined ? {} : { approval }) });
     },
+    runKilledAt: (step) => runNode([new URL('./install-kill.ts', import.meta.url).pathname, JSON.stringify(paths), step], root),
     run: (hooks) => runInstaller({ paths, units, clock, wordlist: WORDLIST, ...(hooks === undefined ? {} : { hooks }) }).then(() => undefined),
     result(name) {
       const file = join(paths.results, `${name}.result`);
