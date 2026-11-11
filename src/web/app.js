@@ -24,12 +24,12 @@ function isItem(v) {
 
 /**
  * Sets a heading's text so a long name breaks after a slash before it breaks inside a word; the text itself is unchanged.
- * @param {HTMLElement} el @param {string} text
+ * @param {import('./webauthn-client.js').BrowserElement} el @param {string} text
  */
 function setBreakableText(el, text) {
   const doc = browser().document;
   const parts = text.split('/');
-  el.replaceChildren(...parts.flatMap((part, i) => (i < parts.length - 1 ? [doc.createTextNode(`${part}/`), doc.createElement('wbr')] : [doc.createTextNode(part)])));
+  el.replaceChildren(...parts.flatMap((part, i) => (i < parts.length - 1 ? [`${part}/`, doc.createElement('wbr')] : [part])));
 }
 
 /** @param {Item} item @param {'approve' | 'deny'} decision */
