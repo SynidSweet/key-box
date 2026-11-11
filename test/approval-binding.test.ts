@@ -7,6 +7,8 @@ import { test } from 'node:test';
 import { softApprover } from './kit/approver.ts';
 import type { Quirks } from './kit/approver.ts';
 import { seededRandom } from './kit/index.ts';
+import { approveWorld, challenges, wire, RP as WORLD_RP } from './support/approve-world.ts';
+import type { World } from './support/approve-world.ts';
 import { actionDigest, approvalChallenge, operationChallenge, pasteChallenge, verifyProof, viewChallenge } from '../src/pure/challenge.ts';
 import type { ApproverKeys } from '../src/pure/challenge.ts';
 import { decodeCoseEs256, parseRawPoint } from '../src/pure/cose.ts';
@@ -222,4 +224,155 @@ test('KBOX-9 an assertion for one challenge is refused for another (action A rep
   const { keys, parts, expect } = proofCase();
   const b = approvalChallenge('ap_1', actionDigest({ kind: 'demote', keyref: 'other' }), seededRandom(3).bytes(32));
   assert.deepEqual(verifyProof(keys, parts, { ...expect, challenge: b }), { ok: false, code: 'challenge' });
+});
+
+// --- the routes: every binding refused end to end, under a valid passkey signature ----------------------------------
+
+async function pending(w: World, action: Parameters<World['propose']>[0]) {
+  const proposed = w.propose(action, 'ctl-1');
+  const item = (await w.queue()).find((q) => q.approval_id === proposed.approval_id);
+  assert.ok(item);
+  return item;
+}
+
+test('KBOX-9 route: a valid approval executes once; replaying the same nonce is refused', async (t) => {
+  const w = await approveWorld(t);
+  const item = await pending(w, { kind: 'demote', keyref: 'k1' });
+  const proof = w.proofFor(item);
+  const ok = await w.decide(item.approval_id, 'approve', proof);
+  assert.equal(ok.status, 200, ok.body);
+  const again = w.propose({ kind: 'demote', keyref: 'k1' }, 'ctl-1');
+  assert.equal((await w.decide(again.approval_id, 'approve', proof)).status, 403, 'nonce of another approval and already used');
+  const item2 = (await w.queue())[0];
+  assert.ok(item2);
+  const p2 = w.proofFor(item2);
+  w.clock.advance(1);
+  assert.equal((await w.decide(item2.approval_id, 'deny', { ...p2 })).status, 200);
+});
+
+test('KBOX-9 route: an assertion for action A is refused for action B, and a nonce is used once', async (t) => {
+  const w = await approveWorld(t);
+  const a = await pending(w, { kind: 'demote', keyref: 'k1' });
+  const b = await pending(w, { kind: 'demote', keyref: 'k2' });
+  const proofA = w.proofFor(a);
+  assert.equal((await w.decide(b.approval_id, 'approve', proofA)).status, 403, "A's proof on B");
+  const forgedNonce = { ...w.proofFor({ ...a, nonce_b64: b.nonce_b64 }) };
+  assert.equal((await w.decide(b.approval_id, 'approve', forgedNonce)).status, 403, "B's nonce signed over A's digest");
+  assert.equal((await w.decide(b.approval_id, 'approve', w.proofFor(b))).status, 403, "a nonce that reached the check is spent, even by a refused attempt");
+  const b2 = (await w.queue()).find((q) => q.approval_id === b.approval_id);
+  assert.ok(b2);
+  const proofB = w.proofFor(b2);
+  assert.equal((await w.decide(b.approval_id, 'approve', proofB)).status, 200);
+  const [again] = await w.queue();
+  assert.ok(again);
+  const reused = { ...w.proofFor(again), nonce: proofB.nonce };
+  assert.equal((await w.decide(again.approval_id, 'approve', reused)).status, 403, 'a used nonce');
+});
+
+test('KBOX-9 route: UV clear, UP clear, wrong origin, wrong rpIdHash and a type other than webauthn.get are each refused', async (t) => {
+  const w = await approveWorld(t);
+  for (const quirks of [{ flags: 0x01 }, { flags: 0x04 }, { origin: 'https://evil.example' }, { rpIdHashOf: 'evil.example' }, { type: 'webauthn.create' }, { crossOrigin: true }]) {
+    const item = await pending(w, { kind: 'demote', keyref: `k-${JSON.stringify(quirks).length}` });
+    const reply = await w.decide(item.approval_id, 'approve', w.proofFor(item, w.owner, quirks));
+    assert.equal(reply.status, 403, JSON.stringify(quirks));
+    assert.equal(w.parts.meta.snapshot().approvals.some((p) => p.approval_id === item.approval_id), true, 'still pending');
+    const ok = await w.decide(item.approval_id, 'deny', w.proofFor((await w.queue()).find((q) => q.approval_id === item.approval_id) ?? item));
+    assert.equal(ok.status, 200, 'control: the same approver with no fault decides it');
+  }
+});
+
+test('KBOX-9 route: a passkey without the device signature is refused, and so is the device signature of another approver', async (t) => {
+  const w = await approveWorld(t);
+  const second = await w.addApprover();
+  const item = await pending(w, { kind: 'demote', keyref: 'k1' });
+  const proof = w.proofFor(item);
+  assert.equal((await w.decide(item.approval_id, 'approve', { ...proof, device_signature: '' })).status, 403, 'no device signature');
+  const fresh = async () => (await w.queue()).find((q) => q.approval_id === item.approval_id) ?? item;
+  const i2 = await fresh();
+  const mine = w.proofFor(i2);
+  const challenge = challenges.approval(i2.approval_id, Buffer.from(i2.digest_b64, 'base64url'), Buffer.from(i2.nonce_b64, 'base64url'));
+  const theirs = Buffer.from(second.approver.deviceSign(challenge)).toString('base64url');
+  assert.equal((await w.decide(item.approval_id, 'approve', { ...mine, device_signature: theirs })).status, 403, "X's passkey, Y's device key");
+  const i3 = await fresh();
+  const yPasskey = w.proofFor(i3, second.approver);
+  const xDevice = w.proofFor(i3);
+  assert.equal((await w.decide(item.approval_id, 'approve', { ...yPasskey, device_signature: xDevice.device_signature })).status, 403, "Y's passkey, X's device key");
+  const i4 = await fresh();
+  assert.equal((await w.decide(item.approval_id, 'approve', w.proofFor(i4, second.approver))).status, 200, 'control: Y with its own pair');
+});
+
+test('KBOX-9 route: a changed action after render is refused (the digest the phone signed is not the stored one)', async (t) => {
+  const w = await approveWorld(t);
+  const item = await pending(w, { kind: 'grant', keyref: 'k1', machine: 'ws-1' });
+  w.propose({ kind: 'grant', keyref: 'k1', machine: 'ws-evil' }, 'ctl-1');
+  assert.equal((await w.decide(item.approval_id, 'approve', w.proofFor(item))).status, 403);
+  const stale = { ...item, revision: 2 };
+  assert.equal((await w.decide(item.approval_id, 'approve', w.proofFor(stale))).status, 403, 'old digest under the old nonce');
+});
+
+test('KBOX-9 an approved install_update keeps the proof kb-install needs, and that proof does not verify for another action', async (t) => {
+  const w = await approveWorld(t);
+  const action = { kind: 'install_update', install: 'a'.repeat(64), commit: 'b'.repeat(40), base: 'c'.repeat(64) } as const;
+  const item = await pending(w, action);
+  assert.equal((await w.decide(item.approval_id, 'approve', w.proofFor(item))).status, 200);
+  const kept = w.core.approvals.storedProof(item.approval_id);
+  assert.ok(kept);
+  assert.deepEqual(Object.keys(kept).sort(), ['approval_id', 'approver_id', 'authenticator_data_b64', 'client_data_json_b64', 'credential_id_b64', 'device_signature_b64', 'nonce_b64', 'signature_b64']);
+  assert.equal(kept.approver_id, w.ownerId);
+  const bytes = (s: string) => Uint8Array.from(Buffer.from(s, 'base64url'));
+  const keys = keysOf(kept.approver_id, w.owner);
+  const parts = { credentialId: bytes(kept.credential_id_b64), authenticatorData: bytes(kept.authenticator_data_b64), clientDataJSON: bytes(kept.client_data_json_b64), signature: bytes(kept.signature_b64), deviceSignature: bytes(kept.device_signature_b64) };
+  const expectFor = (a: object, id: string) => ({ challenge: approvalChallenge(id, actionDigest(a), bytes(kept.nonce_b64)), origin: WORLD_RP.origin, rpId: WORLD_RP.rpId, storedCounter: 0 });
+  assert.equal(verifyProof(keys, parts, expectFor(action, item.approval_id)).ok, true, 'root can verify it again for the action it names');
+  assert.equal(verifyProof(keys, parts, expectFor({ ...action, install: 'd'.repeat(64) }, item.approval_id)).ok, false, 'another H');
+  assert.equal(verifyProof(keys, parts, expectFor({ ...action, base: 'e'.repeat(64) }, item.approval_id)).ok, false, 'another base');
+  assert.equal(verifyProof(keys, parts, expectFor(action, 'apr_0000000000000000')).ok, false, 'another approval');
+  const plain = await pending(w, { kind: 'demote', keyref: 'k9' });
+  assert.equal((await w.decide(plain.approval_id, 'approve', w.proofFor(plain))).status, 200);
+  assert.equal(w.core.approvals.storedProof(plain.approval_id), undefined, 'only install_update and the approver kinds keep a proof');
+});
+
+test('KBOX-9 a view session needs the device signature; the cookie it gives changes nothing on any state-changing route', async (t) => {
+  const w = await approveWorld(t);
+  const n = await w.nonce('view');
+  const parts = w.owner.prove(challenges.view(n), WORLD_RP);
+  assert.equal((await w.call('/app/view', { json: { proof: { ...wire(n, parts), device_signature: '' } } })).status, 403);
+  const other = softApprover();
+  const n2 = await w.nonce('view');
+  assert.equal((await w.call('/app/view', { json: { proof: { ...wire(n2, w.owner.prove(challenges.view(n2), WORLD_RP)), device_signature: Buffer.from(other.deviceSign(challenges.view(n2))).toString('base64url') } } })).status, 403);
+  const cookie = await w.view();
+  const reply = await w.call('/app/view', { method: 'GET', cookie });
+  assert.equal(reply.status, 404);
+  const set = (await w.call('/app/view', { json: { proof: wire(await w.nonce('view'), w.owner.prove(challenges.view(await w.nonce('view')), WORLD_RP)) } })).status;
+  assert.equal(set, 403, 'a view proof over another nonce than the one sent');
+  const item = await pending(w, { kind: 'demote', keyref: 'k1' });
+  for (const path of [`/app/approve/${item.approval_id}`, `/app/deny/${item.approval_id}`, '/app/op', '/setup', '/recover', '/recover/register']) {
+    for (const json of [{}, undefined]) {
+      const r = await w.call(path, { method: 'POST', cookie, ...(json === undefined ? {} : { json }) });
+      assert.ok(r.status === 400 || r.status === 415 || r.status === 404, `${path} with only the cookie: ${r.status}`);
+    }
+  }
+  assert.equal(w.parts.meta.snapshot().approvals.length, 1, 'still pending');
+});
+
+test('KBOX-9 KBOX-11 a signed operation needs the device signature, a fresh nonce, and is bound to its label', async (t) => {
+  const w = await approveWorld(t);
+  const token = w.token('ws-a', 'relay');
+  w.token('ws-b', 'relay');
+  const signOp = async (op: { kind: string; label: string }, signedOp = op) => {
+    const n = await w.nonce('op');
+    return { op, proof: wire(n, w.owner.prove(challenges.op(signedOp, n), WORLD_RP)) };
+  };
+  const noDevice = await signOp({ kind: 'token_revoke', label: 'ws-a' });
+  assert.equal((await w.call('/app/op', { json: { ...noDevice, proof: { ...noDevice.proof, device_signature: '' } } })).status, 403);
+  const forA = await signOp({ kind: 'token_revoke', label: 'ws-b' }, { kind: 'token_revoke', label: 'ws-a' });
+  assert.equal((await w.call('/app/op', { json: forA })).status, 403, 'a revoke signed for ws-a cannot revoke ws-b');
+  const windowForA = await signOp({ kind: 'enrol_window_open', label: 'ws-c' }, { kind: 'token_revoke', label: 'ws-c' });
+  assert.equal((await w.call('/app/op', { json: windowForA })).status, 403, 'a revoke signature cannot open a window');
+  const good = await signOp({ kind: 'token_revoke', label: 'ws-a' });
+  assert.equal((await w.call('/app/op', { json: good })).status, 200);
+  assert.equal((await w.call('/app/op', { json: good })).status, 403, 'the nonce is used');
+  assert.equal(w.parts.meta.tokens().find((x) => x.label === 'ws-a')?.revoked, true);
+  assert.equal(w.parts.meta.tokens().find((x) => x.label === 'ws-b')?.revoked, false);
+  void token;
 });
