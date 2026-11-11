@@ -15,7 +15,7 @@ import { WORDLIST } from './approve-world.ts';
 import { createCodeRoot } from '../../src/shell/console.ts';
 import type { CodeRoot } from '../../src/shell/console.ts';
 import { releaseHash } from '../../src/pure/release-hash.ts';
-import { runInstaller } from '../../src/shell/installer.ts';
+import { runInstaller, syncDirectory } from '../../src/shell/installer.ts';
 import type { InstallHooks, InstallPaths, ReleaseUnits } from '../../src/shell/installer.ts';
 import type { ApprovalProof, TrustApprover } from '../../src/ports/trust.ts';
 
@@ -85,29 +85,44 @@ export function keptProof(approver: SoftApprover, approverId: string, action: ob
 
 export interface FakeUnits extends ReleaseUnits {
   readonly restarts: string[];
-  /** Each bound kb-install gave the units, in order: the time by which a restart or a health check must be over. */
-  readonly bounds: { readonly what: 'restart' | 'health'; readonly until: number | undefined }[];
+  /** Each bound kb-install gave the units, in order: the time by which a restart or a health check must be over, and the
+   * clock when it was given. */
+  readonly bounds: { readonly what: 'restart' | 'health'; readonly until: number | undefined; readonly at: number }[];
   /** Whether the next health checks pass. */
   healthy: boolean;
   /** Called by each health check with its bound, e.g. to let it use all the time it is given. */
   onHealth: ((until: number | undefined) => void) | undefined;
+  /** Called by each restart with its bound, e.g. to let it use all the time it is given. */
+  onRestart: ((until: number | undefined) => void) | undefined;
+  /** Each release directory whose kb-install self-check was run, with its bound, in order. */
+  readonly selfChecks: { readonly release: string; readonly until: number }[];
+  /** The self-check to run instead of passing (the real one from systemd.ts, say); undefined passes every release. */
+  checkSelf: ReleaseUnits['selfCheck'] | undefined;
 }
 
-export function fakeUnits(current: () => string): FakeUnits {
+export function fakeUnits(current: () => string, now: () => number): FakeUnits {
   const units: FakeUnits = {
     restarts: [],
     bounds: [],
     healthy: true,
     onHealth: undefined,
+    onRestart: undefined,
     restart(until?: number): Promise<void> {
       units.restarts.push(current());
-      units.bounds.push({ what: 'restart', until });
+      units.bounds.push({ what: 'restart', until, at: now() });
+      units.onRestart?.(until);
       return Promise.resolve();
     },
     healthCheck(release: string, until?: number): Promise<boolean> {
-      units.bounds.push({ what: 'health', until });
+      units.bounds.push({ what: 'health', until, at: now() });
       units.onHealth?.(until);
       return Promise.resolve(units.healthy && current() === release);
+    },
+    selfChecks: [],
+    checkSelf: undefined,
+    selfCheck(release: string, until: number): Promise<boolean> {
+      units.selfChecks.push({ release, until });
+      return units.checkSelf === undefined ? Promise.resolve(true) : units.checkSelf(release, until);
     },
   };
   return units;
@@ -123,6 +138,10 @@ export interface InstallWorld {
   readonly units: FakeUnits;
   readonly codes: CodeRoot;
   readonly console: string[];
+  /** The fixed codes kb-install journalled, in order. */
+  readonly journal: string[];
+  /** Each directory kb-install made durable (fsync), in order, with what was in it and where `current` pointed then. */
+  readonly syncs: { readonly dir: string; readonly entries: readonly string[]; readonly current: string }[];
   /** Writes a tree to staging/<H>/ and returns H. */
   stage(tree: Tree, name?: string): string;
   /** A kept approval proof for an action, signed by an approver (the owner by default) over the `kbox-v1` challenge. */
@@ -158,6 +177,8 @@ export async function installWorld(t: TestContext, options: { readonly trust?: f
   writeFileSync(paths.bootIdFile, `${BOOT}\n`);
   const clock = new FakeClock(1_700_000_000_000);
   const consoleLines: string[] = [];
+  const journal: string[] = [];
+  const syncs: InstallWorld['syncs'] = [];
   const codes = createCodeRoot({ dir: paths.codesDir, sink: (l) => void consoleLines.push(l), random: { bytes: (n) => Uint8Array.from(randomBytes(n)) }, clock, wordlist: WORDLIST });
 
   const writeTree = (dir: string, tree: Tree): void => {
@@ -173,7 +194,11 @@ export async function installWorld(t: TestContext, options: { readonly trust?: f
   writeTree(r0, { 'bin/node': { body: NODE_BIN, exec: true }, 'bin/caddy': { body: CADDY_BIN, exec: true } });
   symlinkSync(r0, paths.current);
   const current = (): string => readlinkSync(paths.current).split('/').at(-1) ?? '';
-  const units = fakeUnits(current);
+  const units = fakeUnits(current, () => clock.now());
+  const recordSync = (dir: string): void => {
+    syncs.push({ dir, entries: readdirSync(dir).sort(), current: current() });
+    syncDirectory(dir);
+  };
 
   const owner = softApprover();
   const ownerId = 'ap-owner-00001';
@@ -192,6 +217,8 @@ export async function installWorld(t: TestContext, options: { readonly trust?: f
     units,
     codes,
     console: consoleLines,
+    journal,
+    syncs,
     stage(tree, name) {
       const h = hashOf(tree);
       writeTree(join(paths.staging, name ?? h), tree);
@@ -206,7 +233,7 @@ export async function installWorld(t: TestContext, options: { readonly trust?: f
       world.request(h, { kind: 'install', install: h, commit: COMMIT, base, ...(approval === undefined ? {} : { approval }) });
     },
     runKilledAt: (step) => runNode([new URL('./install-kill.ts', import.meta.url).pathname, JSON.stringify(paths), step], root),
-    run: (hooks) => runInstaller({ paths, units, clock, wordlist: WORDLIST, domain: DOMAIN, ...(hooks === undefined ? {} : { hooks }) }).then(() => undefined),
+    run: (hooks) => runInstaller({ paths, units, clock, wordlist: WORDLIST, domain: DOMAIN, journal: (code) => void journal.push(code), syncDir: recordSync, ...(hooks === undefined ? {} : { hooks }) }).then(() => undefined),
     result(name) {
       const file = join(paths.results, `${name}.result`);
       return existsSync(file) ? readFileSync(file, 'utf8') : undefined;

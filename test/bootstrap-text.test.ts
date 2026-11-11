@@ -4,9 +4,10 @@
 // and reported by the builder, never run here.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import type { TestContext } from 'node:test';
 import { FIXED } from '../src/pure/words.ts';
 import { parseRuntimeLock } from '../src/pure/runtime-lock.ts';
 import type { PinnedBinary } from '../src/pure/runtime-lock.ts';
@@ -37,6 +38,45 @@ test('KBOX-1 the bootstrap disables the Run Command plugin (its exact command UN
   assert.ok(runCommand.some((l) => /disable/i.test(l)), 'a line disables the Run Command plugin');
   assert.ok(runCommand.some((l) => /UNVERIFIED/.test(l)), 'the command is marked UNVERIFIED');
   assert.equal(lines.some((l) => /monitoring/i.test(l) && /disable|stop|mask/i.test(l) && !/^\s*#/.test(l)), false, 'nothing disables monitoring');
+});
+
+/** The runcmd item that disables the Run Command plugin, as the bootstrap's script holds it (a one-line item or a block). */
+function runCommandItem(): string {
+  const lines = cloudInit.split('\n');
+  const at = lines.findIndex((l) => /oci-cloud-agent-plugin disable/.test(l) && !/^\s*#/.test(l));
+  assert.ok(at >= 0, 'the bootstrap has the disable line');
+  const one = /^ {2}- (?!\|)(.*)$/.exec(lines[at] ?? '');
+  if (one?.[1] !== undefined) return one[1];
+  let start = at;
+  while (start > 0 && !/^ {2}- \|$/.test(lines[start] ?? '')) start -= 1;
+  const body: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (!line.startsWith('    ')) break;
+    body.push(line.slice(4));
+  }
+  return body.join('\n');
+}
+
+/** Runs the item in a shell whose PATH holds a plugin tool that exits `status` and a logger that records its arguments. */
+async function runDisable(t: TestContext, status: number): Promise<{ readonly run: ReturnType<typeof runShell>; readonly logged: string }> {
+  const dir = await tempDir(t);
+  mkdirSync(join(dir, 'bin'));
+  writeFileSync(join(dir, 'bin', 'oci-cloud-agent-plugin'), `#!/bin/sh\nexit ${status}\n`, { mode: 0o755 });
+  writeFileSync(join(dir, 'bin', 'logger'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${join(dir, 'logged')}"\n`, { mode: 0o755 });
+  const run = runShell(`PATH="${join(dir, 'bin')}:$PATH"\n${runCommandItem()}\necho the-next-step-ran`, dir);
+  const logged = existsSync(join(dir, 'logged')) ? readFileSync(join(dir, 'logged'), 'utf8') : '';
+  return { run, logged };
+}
+
+test('KBOX-1 a Run Command disable that fails stops the bootstrap loudly: an error in the journal and on the console, a failed result, nothing after it runs', async (t) => {
+  const failed = await runDisable(t, 3);
+  assert.notEqual(failed.run.status, 0, 'the bootstrap fails (cloud-init records the error)');
+  assert.doesNotMatch(failed.run.stdout, /the-next-step-ran/, 'nothing after it is installed');
+  assert.match(failed.logged, /^-s -p user\.err -t keybox-bootstrap .*Run Command/m, 'an error in the journal, echoed to the console');
+  const done = await runDisable(t, 0);
+  assert.equal(done.run.status, 0, done.run.stderr);
+  assert.match(done.run.stdout, /the-next-step-ran/, 'control: a disable that works goes on');
+  assert.equal(done.logged, '', 'control: nothing is reported');
 });
 
 test('KBOX-1 core\'s route table has no shell, exec, debug, eval or console route', async (t) => {

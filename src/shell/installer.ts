@@ -10,6 +10,7 @@
 // directory; in staging it only removes. A `<name>.settled` marker core leaves once it has read an answer makes the next
 // run remove that `<name>.result`.
 import { closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeSync, fchmodSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import type { Clock } from '../ports/clock.ts';
 import type { TrustApprover } from '../ports/trust.ts';
@@ -22,7 +23,8 @@ import { parseRuntimeLock } from '../pure/runtime-lock.ts';
 import { DOMAIN_NAME, approverAddOf } from '../pure/actions.ts';
 import { decodeJsonBody } from '../pure/schemas.ts';
 import { createCodeRoot, readBootId } from './console.ts';
-import { closeFd, listAt, openAt, openDirectory, readThrough, removeAt } from './safe-open.ts';
+import { closeFd, listAt, openAt, openDirectory, readThrough, trashIn } from './safe-open.ts';
+import type { Trash } from './safe-open.ts';
 
 export interface InstallPaths {
   /** `/var/lib/keybox/staging`: core's, so nothing in it is trusted. */
@@ -47,6 +49,9 @@ export interface ReleaseUnits {
   restart(until: number): Promise<void>;
   /** True when both processes answer `GET /healthz` with this release within 60 s of the restart and before `until`. */
   healthCheck(release: string, until: number): Promise<boolean>;
+  /** True when the kb-install of the release in `releaseDir` loads every module it imports and exits 0 in its no-op
+   * `--self-check` mode before `until`: a release whose root installer cannot start must never stay current. */
+  selfCheck(releaseDir: string, until: number): Promise<boolean>;
 }
 
 /** Test seams between the steps of the safe copy, after it and after the switch. Production passes none. */
@@ -54,6 +59,7 @@ export interface InstallHooks {
   readonly afterList?: (rel: string) => void;
   readonly afterOpen?: (rel: string) => void;
   readonly afterRead?: (rel: string) => void;
+  readonly afterWrite?: (rel: string) => void;
   readonly afterCopy?: () => void;
   readonly afterSwitch?: () => void;
 }
@@ -68,18 +74,34 @@ export interface InstallerDeps {
   readonly domain: string | undefined;
   /** A fixed code for the journal when a request fails in a way no refusal code names. */
   readonly journal?: (code: string) => void;
+  /** Makes a directory's renames and removals durable (fsync of the directory); `syncDirectory` unless a test watches it. */
+  readonly syncDir?: (dir: string) => void;
+}
+
+/** fsyncs a directory, so an entry renamed into it, or removed from it, survives a power cut in that state. */
+export function syncDirectory(dir: string): void {
+  const fd = openSync(dir, constants.O_RDONLY | constants.O_DIRECTORY);
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export const COPY_DEADLINE_MS = 60_000;
 /** kb-install.service has TimeoutStartSec=120s; a run plans to end 10 s before it (Node's start, the result files), so
  * systemd never has to kill it. Every phase below is bounded by the time this leaves. */
 export const RUN_BUDGET_MS = 110_000;
-/** One `systemctl restart` of the three units, at most. */
+/** One `systemctl restart` of the three units, at most. The last this much of a run is the rollback's restart's alone:
+ * no earlier phase is given time that reaches into it. */
 export const RESTART_WITHIN_MS = 15_000;
+/** The new release's kb-install self-check, at most. */
+const SELF_CHECK_WITHIN_MS = 10_000;
 /** The least time worth a health check. */
 const MIN_HEALTH_MS = 10_000;
-/** A copy ends early enough to leave a restart, a health check and a rollback restart inside the run. */
-const AFTER_COPY_MS = 2 * RESTART_WITHIN_MS + MIN_HEALTH_MS;
+/** A copy (its reads, hashes and writes) ends early enough to leave a restart, a self-check, a health check and a rollback
+ * restart inside the run. */
+const AFTER_COPY_MS = 2 * RESTART_WITHIN_MS + SELF_CHECK_WITHIN_MS + MIN_HEALTH_MS;
 /** A pinned binary is read into memory to be hashed; Node's and Caddy's builds are well under this. */
 const BINARY_LIMIT = 256 * 1024 * 1024;
 
@@ -95,6 +117,8 @@ interface CopiedFile {
   readonly path: string;
   readonly executable: boolean;
   readonly bytes: Uint8Array;
+  /** Of `bytes`, taken as they are read, inside the copy's deadline. */
+  readonly sha256: string;
 }
 interface Copy {
   readonly dirs: readonly string[];
@@ -111,6 +135,7 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
   const { paths } = deps;
   const hooks = deps.hooks ?? {};
   const runDeadline = deps.clock.now() + RUN_BUDGET_MS;
+  const syncDir = deps.syncDir ?? syncDirectory;
   const noCodes = (): never => {
     throw new Error('kb-install checks codes and never makes one');
   };
@@ -150,6 +175,7 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
       closeSync(fd);
     }
     renameSync(temp, paths.trustFile);
+    syncDir(dirname(paths.trustFile));
   };
 
   // Every approval id root acted on (install and trust alike): each approval works once.
@@ -163,13 +189,21 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     } finally {
       closeSync(fd);
     }
+    // The first spend makes the file: its entry must be durable too before the change it guards is written.
+    syncDir(paths.results);
+  };
+
+  /** The release `current` names, or undefined when it names none (it never leaves releases/ through kb-install). */
+  const currentRelease = (): string | undefined => {
+    if (!existsSync(paths.current)) return undefined;
+    const target = realpathSync(paths.current);
+    return dirname(target) === realpathSync(paths.releases) && RELEASE_HASH.test(basename(target)) ? basename(target) : undefined;
   };
 
   /** H0: `current` resolves to `releases/<H0>`, or kb-install refuses to act. */
   const runningRelease = (): string => {
-    const target = realpathSync(paths.current);
-    const h0 = basename(target);
-    if (dirname(target) !== realpathSync(paths.releases) || !RELEASE_HASH.test(h0)) throw new Error('current is not a release');
+    const h0 = currentRelease();
+    if (h0 === undefined) throw new Error('current is not a release');
     return h0;
   };
 
@@ -178,6 +212,7 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     rmSync(temp, { force: true });
     symlinkSync(join(paths.releases, h), temp);
     renameSync(temp, paths.current);
+    syncDir(dirname(paths.current));
   };
 
   // --- the safe copy ------------------------------------------------------------------------------------------------
@@ -211,7 +246,7 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
             if (!read.ok) throw new Refusal('size');
             total += read.bytes.length;
             hooks.afterRead?.(rel);
-            files.push({ path: rel, executable: opened.executable, bytes: read.bytes });
+            files.push({ path: rel, executable: opened.executable, bytes: read.bytes, sha256: fileSha256(read.bytes) });
           }
         } finally {
           closeFd(opened.fd);
@@ -253,8 +288,9 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
           try {
             const read = readThrough(bin.fd, bin.size, BINARY_LIMIT);
             if (!read.ok) throw new Refusal('size');
-            if (fileSha256(read.bytes) !== pin.sha256) throw new Refusal('lock');
-            out.push({ path: `bin/${pin.name}`, executable: true, bytes: read.bytes });
+            const sha256 = fileSha256(read.bytes);
+            if (sha256 !== pin.sha256) throw new Refusal('lock');
+            out.push({ path: `bin/${pin.name}`, executable: true, bytes: read.bytes, sha256 });
           } finally {
             closeFd(bin.fd);
           }
@@ -269,8 +305,9 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     return out;
   };
 
-  /** Writes exactly the bytes read into a root-owned tree: directories 0755, files 0644 or 0755. */
-  const writeRelease = (target: string, copy: Copy, binaries: readonly CopiedFile[]): void => {
+  /** Writes exactly the bytes read into a root-owned tree: directories 0755, files 0644 or 0755. Each written file is
+   * inside the copy's deadline, or the copy is refused `timeout`. */
+  const writeRelease = (target: string, copy: Copy, binaries: readonly CopiedFile[], deadline: number): void => {
     mkdirSync(target, { mode: 0o755 });
     for (const dir of ['bin', ...[...copy.dirs].sort()]) mkdirSync(join(target, dir), { mode: 0o755 });
     for (const file of [...copy.files, ...binaries]) {
@@ -283,6 +320,8 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
       } finally {
         closeSync(fd);
       }
+      hooks.afterWrite?.(file.path);
+      if (deps.clock.now() > deadline) throw new Refusal('timeout');
     }
   };
 
@@ -303,21 +342,36 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
       closeSync(fd);
     }
     renameSync(temp, switchingFile);
+    syncDir(paths.results);
   };
-  const clearSwitching = (): void => rmSync(switchingFile, { force: true });
+  const clearSwitching = (): void => {
+    rmSync(switchingFile, { force: true });
+    syncDir(paths.results);
+  };
 
   /** A restart that cannot be made in time is journalled: `current` is already where it must be, nothing else is left to do. */
   const restartBy = (until: number): Promise<void> => deps.units.restart(until).catch(() => deps.journal?.('restart_failed'));
+
+  /** A record root cannot act on (torn, its base gone, or not matching `current`) is set aside unchanged for a later look,
+   * `current` is left as it is and a fixed code is journalled: the run goes on to serve requests, never wedged by it. */
+  const setAside = (): void => {
+    renameSync(switchingFile, join(paths.results, `switching.bad-${deps.clock.now()}`));
+    syncDir(paths.results);
+    deps.journal?.('switching_bad');
+  };
 
   const recoverInterrupted = async (): Promise<void> => {
     if (!existsSync(switchingFile)) return;
     const record = /^switching ([0-9a-f]{64}) from ([0-9a-f]{64})\n$/.exec(readFileSync(switchingFile, 'utf8'));
     const h = record?.[1];
     const base = record?.[2];
-    if (h === undefined || base === undefined || !existsSync(join(paths.releases, base))) throw new Error('the switching record does not name a release');
+    if (h === undefined || base === undefined || h === base || !existsSync(join(paths.releases, base))) return setAside();
+    const running = currentRelease();
+    // The record is written before the copy and removed after: current is its base, its H, or (never made) absent.
+    if (existsSync(paths.current) && running !== base && running !== h) return setAside();
     const release = join(paths.releases, h);
     const ranFromH = existsSync(release);
-    if (!existsSync(paths.current) || runningRelease() !== base) switchCurrent(base);
+    if (running !== base) switchCurrent(base);
     if (ranFromH) await restartBy(Math.min(deps.clock.now() + RESTART_WITHIN_MS, runDeadline));
     rmSync(`${release}.tmp`, { recursive: true, force: true });
     rmSync(release, { recursive: true, force: true });
@@ -343,8 +397,8 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     writeSwitching(h, h0);
     try {
       const copy = copyTree(stagingFd, h, deadline);
-      if (releaseHash(copy.files.map((f) => ({ path: f.path, executable: f.executable, sha256: fileSha256(f.bytes) }))) !== h) throw new Refusal('hash');
-      writeRelease(temp, copy, checkBinaries(stagingFd, h, h0, copy, deadline));
+      if (releaseHash(copy.files) !== h) throw new Refusal('hash');
+      writeRelease(temp, copy, checkBinaries(stagingFd, h, h0, copy, deadline), deadline);
     } catch (error) {
       rmSync(temp, { recursive: true, force: true });
       clearSwitching();
@@ -353,13 +407,18 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     }
     hooks.afterCopy?.();
     renameSync(temp, release);
+    syncDir(paths.releases);
     // Spent before the switch: an approval that ever reached `current` never installs again, whatever follows.
     spend(req.approval.approval_id);
     switchCurrent(h);
     hooks.afterSwitch?.();
+    // Every phase before a rollback ends by `rollbackAt`, so the rollback's restart always has its RESTART_WITHIN_MS.
+    const rollbackAt = runDeadline - RESTART_WITHIN_MS;
+    const within = (ms: number): number => Math.min(deps.clock.now() + ms, rollbackAt);
     const healthy = await deps.units
-      .restart(deps.clock.now() + RESTART_WITHIN_MS)
-      .then(() => deps.units.healthCheck(h, runDeadline - RESTART_WITHIN_MS))
+      .restart(within(RESTART_WITHIN_MS))
+      .then(() => deps.units.selfCheck(release, within(SELF_CHECK_WITHIN_MS)))
+      .then((loads) => loads && deps.units.healthCheck(h, rollbackAt))
       .catch(() => false);
     if (!healthy) {
       switchCurrent(h0);
@@ -411,26 +470,28 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
   };
 
   // --- one request ----------------------------------------------------------------------------------------------------
-  /** Reads a request through the safe open (at most 64 KiB) and removes the entry at once, whatever it is. */
-  const takeRequest = (stagingFd: number, name: Buffer): { readonly ok: true; readonly bytes: Uint8Array } | { readonly ok: false; readonly code: 'not_regular' | 'size' } => {
+  /** Reads a request through the safe open (at most 64 KiB) and moves the entry out of staging at once, whatever it is:
+   * into the trash, which the run empties last, so not even a planted tree too deep to remove in one run keeps the path
+   * unit triggered. */
+  const takeRequest = (stagingFd: number, trash: Trash, name: Buffer): { readonly ok: true; readonly bytes: Uint8Array } | { readonly ok: false; readonly code: 'not_regular' | 'size' } => {
     const opened = openAt(stagingFd, name);
     if (opened.kind !== 'file') {
       if (opened.kind === 'dir') closeFd(opened.fd);
-      removeAt(stagingFd, name);
+      trash.discard(name);
       return { ok: false, code: 'not_regular' };
     }
     try {
       const read = opened.size > REQUEST_LIMIT ? ({ ok: false } as const) : readThrough(opened.fd, opened.size, REQUEST_LIMIT);
-      removeAt(stagingFd, name);
+      trash.discard(name);
       return read.ok ? read : { ok: false, code: 'size' };
     } finally {
       closeFd(opened.fd);
     }
   };
 
-  const handle = async (stagingFd: number, name: Buffer): Promise<RootResult> => {
+  const handle = async (stagingFd: number, trash: Trash, name: Buffer): Promise<RootResult> => {
     try {
-      const taken = takeRequest(stagingFd, name);
+      const taken = takeRequest(stagingFd, trash, name);
       if (!taken.ok) return `refused:${taken.code}`;
       const parsed = parseRootRequest(taken.bytes);
       if (!parsed.ok) return `refused:${parsed.code}`;
@@ -443,22 +504,25 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
 
   await recoverInterrupted();
   const stagingFd = openDirectory(paths.staging);
+  const trash = trashIn(stagingFd, randomBytes(16).toString('hex'));
   const answered: { name: string; result: RootResult }[] = [];
   try {
     // First the answers core has read (`<name>.settled`): the result and the marker go, before any new answer is written.
     for (const name of listAt(stagingFd).filter((n) => endsWith(n, SETTLED_SUFFIX))) {
       const base = name.subarray(0, name.length - SETTLED_SUFFIX.length).toString('utf8');
       if (REQUEST_NAME.test(base)) rmSync(join(paths.results, `${base}.result`), { force: true });
-      removeAt(stagingFd, name);
+      trash.discard(name);
     }
     for (const name of listAt(stagingFd).filter((n) => endsWith(n, REQUEST_SUFFIX))) {
       const base = name.subarray(0, name.length - REQUEST_SUFFIX.length).toString('utf8');
-      const result = await handle(stagingFd, name);
+      const result = await handle(stagingFd, trash, name);
       if (REQUEST_NAME.test(base)) {
         writeResult(base, result);
         answered.push({ name: base, result });
       }
     }
+    // Last, once every answer is written: a tree that takes long to remove delays no answer.
+    trash.empty();
   } finally {
     closeFd(stagingFd);
   }

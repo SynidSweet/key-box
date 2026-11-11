@@ -9,7 +9,7 @@ import { parseWordlist } from '../pure/codes.ts';
 import { systemClock, systemScheduler } from '../shell/clock.ts';
 import { runInstaller } from '../shell/installer.ts';
 import type { InstallPaths } from '../shell/installer.ts';
-import { systemdUnits } from '../shell/systemd.ts';
+import { SELF_CHECK, systemdUnits } from '../shell/systemd.ts';
 
 const absolute = (value: string | undefined, fallback: string): string => {
   const path = value ?? fallback;
@@ -36,10 +36,12 @@ function readDomain(env: NodeJS.ProcessEnv): string | undefined {
   return domain;
 }
 
+const readWordlist = (): readonly string[] => parseWordlist(readFileSync(new URL('../data/wordlist.txt', import.meta.url), 'utf8'));
+
 async function main(): Promise<number> {
   const env = process.env;
   const paths = readPaths(env);
-  const wordlist = parseWordlist(readFileSync(new URL('../data/wordlist.txt', import.meta.url), 'utf8'));
+  const wordlist = readWordlist();
   const units = systemdUnits({
     systemctl: absolute(env['KB_SYSTEMCTL'], '/usr/bin/systemctl'),
     units: ['keybox.service', 'keyrelay.service', 'caddy.service'],
@@ -52,5 +54,12 @@ async function main(): Promise<number> {
   return 0;
 }
 
+/** `--self-check`, run by the installing release's kb-install on a new release before it counts as healthy: every module
+ * above is a static import, so reaching this line loaded them all; the wordlist is read too. Nothing else is touched. */
+function selfCheck(): number {
+  readWordlist();
+  return 0;
+}
+
 // A refusal is a decided outcome written as a result (exit 0); only a run that could not start or read staging fails.
-process.exitCode = await main();
+process.exitCode = process.argv[2] === SELF_CHECK ? selfCheck() : await main();

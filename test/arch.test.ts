@@ -3,6 +3,8 @@
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import {
   checkCatches,
   checkCycles,
@@ -540,10 +542,53 @@ test('KBOX-6 kb-install writing outside the spec\'s paths is refused: a literal 
   await refuses(t, installWriting("  renameSync(join(paths.results, 'a'), '/etc/cron.d/x');"), checkInstallWrites, 'install-write-path');
 });
 
+/** A kb-install whose shell module has its own import lines and `body`, with the installer's own paths in scope. */
+const installModule = (imports: string, body: string): Tree => ({
+  ...installWriting(''),
+  'src/shell/w.ts': `${imports}\nexport interface P { releases: string; current: string; trustFile: string; codesDir: string; results: string; staging: string }\nexport function run(paths: P): void {\n${body}\n}\n`,
+});
+const FS_NAMED = "import { closeSync, constants, openSync, writeFileSync } from 'node:fs';";
+
+test('KBOX-6 the review\'s probes are refused: an fs write reached through an alias (assignment, destructuring), a child process outside systemd.ts, a /proc/self/fd/ path template', async (t) => {
+  // The positive control the review saw caught: a literal path.
+  await refuses(t, installModule(FS_NAMED, "  writeFileSync('/etc/passwd', 'x');"), checkInstallWrites, 'install-write-path');
+  await refuses(t, installModule(FS_NAMED, "  const w = writeFileSync;\n  w('/etc/passwd', 'x');"), checkInstallWrites, 'install-write-path');
+  await refuses(t, installModule(FS_NAMED, "  let w: typeof writeFileSync = (() => undefined);\n  w = writeFileSync;\n  w('/etc/passwd', 'x');"), checkInstallWrites, 'install-write-path');
+  await refuses(t, installModule("import * as fs from 'node:fs';", "  const { writeFileSync: put } = fs;\n  put('/etc/passwd', 'x');"), checkInstallWrites, 'install-write-path');
+  await refuses(t, installModule("import * as fs from 'node:fs';", "  const put = fs.writeFileSync;\n  put('/etc/passwd', 'x');"), checkInstallWrites, 'install-write-path');
+  await refuses(t, installModule(FS_NAMED, "  [writeFileSync].forEach((f) => f('/etc/passwd', 'x'));"), checkInstallWrites, 'install-write-path');
+  await refuses(t, installModule("import { spawnSync } from 'node:child_process';", "  spawnSync('sh', ['-c', 'echo x > /etc/shadow']);"), checkInstallWrites, 'install-write-path');
+  await refuses(t, installModule("import * as cp from 'child_process';", "  cp.execFileSync('/bin/sh', ['-c', 'echo x > /etc/shadow']);"), checkInstallWrites, 'install-write-path');
+  await refuses(t, installModule(FS_NAMED, "  const fd = openSync('/etc', constants.O_RDONLY | constants.O_DIRECTORY);\n  writeFileSync(`/proc/self/fd/${fd}/passwd`, 'x');\n  closeSync(fd);"), checkInstallWrites, 'install-write-path');
+});
+
+test('KBOX-6 a write through a held descriptor is judged by where the descriptor was opened: safe-open.ts\'s writers with a descriptor of a root are accepted, of /etc refused', async (t) => {
+  const safeOpen = await readFile(join(REPO_ROOT, 'src/shell/safe-open.ts'), 'utf8');
+  const errors = await readFile(join(REPO_ROOT, 'src/pure/errors.ts'), 'utf8');
+  const withSafeOpen = (body: string): Tree => ({
+    ...installModule("import { openDirectory, removeAt, trashIn } from './safe-open.ts';", body),
+    'src/shell/safe-open.ts': safeOpen,
+    'src/pure/errors.ts': errors,
+  });
+  await accepts(t, withSafeOpen("  const fd = openDirectory(paths.staging);\n  removeAt(fd, 'x.request');\n  trashIn(fd, 'a').discard('y.request');"), checkInstallWrites);
+  await refuses(t, withSafeOpen("  removeAt(openDirectory('/etc'), 'passwd');"), checkInstallWrites, 'install-write-path');
+  await refuses(t, withSafeOpen("  const fd = openDirectory('/etc');\n  trashIn(fd, 'a').discard('shadow');"), checkInstallWrites, 'install-write-path');
+  await refuses(t, withSafeOpen("  let fd = openDirectory(paths.staging);\n  fd = openDirectory('/etc');\n  removeAt(fd, 'passwd');"), checkInstallWrites, 'install-write-path');
+  // A new writer in safe-open.ts that is not declared would let its callers go unjudged.
+  const undeclared = { ...withSafeOpen("  removeAt(openDirectory(paths.staging), 'x');"), 'src/shell/safe-open.ts': `${safeOpen}\nexport const wipe = (dirFd: number): void => removeAt(dirFd, 'x');\n` };
+  await refuses(t, undeclared, checkInstallWrites, 'install-write-path');
+});
+
+test('KBOX-6 a path variable assigned again after its declaration is not traced by its initializer', async (t) => {
+  await refuses(t, installModule(FS_NAMED, "  let p = paths.staging;\n  p = '/etc/passwd';\n  writeFileSync(p, 'x');"), checkInstallWrites, 'install-write-path');
+  await accepts(t, installModule(FS_NAMED, "  const p = paths.staging;\n  writeFileSync(p, 'x');"), checkInstallWrites);
+});
+
 test('KBOX-6 kb-install writing under the spec\'s paths, through a held directory descriptor or in code it never calls is accepted', async (t) => {
   await accepts(
     t,
-    installWriting(
+    {
+      ...installWriting(
       [
         "  const temp = `${paths.trustFile}.tmp`;",
         "  writeFileSync(temp, '{}');",
@@ -553,10 +598,11 @@ test('KBOX-6 kb-install writing under the spec\'s paths, through a held director
         "  rmSync(join(paths.results, 'h.result'), { force: true });",
         "  rmSync(`${paths.current}.tmp`, { force: true });",
         "  mkdirSync(join(paths.codesDir, 'x'));",
-        "  unlinkSync(at(3, 'x.request'));",
         "  closeSync(openSync('/etc/hostname', constants.O_RDONLY));",
       ].join('\n'),
     ),
+    'src/shell/safe-open.ts': "import { unlinkSync } from 'node:fs';\nconst at = (fd: number, name: string): string => `/proc/self/fd/${fd}/${name}`;\nexport const held = (): void => unlinkSync(at(3, 'x.request'));\n",
+    },
     checkInstallWrites,
   );
   await accepts(t, withChanges({ 'src/cli/kb-install.ts': 'export const x = 1;\n', 'src/shell/never.ts': "import { writeFileSync } from 'node:fs';\nexport const w = (): void => writeFileSync('/etc/passwd', 'x');\n" }), checkInstallWrites);

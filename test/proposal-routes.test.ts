@@ -35,7 +35,7 @@ const VALID: readonly Json[] = [
   { kind: 'demote', keyref: 'k-demote' },
   { kind: 'vercel_set_domain', project: 'shop', op: 'move', domain: 'shop.example.com', to_project: 'shop-2' },
   { kind: 'vercel_set_team_setting', setting: 'sensitiveEnvironmentVariablePolicy', value: 'on' },
-  { kind: 'approver_add', cose_sha256: 'e'.repeat(64), device_sha256: 'f'.repeat(64) }, // FORCED-FLIP: as of the spec revision 4
+  // FORCED-FLIP: approver_add is box-originated (KBOX-7), so no token proposes it; its refusal is pinned below.
 ];
 
 /** Members that may be left out. */
@@ -78,6 +78,14 @@ test('KBOX-53 every proposal kind is accepted with valid members and answers exa
     assert.equal(typeof body['slot'], 'string');
   }
   assert.equal((await propose(w, token, { kind: 'approver_remove', approver_id: second.approverId })).status, 201);
+});
+
+test('KBOX-7 approver_add is box-originated: a control token proposing one, with any key hashes, is bad_request and nothing is proposed', async (t) => {
+  const w = await approveWorld(t);
+  const token = w.token('ctl-1', 'control');
+  const reply = await propose(w, token, { kind: 'approver_add', cose_sha256: 'e'.repeat(64), device_sha256: 'f'.repeat(64) }, { agent: 'claude', text: 'add my phone' });
+  assert.equal(reply.status, 400, reply.body);
+  assert.deepEqual(await w.queue(), []);
 });
 
 test('KBOX-53 each member of each kind is refused when wrong, missing or joined by an unknown member, and nothing is proposed', async (t) => {

@@ -5,11 +5,15 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, closeSync, constants, existsSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { softApprover } from './kit/approver.ts';
+import { runShell } from './kit/index.ts';
 import { BOOT, COMMIT, NODE_BIN, CADDY_BIN, RELEASE_0, addActionOf, hashOf, installWorld, lockFor, sha256Hex } from './support/install-world.ts';
 import type { InstallWorld, Tree } from './support/install-world.ts';
+import type { ReleaseUnits } from '../src/shell/installer.ts';
+import { COPY_DEADLINE_MS, RESTART_WITHIN_MS } from '../src/shell/installer.ts';
+import { systemdUnits } from '../src/shell/systemd.ts';
 
 const RELEASE_1: Tree = { 'runtime.lock': lockFor(NODE_BIN, CADDY_BIN), 'src/main-core.ts': 'new core\n', 'src/cli/kb-install.ts': 'installer\n', 'README.md': 'v1\n', 'run.sh': { body: '#!/bin/sh\n', exec: true } };
 
@@ -353,6 +357,38 @@ test('KBOX-6 a pre-planted x.request of 20,000 nested directories is removed (re
   assert.equal(w.result('deep'), 'refused:not_regular');
 });
 
+test('KBOX-6 a trash a killed run left in staging (root-owned, 0700) is emptied by the next run; an entry core made under a trash name is left alone', async (t) => {
+  const w = await installWorld(t);
+  const left = join(w.paths.staging, '.kb-trash-left');
+  mkdirSync(join(left, '1'), { recursive: true, mode: 0o700 });
+  writeFileSync(join(left, '1', 'x'), 'x');
+  const planted = join(w.paths.staging, '.kb-trash-planted');
+  mkdirSync(planted, { mode: 0o755 });
+  writeFileSync(join(planted, 'keep'), 'keep');
+  w.request('nothing', { kind: 'trust', change: 'setup', code: 'x', domain: 'box.example', approvers: [] });
+  await w.run();
+  assert.equal(existsSync(left), false, 'the left trash is emptied');
+  assert.equal(readFileSync(join(planted, 'keep'), 'utf8'), 'keep', 'not ours (not 0700): never emptied, so a planted tree costs root nothing');
+});
+
+/** The open-file limit a kb-install run is started under below: far fewer descriptors than the planted tree is deep. */
+const FEW_FDS = 64;
+
+test('KBOX-6 a pre-planted x.request far deeper than the open-file limit is removed with a constant number of descriptors, and nothing is left in staging', async (t) => {
+  const w = await installWorld(t);
+  nestDirs(w.paths.staging, 'deep.request', 16 * FEW_FDS);
+  const pathsFile = join(w.root, 'paths.json');
+  writeFileSync(pathsFile, JSON.stringify(w.paths));
+  const helper = new URL('./support/install-run.ts', import.meta.url).pathname;
+  // The limit is set in the run's own shell, a process this test starts (soft and hard, so Node cannot raise it).
+  const run = runShell(`ulimit -n ${FEW_FDS} && exec "${process.execPath}" "${helper}" "${pathsFile}"`, w.root);
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, new RegExp(`^Max open files\\s+${FEW_FDS}\\s+${FEW_FDS}\\s`, 'm'), `the limit held in the run: ${run.stdout}`);
+  assert.equal(existsSync(join(w.paths.staging, 'deep.request')), false, `the entry is gone: ${run.stderr}`);
+  assert.equal(w.result('deep'), 'refused:not_regular');
+  assert.deepEqual(readdirSync(w.paths.staging), [], 'nothing is left in staging, the trash included');
+});
+
 test('KBOX-6 a pre-planted <H>.result symlink in staging has no effect: results are written under the root-owned results directory', async (t) => {
   const w = await installWorld(t);
   const h = w.stage(RELEASE_1);
@@ -469,6 +505,56 @@ test('KBOX-6 a failure after the switch still rolls back: the hook after step 5 
   assert.equal(w.current(), w.h0);
 });
 
+// --- the new release's own kb-install must load before the release counts as healthy ---------------------------------
+
+/** A release whose kb-install answers `--self-check` by loading what it imports and exiting 0. */
+const SELF_CHECKING: Tree = {
+  ...RELEASE_1,
+  'src/cli/kb-install.ts': "import { ok } from './part.ts';\nif (process.argv[2] === '--self-check') process.exitCode = ok;\n",
+  'src/cli/part.ts': 'export const ok = 0;\n',
+};
+
+/** The real self-check of systemd.ts, with this test's Node standing in for the release's pinned bin/node. */
+const realSelfCheck = (w: InstallWorld): ReleaseUnits['selfCheck'] =>
+  systemdUnits({ systemctl: '/bin/false', units: [], healthSockets: [], clock: w.clock, wait: () => Promise.resolve(), nodeOf: () => process.execPath }).selfCheck;
+
+test('KBOX-6 a release whose kb-install, or a module it imports, fails to load is rolled back: its own kb-install runs a no-op self-check before the release counts as healthy', async (t) => {
+  const cases = [
+    ['an import of kb-install throws', { ...SELF_CHECKING, 'src/cli/part.ts': "throw new Error('a module kb-install imports fails to load');\n" }, 'rolled_back'],
+    ['kb-install itself does not parse', { ...SELF_CHECKING, 'src/cli/kb-install.ts': 'import { ok from;\n' }, 'rolled_back'],
+    ['control: a kb-install that loads', SELF_CHECKING, 'installed'],
+  ] as const;
+  for (const [name, tree, expected] of cases) {
+    const w = await installWorld(t);
+    w.units.checkSelf = realSelfCheck(w);
+    const h = w.stage(tree);
+    w.installRequest(h);
+    await w.run();
+    assert.equal(w.result(h), expected, name);
+    assert.deepEqual(w.units.selfChecks.map((c) => c.release), [join(w.paths.releases, h)], `${name}: the new release's own kb-install was checked`);
+    assert.equal(w.current(), expected === 'installed' ? h : w.h0, name);
+  }
+});
+
+// The test's own timeout is the oracle that the check did not wait for a process that never ends.
+test('KBOX-6 the self-check is bounded: a kb-install that never exits is killed at the bound and fails', { timeout: 20_000 }, async (t) => {
+  const w = await installWorld(t);
+  const release = join(w.root, 'hangs');
+  mkdirSync(join(release, 'src/cli'), { recursive: true });
+  writeFileSync(join(release, 'src/cli/kb-install.ts'), 'setInterval(() => undefined, 1000);\n');
+  assert.equal(await realSelfCheck(w)(release, w.clock.now() + 300), false);
+});
+
+test('KBOX-6 kb-install --self-check loads every module and exits 0 without touching any path it is given', async (t) => {
+  const w = await installWorld(t);
+  const gone = join(w.root, 'not-made');
+  const env = { KB_STAGING_DIR: join(gone, 'staging'), KB_RELEASES_DIR: join(gone, 'releases'), KB_CURRENT: join(gone, 'current'), KB_TRUST_FILE: join(gone, 'trust.json'), KB_CODES_DIR: join(gone, 'codes'), KB_INSTALL_RESULTS: join(gone, 'results'), KB_BOOT_ID_FILE: join(gone, 'boot_id'), KB_SYSTEMCTL: '/bin/false' };
+  const run = spawnSync(process.execPath, [new URL('../src/cli/kb-install.ts', import.meta.url).pathname, '--self-check'], { env, encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(existsSync(gone), false, 'nothing was made');
+  assert.equal(run.stdout, '', 'it answered no request');
+});
+
 // --- time: every phase inside the unit's TimeoutStartSec, and a kill mid-install -------------------------------------
 
 /** The unit's TimeoutStartSec as written in deploy/kb-install.service, in ms: the oracle for every bound below. */
@@ -507,6 +593,52 @@ test('KBOX-6 every phase is bounded by the time left under TimeoutStartSec: afte
   for (const b of w.units.bounds) assert.ok(b.until !== undefined && b.until <= start + unitTimeoutMs(), `${b.what} is bounded inside the unit's timeout`);
   const [, health, rollback] = w.units.bounds;
   assert.ok(health?.until !== undefined && rollback?.until !== undefined && rollback.until > health.until, 'the rollback restart has time of its own after the health check');
+});
+
+test('KBOX-6 the write of a release is bounded: writes that run past the copy deadline are refused timeout with nothing switched or restarted', async (t) => {
+  const w = await installWorld(t);
+  const h = w.stage(RELEASE_1);
+  w.installRequest(h);
+  let slowed = false;
+  await w.run({
+    afterWrite: () => {
+      if (!slowed) w.clock.advance(COPY_DEADLINE_MS + 1); // the first write ends a millisecond past the copy deadline
+      slowed = true;
+    },
+  });
+  assert.equal(w.result(h), 'refused:timeout');
+  nothingCopied(w, h);
+  assert.deepEqual(readdirSync(w.paths.results).filter((n) => n.startsWith('switching')), [], 'the switching record is cleared');
+});
+
+test('KBOX-6 a slow write leaves the rollback restart its reserved time: a restart, a self-check and a health check that each use all they are given cannot eat it', async (t) => {
+  const w = await installWorld(t);
+  healthUsesAllItIsGiven(w);
+  const useAll = (until: number | undefined): void => {
+    if (until !== undefined && until > w.clock.now()) w.clock.advance(until - w.clock.now());
+  };
+  w.units.onRestart = useAll;
+  w.units.checkSelf = (_release, until) => {
+    useAll(until);
+    return Promise.resolve(true);
+  };
+  const h = w.stage(RELEASE_1);
+  w.installRequest(h);
+  const start = w.clock.now();
+  let slowed = false;
+  await w.run({
+    afterWrite: () => {
+      if (!slowed) w.clock.advance(COPY_DEADLINE_MS - 1); // the writes end a millisecond inside the copy deadline
+      slowed = true;
+    },
+  });
+  assert.equal(w.result(h), 'rolled_back');
+  assert.deepEqual(w.units.bounds.map((b) => b.what), ['restart', 'health', 'restart']);
+  for (const b of w.units.bounds) assert.ok(b.until !== undefined && b.until <= start + unitTimeoutMs(), `${b.what} is bounded inside the unit's timeout`);
+  const rollback = w.units.bounds.at(-1);
+  assert.ok(rollback?.until !== undefined && rollback.until - rollback.at >= RESTART_WITHIN_MS, `the rollback restart has its ${RESTART_WITHIN_MS} ms: ${JSON.stringify(rollback)}`);
+  const health = w.units.bounds[1];
+  assert.ok(health?.until !== undefined && health.until > health.at, 'the health check was left time of its own after the self-check');
 });
 
 test('KBOX-6 a second install in a run whose time the first used up is refused timeout, with nothing copied', async (t) => {
@@ -555,6 +687,71 @@ test('KBOX-6 a kill between copy and switch leaves the base current and no relea
   assert.deepEqual(w.releases(), [w.h0]);
   assert.equal(w.result(h), 'failed:interrupted');
   assert.deepEqual(w.units.restarts, [], 'current never moved, so nothing is restarted');
+});
+
+// --- durability: each rename is followed by an fsync of its directory --------------------------------------------------
+
+test('KBOX-6 the directory is fsynced after the switching record, the release and current land and after the record goes; and after the spend, before trust.json is written', async (t) => {
+  const w = await installWorld(t);
+  const h = w.stage(RELEASE_1);
+  w.installRequest(h);
+  await w.run();
+  assert.equal(w.result(h), 'installed');
+  const at = (dir: string, holds: (s: InstallWorld['syncs'][number]) => boolean, after = -1): number => w.syncs.findIndex((s, i) => i > after && s.dir === dir && holds(s));
+  const record = at(w.paths.results, (s) => s.entries.includes('switching'));
+  assert.ok(record >= 0, `the switching record is durable: ${JSON.stringify(w.syncs)}`);
+  const release = at(w.paths.releases, (s) => s.entries.includes(h) && !s.entries.includes(`${h}.tmp`), record);
+  assert.ok(release > record, 'releases/<H> is durable after the record');
+  const current = at(dirname(w.paths.current), (s) => s.current === h, release);
+  assert.ok(current > release, 'the switched current is durable');
+  assert.ok(at(w.paths.results, (s) => !s.entries.includes('switching'), current) > current, 'the cleared record is durable');
+
+  const added = w.trusted('ap-second-0002', softApprover());
+  w.request('trust-a', { kind: 'trust', change: 'approver_add', approval: w.proof(addActionOf(added)), approver: added });
+  const before = w.syncs.length - 1;
+  await w.run();
+  assert.equal(w.result('trust-a'), 'applied');
+  const spend = at(w.paths.results, (s) => s.entries.includes('trust-spent'), before);
+  const trust = at(dirname(w.paths.trustFile), (s) => s.entries.includes('trust.json') && !s.entries.includes('trust.json.tmp'), before);
+  assert.ok(spend > before && trust > spend, `the spend is durable before trust.json is written (a lost approval, never a replay): spend ${spend}, trust ${trust}`);
+});
+
+// --- a switching record root cannot act on: set aside, never a wedge -------------------------------------------------
+
+/** Plants `record` as the switching record and runs with a trust request waiting: the record must be set aside as
+ * `switching.bad-<time>` unchanged, `current` left where it is, `switching_bad` journalled, and the request still served. */
+async function setAsideAndServe(w: InstallWorld, record: string): Promise<void> {
+  writeFileSync(join(w.paths.results, 'switching'), record);
+  const before = w.current();
+  const added = newApprover(w, 'ap-second-0002');
+  w.request('trust-a', { kind: 'trust', change: 'approver_add', approval: w.proof(addActionOf(added)), approver: added });
+  await w.run();
+  assert.equal(w.current(), before, 'current is kept as it is');
+  assert.deepEqual(w.units.restarts, [], 'nothing was restarted');
+  const setAside = readdirSync(w.paths.results).filter((n) => /^switching\.bad-\d+$/.test(n));
+  assert.equal(setAside.length, 1, `set aside as switching.bad-<time>: ${readdirSync(w.paths.results).join(' ')}`);
+  assert.equal(readFileSync(join(w.paths.results, setAside[0] ?? ''), 'utf8'), record, 'kept byte for byte for a later look');
+  assert.equal(existsSync(join(w.paths.results, 'switching')), false);
+  assert.deepEqual(w.journal, ['switching_bad']);
+  assert.equal(w.result('trust-a'), 'applied', 'kb-install goes on to serve requests');
+}
+
+test('KBOX-6 a torn switching record (it does not parse) is set aside, current is kept, switching_bad is journalled and requests are served', async (t) => {
+  const w = await installWorld(t);
+  await setAsideAndServe(w, `switching ${'a'.repeat(64)} from ${w.h0.slice(0, 20)}`);
+});
+
+test('KBOX-6 a switching record whose base release is gone is set aside, current is kept, and requests are served', async (t) => {
+  const w = await installWorld(t);
+  await setAsideAndServe(w, `switching ${'a'.repeat(64)} from ${'b'.repeat(64)}\n`);
+});
+
+test('KBOX-6 a switching record that does not match current (current is neither its H nor its base) is set aside and current is not moved to its base', async (t) => {
+  const w = await installWorld(t);
+  const other = 'c'.repeat(64);
+  mkdirSync(join(w.paths.releases, other)); // the record's base exists, but current never left H0 for the record's H
+  await setAsideAndServe(w, `switching ${'a'.repeat(64)} from ${other}\n`);
+  assert.deepEqual(w.releases(), [other, w.h0].sort(), 'no release was removed');
 });
 
 // --- trust.json -------------------------------------------------------------------------------------------------------

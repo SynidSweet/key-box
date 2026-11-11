@@ -67,8 +67,9 @@ export const ACTION_KINDS = [
   'enrol',
 ] as const satisfies readonly ActionKind[];
 
-/** The kinds `POST /api/proposals` creates; the other three have their own routes (KBOX-53). */
-export const PROPOSAL_ROUTE_KINDS = ACTION_KINDS.filter((k) => k !== 'add_key' && k !== 'install_update' && k !== 'enrol');
+/** The kinds `POST /api/proposals` creates; add_key, install_update and enrol have their own routes (KBOX-53), and
+ * approver_add is box-originated (KBOX-7): only a registered new device's keys open one. */
+export const PROPOSAL_ROUTE_KINDS = ACTION_KINDS.filter((k) => k !== 'add_key' && k !== 'install_update' && k !== 'enrol' && k !== 'approver_add');
 
 const refused = { ok: false } as const;
 const KEYREF = text(NAME);

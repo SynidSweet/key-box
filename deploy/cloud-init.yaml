@@ -29,7 +29,13 @@ runcmd:
   - systemctl mask --now ssh.service ssh.socket
   - rm -f /home/ubuntu/.ssh/authorized_keys /root/.ssh/authorized_keys
   # Disable the OCI Run Command plugin; keep Compute Instance Monitoring on. The exact command is UNVERIFIED (KBOX-1).
-  - oci-cloud-agent-plugin disable "Compute Instance Run Command"
+  # runcmd is one plain sh script, so a failure stops it only by exiting: the error goes to the journal and the console,
+  # and cloud-init records the run as failed before anything is installed.
+  - |
+    if ! oci-cloud-agent-plugin disable "Compute Instance Run Command"; then
+      logger -s -p user.err -t keybox-bootstrap "KBOX-1 FAILED: the OCI Run Command plugin was not disabled; the bootstrap stops here"
+      exit 1
+    fi
   - |
     set -eu
     . /root/keybox-release.env

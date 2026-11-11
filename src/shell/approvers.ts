@@ -144,6 +144,8 @@ export interface Approvers {
   register(code: string, registration: Registration): { readonly action: ApproverAdd; readonly fingerprint: string };
   /** The 6-word fingerprint of the keys an approver_add names: the words both phones show. */
   fingerprint(action: ApproverAdd): string;
+  /** True while a registered device waits whose keys are the ones this approver_add names; only then is its page shown. */
+  awaits(action: ApproverAdd): boolean;
   /** An approved approver_add: root first, with the pending device's keys, then core's table. */
   add(action: ApproverAdd, approvalProof: ApprovalProof): Promise<'done' | 'no_registration' | 'root_refused'>;
   /** Ends a registration code, or a pending device, that has run out (the approvals sweep calls this). */
@@ -255,6 +257,10 @@ export function createApprovers(deps: ApproversDeps): Approvers {
     if (subscription !== undefined && !deps.push.subscribe(subscription).ok) throw new ApiError('rejected', 'bad_subscription');
   };
   const fingerprint = (action: ApproverAdd): string => approverFingerprint(action.cose_sha256, action.device_sha256, deps.wordlist);
+  const awaits = (action: ApproverAdd): boolean => {
+    expire();
+    return pendingDevice !== undefined && pendingDevice.action.cose_sha256 === action.cose_sha256 && pendingDevice.action.device_sha256 === action.device_sha256;
+  };
 
   return {
     count: () => records().length,
@@ -329,12 +335,13 @@ export function createApprovers(deps: ApproversDeps): Approvers {
 
     fingerprint,
 
+    awaits,
+
     expire,
 
     async add(action, approvalProof) {
-      expire();
-      const device = pendingDevice;
-      if (device === undefined || device.action.cose_sha256 !== action.cose_sha256 || device.action.device_sha256 !== action.device_sha256) return 'no_registration';
+      const device = awaits(action) ? pendingDevice : undefined;
+      if (device === undefined) return 'no_registration';
       pendingDevice = undefined;
       try {
         await askRoot({ kind: 'trust', change: 'approver_add', approval: approvalProof, approver: trusted(device.record) });

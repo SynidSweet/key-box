@@ -14,5 +14,5 @@ if (pathsJson !== undefined && (step === 'afterCopy' || step === 'afterSwitch'))
   const die = (): void => void process.kill(process.pid, 'SIGKILL');
   const hooks: InstallHooks = step === 'afterCopy' ? { afterCopy: die } : { afterSwitch: die };
   const wordlist = parseWordlist(readFileSync(new URL('../../src/data/wordlist.txt', import.meta.url), 'utf8'));
-  await runInstaller({ paths, units: { restart: () => Promise.resolve(), healthCheck: () => Promise.resolve(true) }, clock: systemClock, wordlist, domain: undefined, hooks });
+  await runInstaller({ paths, units: { restart: () => Promise.resolve(), healthCheck: () => Promise.resolve(true), selfCheck: () => Promise.resolve(true) }, clock: systemClock, wordlist, domain: undefined, hooks });
 }

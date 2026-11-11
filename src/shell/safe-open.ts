@@ -4,7 +4,7 @@
 // it; the descriptor is then fstat'ed and only a directory or a regular file with one link is taken. A file is read
 // through its descriptor, at most its fstat size plus one byte, so a file that grows is caught. Removal walks the same way
 // and never follows a link.
-import { closeSync, constants, fstatSync, openSync, readSync, readdirSync, rmdirSync, unlinkSync } from 'node:fs';
+import { closeSync, constants, fstatSync, mkdirSync, openSync, readSync, readdirSync, renameSync, rmdirSync, unlinkSync } from 'node:fs';
 import { osErrorCode } from '../pure/errors.ts';
 
 export type Opened =
@@ -88,48 +88,121 @@ function unlinkOrOpen(dirFd: number, name: Uint8Array | string): 'gone' | { read
   throw changing();
 }
 
-/** One directory being emptied: its descriptor, its name in the directory below it on the stack, and what is left in it. */
-interface Emptying {
-  readonly parent: number;
+/** Which directory a descriptor holds: device and inode, the same for every descriptor of it. */
+const identity = (fd: number): string => {
+  const st = fstatSync(fd, { bigint: true });
+  return `${st.dev}:${st.ino}`;
+};
+
+/** One directory being emptied: its name in its parent, which directory it is, and what is left to remove in it. */
+interface Level {
   readonly name: Uint8Array | string;
-  readonly fd: number;
-  left: Buffer[];
+  readonly identity: string;
+  readonly left: Buffer[];
   readonly tries: number;
 }
 
 /**
  * Removes one entry of a held directory whatever its type, never following a link: a link, FIFO or file is unlinked (the
- * link itself, not its target); a directory is opened O_NOFOLLOW and emptied through its own descriptor, then removed. The
- * walk keeps its own stack of held descriptors, so the depth of a planted tree is bounded by descriptors, not by the call
- * stack. If an entry keeps changing type under it, it gives up after a few tries and throws.
+ * link itself, not its target); a directory is emptied bottom-up and removed. The walk holds ONE descriptor of its own,
+ * the directory it is in: it opens a child and closes the parent to go down, and reopens the parent through `..` to go up,
+ * checking it is the very directory it came from (an entry moved meanwhile stops the walk instead of letting it climb out).
+ * So any depth needs a constant number of descriptors; what it keeps per level is a name list, not a descriptor. If an entry
+ * keeps changing type under it, it gives up after a few tries and throws.
  */
 export function removeAt(dirFd: number, name: Uint8Array | string): void {
-  const stack: Emptying[] = [];
-  /** Unlinks the entry, or puts it on the stack to be emptied; the stack owns every descriptor it holds. */
-  const enter = (parent: number, entry: Uint8Array | string, tries: number): void => {
-    const opened = unlinkOrOpen(parent, entry);
-    if (opened === 'gone') return;
-    const frame: Emptying = { parent, name: entry, fd: opened.fd, left: [], tries };
-    stack.push(frame);
-    frame.left = listAt(opened.fd);
+  const first = unlinkOrOpen(dirFd, name);
+  if (first === 'gone') return;
+  const levels: Level[] = [];
+  /** The walk's one descriptor: the directory `levels` ends in; undefined once the walk is back in `dirFd`. */
+  let here: number | undefined = first.fd;
+  const enter = (fd: number, entry: Uint8Array | string, tries: number): void => {
+    here = fd;
+    levels.push({ name: entry, identity: identity(fd), left: listAt(fd), tries });
+  };
+  const leave = (): void => {
+    if (here !== undefined) closeSync(here);
+    here = undefined;
   };
   try {
-    enter(dirFd, name, 0);
-    for (let top = stack.at(-1); top !== undefined; top = stack.at(-1)) {
+    enter(first.fd, name, 0);
+    for (let top = levels.at(-1); top !== undefined && here !== undefined; top = levels.at(-1)) {
       const child = top.left.pop();
       if (child !== undefined) {
-        enter(top.fd, child, 0);
+        const opened = unlinkOrOpen(here, child);
+        if (opened === 'gone') continue;
+        leave();
+        enter(opened.fd, child, 0);
         continue;
       }
-      const removed = tryOs(() => rmdirSync(at(top.parent, top.name)), ['ENOENT', 'ENOTEMPTY', 'ENOTDIR']);
-      stack.pop();
-      closeSync(top.fd);
+      // `top` is empty: back up to its parent and remove it there.
+      levels.pop();
+      const below = levels.at(-1);
+      const parent: number = below === undefined ? dirFd : openDirectory(at(here, '..'));
+      leave();
+      if (below !== undefined) {
+        here = parent;
+        if (identity(parent) !== below.identity) throw changing();
+      }
+      const removed = tryOs(() => rmdirSync(at(parent, top.name)), ['ENOENT', 'ENOTEMPTY', 'ENOTDIR']);
       if (!isOs(removed) || removed.os === 'ENOENT') continue;
       // Something was added, or the entry was swapped, meanwhile: look again from its parent.
       if (top.tries + 1 >= REMOVE_TRIES) throw changing();
-      enter(top.parent, top.name, top.tries + 1);
+      const again = unlinkOrOpen(parent, top.name);
+      if (again === 'gone') continue;
+      leave();
+      enter(again.fd, top.name, top.tries + 1);
     }
   } finally {
-    for (const frame of stack) closeSync(frame.fd);
+    leave();
   }
+}
+
+/** Where kb-install puts every staging entry it takes or refuses: a root-owned 0700 directory inside staging itself (one
+ * file system, so a rename moves the entry at once), made fresh under a name core cannot guess. */
+export const TRASH_PREFIX = '.kb-trash-';
+
+export interface Trash {
+  /** Moves `name` out of the held directory into the trash at once (the rename never follows a link), whatever it is. */
+  discard(name: Uint8Array | string): void;
+  /** Removes the trash, and any trash an earlier run that was killed left, with `removeAt`. */
+  empty(): void;
+}
+
+/** A trash in the held directory `dirFd`, made on first use as `<TRASH_PREFIX><suffix>`. */
+export function trashIn(dirFd: number, suffix: string): Trash {
+  const name = `${TRASH_PREFIX}${suffix}`;
+  let held: number | undefined;
+  let count = 0;
+  /** Ours: a directory owned by this process's user, 0700. Another user's entry under a trash name is never emptied. */
+  const ours = (fd: number): boolean => {
+    const st = fstatSync(fd);
+    return st.isDirectory() && st.uid === process.geteuid?.() && (st.mode & 0o777) === 0o700;
+  };
+  const open = (): number => {
+    if (held !== undefined) return held;
+    mkdirSync(at(dirFd, name), { mode: 0o700 });
+    const fd = openDirectory(at(dirFd, name));
+    held = fd;
+    if (!ours(fd)) throw new Error('the trash was swapped before it was opened');
+    return fd;
+  };
+  return {
+    discard(entry) {
+      count += 1;
+      const target = String(count);
+      tryOs(() => renameSync(at(dirFd, entry), at(open(), target)), ['ENOENT']);
+    },
+    empty() {
+      if (held !== undefined) closeSync(held);
+      held = undefined;
+      for (const entry of listAt(dirFd).filter((n) => n.subarray(0, TRASH_PREFIX.length).toString('latin1') === TRASH_PREFIX)) {
+        const opened = openAt(dirFd, entry);
+        if (opened.kind === 'refused') continue;
+        const mine = opened.kind === 'dir' && ours(opened.fd);
+        closeSync(opened.fd);
+        if (mine) removeAt(dirFd, entry);
+      }
+    },
+  };
 }
