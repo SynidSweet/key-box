@@ -389,8 +389,10 @@ refused after 10 minutes and on second use.
 
 **`KBOX-1` Nobody logs in.** Source: design §1.2. The box has no `sshd`, no login user besides system accounts, no shell endpoint and no debug route; the OCI
 Run Command agent plugin is off: the owner leaves it unticked in the instance's Oracle Cloud Agent settings when creating it (the setup guide says so), and the
-bootstrap stops loudly, before anything is installed, if any Run Command plugin is found on the box (a `runcommand` path under the agent's install, state or log
-directories, or a running process of that name); no on-box command to disable it is documented, so none is run. The OCI Compute Instance Monitoring plugin stays on. The serial console is reachable only through the OCI account. Agents
+bootstrap stops loudly, before anything is installed, if the plugin could act as root or is running: any sudoers line (`/etc/sudoers`, `/etc/sudoers.d/*`) naming
+its user `ocarun`, or a running process whose command line names `runcommand`. Plugin FILES are not refused: the agent snap may ship every plugin's files
+whether or not it is enabled, and Run Command also needs an IAM policy that only the owner's cloud account can create. No on-box command to disable it is
+documented, so none is run. The OCI Compute Instance Monitoring plugin stays on. The serial console is reachable only through the OCI account. Agents
 get no login, root, console or cloud-account access. Test (`test/bootstrap-text.test.ts`, text check of `deploy/cloud-init.yaml`): `ssh` packages removed and
 `sshd` masked, no `authorized_keys` for any user, the default user's keys removed, the Run Command check present and the monitoring plugin untouched; the route
 table of core and relay (exported by `main-*`) has no route matching shell, exec, debug, eval or console; where the agent keeps its plugins on the Ubuntu
@@ -445,7 +447,9 @@ directives; both pages carry the sentence "These limits do not stop an approved 
 
 **`KBOX-48` The bootstrap text and the setup checklist.** Source: design §1.5. The bootstrap is a cloud-init document of about 60 lines in the repo's README
 at a tagged release, opened on the phone. It names the commit C and content hash H of release 1 and the official URLs and sha256 of the Node and Caddy builds;
-downloads the source at C from `codeload.github.com`; checks H; installs (the units, `deploy/keybox-tmpfiles.conf` and the root installer `kb-install`, `KBOX-6`); removes sshd and the default user's keys; stops if a Run Command plugin is found; starts
+downloads the source at C from `codeload.github.com`; checks H; installs (the units, `deploy/keybox-tmpfiles.conf` and the root installer `kb-install`, `KBOX-6`); removes sshd and the default user's keys; stops if the Run Command plugin could act as root or is running; opens TCP 443 (only; port 80 stays closed, `KBOX-44`) in
+the image's host firewall (Oracle's Ubuntu images end the INPUT chain of `/etc/iptables/rules.v4` and `rules.v6` in a catch-all REJECT: the ACCEPT rule is inserted
+before it, the port 22 rule is removed, the OUTPUT chain is left as the image has it, and the result is saved so it survives a reboot); starts
 the units; and generates the one-time setup code (`KBOX-49`) writing it to the console sink only. The checklist (`docs/setup-checklist.md`, written by this unit)
 says, in order: a new email account and a new Oracle account logged into only from the phone; one factor that does not sync to any machine the agents use: an
 **authenticator app synced only to the owner's Google account, which is never signed in on the workstation, devbox or Helsinki**, and whose passwords for
