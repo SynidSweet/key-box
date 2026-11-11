@@ -10,7 +10,8 @@ import { codeHash, parseWordlist } from '../src/pure/codes.ts';
 import { createCodeRoot } from '../src/shell/console.ts';
 import { softApprover } from './kit/approver.ts';
 import type { SoftApprover } from './kit/approver.ts';
-import { RP, approveWorld, challenges, newApproverBody, registerAt, wire } from './support/approve-world.ts';
+import { RP, approveWorld, challenges, registerAt, wire } from './support/approve-world.ts';
+import { newApproverBody } from './support/approve-world.ts';
 import type { World } from './support/approve-world.ts';
 
 const WORDLIST = parseWordlist(readFileSync(new URL('../src/data/wordlist.txt', import.meta.url), 'utf8'));

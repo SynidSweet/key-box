@@ -105,14 +105,13 @@ export interface World {
   /** The queue as the phone sees it. */
   queue(approver?: SoftApprover): Promise<readonly QueueItem[]>;
   /** A proof for one queue item, as the phone would build it; `quirks` plants one fault under a valid signature. */
-  /** `decision` names the challenge signed (approval or denial); a proof for one decision is refused by the other's route. */
-  proofFor(item: QueueItem, approver?: SoftApprover, quirks?: Quirks, decision?: 'approve' | 'deny'): WireProof;
-  /**
-   * Posts a proof to the decision's route. A proof made by `proofFor` with no decision and handed unchanged to `'deny'` is
-   * signed again over the denial challenge (the phone signs when the button is pressed); anything else goes as it is, so a
-   * test that wants the wrong challenge posts with `call`.
-   */
+  proofFor(item: QueueItem, approver?: SoftApprover, quirks?: Quirks): WireProof;
+  /** With `decision` the proof signs that decision's challenge (approval or denial); the route of the other decision refuses it. */
+  proofFor(item: QueueItem, approver: SoftApprover | undefined, quirks: Quirks | undefined, decision: 'approve' | 'deny'): WireProof;
   decide(id: string, decision: 'approve' | 'deny', proof: WireProof): Promise<DriveReply>;
+  // `decide('deny', proof)` signs a proof made by `proofFor` with no decision, handed over unchanged, again over the denial
+  // challenge (the phone signs when the button is pressed); any other proof goes as it is, so a test that wants the wrong
+  // challenge posts with `call`.
   /** Proposes through the service (no route), as a token, the box or an enrol would. */
   propose(action: Action, requester?: string | 'box'): ReturnType<ApproveCore['approvals']['propose']>;
   /** Adds a second approver through the real approver_add approval and the registration step. */
@@ -194,20 +193,12 @@ export async function approveWorld(t: TestContext, options: WorldOptions = {}): 
     assert.equal(reply.status, 200, reply.body);
     return (reply.json() as { approvals: QueueItem[] }).approvals;
   };
-  const approvalProofs = new Map<string, { readonly made: WireProof; readonly redo: (decision: 'deny') => WireProof }>();
-  const proofFor: World['proofFor'] = (item, approver = owner, quirks, decision = 'approve') => {
+  const proofFor: World['proofFor'] = (item, approver = owner, quirks) => {
     const n = Uint8Array.from(Buffer.from(item.nonce_b64, 'base64url'));
     const digest = Uint8Array.from(Buffer.from(item.digest_b64, 'base64url'));
-    const challenge = decision === 'approve' ? challenges.approval : challenges.denial;
-    const made = wire(n, approver.prove(challenge(item.approval_id, digest, n), RP, quirks));
-    if (decision === 'approve') approvalProofs.set(made.nonce, { made, redo: (d) => proofFor(item, approver, quirks, d) });
-    return made;
+    return wire(n, approver.prove(challenges.approval(item.approval_id, digest, n), RP, quirks));
   };
-  const decide: World['decide'] = (id, decision, proof) => {
-    const own = approvalProofs.get(proof.nonce);
-    const sent = decision === 'deny' && own !== undefined && JSON.stringify(own.made) === JSON.stringify(proof) ? own.redo('deny') : proof;
-    return call(`/app/${decision}/${id}`, { json: { proof: sent } });
-  };
+  const decide: World['decide'] = (id, decision, proof) => call(`/app/${decision}/${id}`, { json: { proof } });
   const requesterOf = (r: string): Parameters<ApproveCore['approvals']['propose']>[0]['requester'] =>
     r === 'box' ? { kind: 'box' } : r.startsWith('enrol:') ? { kind: 'enrol', address: r.slice(6) } : { kind: 'token', label: r };
 
@@ -259,6 +250,24 @@ export async function approveWorld(t: TestContext, options: WorldOptions = {}): 
       return lastCode();
     },
   };
+  // The decision is in the challenge (KBOX-9): proofs for a denial sign the denial challenge. Added over the world above so the
+  // approval-challenge helpers stay as they were.
+  const approvalProofs = new Map<string, { readonly made: WireProof; readonly redo: () => WireProof }>();
+  const proofForDecision = (item: QueueItem, approver: SoftApprover = owner, quirks?: Quirks, decision: 'approve' | 'deny' = 'approve'): WireProof => {
+    if (decision === 'approve') {
+      const made = proofFor(item, approver, quirks);
+      approvalProofs.set(made.nonce, { made, redo: () => proofForDecision(item, approver, quirks, 'deny') });
+      return made;
+    }
+    const n = Uint8Array.from(Buffer.from(item.nonce_b64, 'base64url'));
+    const digest = Uint8Array.from(Buffer.from(item.digest_b64, 'base64url'));
+    return wire(n, approver.prove(challenges.denial(item.approval_id, digest, n), RP, quirks));
+  };
+  const decideByDecision: World['decide'] = (id, decision, proof) => {
+    const own = approvalProofs.get(proof.nonce);
+    return decide(id, decision, decision === 'deny' && own !== undefined && JSON.stringify(own.made) === JSON.stringify(proof) ? own.redo() : proof);
+  };
+  Object.assign(world, { proofFor: proofForDecision, decide: decideByDecision });
   return world;
 }
 
