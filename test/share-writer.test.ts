@@ -6,14 +6,15 @@ import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from '
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { KeyRow } from '../src/ports/meta.ts';
+import type { ShareSource } from '../src/ports/share.ts';
 import { WriteRefused } from '../src/pure/errors.ts';
-import { summaryOf } from '../src/pure/share-build.ts';
+import { buildShare, sealEnvelope, summaryOf } from '../src/pure/share-build.ts';
 import { shareSigner } from '../src/shell/share-writer.ts';
-import { GOLDEN_SIGNING_SEED_HEX } from './kit/share-golden.ts';
+import { GOLDEN_SIGNING_SEED_HEX, toShareKey } from './kit/share-golden.ts';
 import { openShare } from './kit/reference-matcher.ts';
-import { base64Document, fakeKey, rawDocument } from './kit/share-store.ts';
+import { base64Document, fakeKey, rawDocument, signerFromSeed } from './kit/share-store.ts';
 import type { FakeKey } from './kit/share-store.ts';
-import { FakeClock, TimedClock, drive, seededRandom, startNode, tempDir } from './kit/index.ts';
+import { FakeClock, TimedClock, drive, seededRandom, startNode, tempDir, waitUntil } from './kit/index.ts';
 import { hashToken, newToken } from '../src/pure/tokens.ts';
 import { openCore } from '../src/shell/core.ts';
 import { shareWorld } from './support/share-world.ts';
@@ -369,4 +370,131 @@ test('KBOX-33 the running core writes the first share file at start and serves i
   const exit = await core.stop();
   assert.equal(exit.status, 0, exit.stderr);
   assert.equal(statSync(join(stateDir, 'share', 'share.json')).mode & 0o777, 0o644);
+});
+
+// ---------------------------------------------------------------- fail closed while a newer refresh is queued
+
+/** A store whose reads are held until the test lets them go; each read sees the store as it was when the read began. */
+function heldSource(store: readonly FakeKey[]): { readonly source: ShareSource; held(): number; letGo(): void; hold(): void } {
+  const waiting: { release: () => void }[] = [];
+  let holding = false;
+  return {
+    source: {
+      keys: async () => {
+        const seen = store.map(toShareKey);
+        if (holding) await new Promise<void>((resolve) => waiting.push({ release: resolve }));
+        return seen;
+      },
+    },
+    held: () => waiting.length,
+    letGo: () => void waiting.shift()?.release(),
+    hold: () => void (holding = true),
+  };
+}
+
+test('KBOX-33 with two changes in flight GET /api/share stays 503 until the file holds the newest generation (the finishing refresh read the store before the second change)', async (t) => {
+  const store = [windowed('OPENAI_ADMIN_KEY', 1)];
+  const gate = heldSource(store);
+  const w = await shareWorld(t, { noStart: true, source: () => gate.source });
+  await w.writer.start();
+  gate.hold();
+  store.push(windowed('OPENAI_ADMIN_KEY', 2));
+  w.core.meta.putKey(row('OPENAI_ADMIN_KEY', 2));
+  await waitUntil(() => gate.held() === 1, 'the first refresh to read the store');
+  const newest = windowed('OPENAI_ADMIN_KEY', 3);
+  store.push(newest);
+  w.core.meta.putKey(row('OPENAI_ADMIN_KEY', 3));
+  gate.letGo();
+  await waitUntil(() => gate.held() === 1 && summaryOf(fileOf(w))?.version === 2, 'the first refresh to finish and the second to start reading');
+  assert.throws(() => w.writer.serve(), { code: 'unavailable', detail: { code: 'share_stale' } }, 'version 2 lacks generation 3, so it is not served');
+  gate.letGo();
+  await w.writer.idle();
+  assert.equal(w.writer.serve().version, 3);
+  const opened = openShare(fileOf(w), publicKeyOf(w), { lastVersion: 2 });
+  assert.ok(opened.ok);
+  assert.ok(opened.share.scan(rawDocument(newest.value)).length > 0, 'the newest generation is in the file that is served');
+});
+
+// ---------------------------------------------------------------- a failed refresh tries again
+
+const RETRY_DELAYS_MS = [10_000, 20_000, 40_000, 80_000, 160_000, 320_000, 600_000, 600_000, 600_000];
+
+test('KBOX-33 a failed refresh tries again after 10 s, then 20 s, doubling to 10 minutes between tries, on the injected scheduler; GET /api/share is 503 until one works', async (t) => {
+  const w = await shareWorld(t, { store: [windowed('OPENAI_ADMIN_KEY')] });
+  w.store.push(windowed('OPENAI_ADMIN_KEY', 2));
+  w.failNextReads(RETRY_DELAYS_MS.length);
+  w.core.meta.putKey(row('OPENAI_ADMIN_KEY', 2));
+  await w.writer.idle();
+  assert.deepEqual(w.failures(), ['refresh_failed']);
+  for (const [i, delay] of RETRY_DELAYS_MS.entries()) {
+    const reads = w.reads();
+    w.core.clock.advance(delay - 1);
+    await w.writer.idle();
+    assert.equal(w.reads(), reads, `no try before ${delay} ms (try ${i + 2})`);
+    assert.throws(() => w.writer.serve(), { code: 'unavailable' }, 'still 503 while it fails');
+    w.core.clock.advance(1);
+    await w.writer.idle();
+    assert.equal(w.reads(), reads + 1, `a try at ${delay} ms after the last`);
+  }
+  assert.equal(w.failures().length, RETRY_DELAYS_MS.length, 'every failed try is reported, none is dropped');
+  assert.equal(w.writer.serve().version, 2, 'the first try that reads the store gives the new file');
+  const reads = w.reads();
+  w.core.clock.advance(3_600_000);
+  await w.writer.idle();
+  assert.equal(w.reads(), reads, 'no more tries once it worked');
+});
+
+test('KBOX-33 a retry keeps going after many failures: the delay stays at 10 minutes and the writer never gives up', async (t) => {
+  const w = await shareWorld(t, { store: [windowed('OPENAI_ADMIN_KEY')] });
+  w.store.push(windowed('OPENAI_ADMIN_KEY', 2));
+  w.failNextReads(40);
+  w.core.meta.putKey(row('OPENAI_ADMIN_KEY', 2));
+  await w.writer.idle();
+  for (let i = 0; i < 40; i += 1) {
+    w.core.clock.advance(600_000);
+    await w.writer.idle();
+  }
+  assert.equal(w.writer.serve().version, 2, 'the 41st try reads the store and writes the file');
+});
+
+test('KBOX-33 stopping the writer cancels a retry that is waiting', async (t) => {
+  const w = await shareWorld(t, { store: [windowed('OPENAI_ADMIN_KEY')] });
+  w.store.push(windowed('OPENAI_ADMIN_KEY', 2));
+  w.failNextReads(1);
+  w.core.meta.putKey(row('OPENAI_ADMIN_KEY', 2));
+  await w.writer.idle();
+  assert.equal(w.core.clock.pendingTimers > 0, true, 'control: a retry is waiting');
+  const reads = w.reads();
+  w.writer.stop();
+  w.core.clock.advance(600_000);
+  await w.writer.idle();
+  assert.equal(w.reads(), reads);
+});
+
+// ---------------------------------------------------------------- what an old file on disk may do
+
+test('KBOX-33 a file this box signed whose version is below the announced one is never reused: a new version is written even when it shows the same keys', async (t) => {
+  const w = await shareWorld(t, { store: [windowed('OPENAI_ADMIN_KEY')] });
+  w.writer.stop();
+  const old = fileOf(w);
+  w.core.meta.announceShare(5);
+  const again = await shareWorld(t, { stateDir: w.core.stateDir, store: w.store });
+  assert.notEqual(Buffer.compare(fileOf(again), old), 0, 'the version 1 file was replaced');
+  assert.equal(summaryOf(fileOf(again))?.version, 6);
+  assert.equal(again.writer.serve().version, 6);
+  assert.equal(again.core.meta.snapshot().box.share_version, 6);
+});
+
+test('KBOX-33 a foreign file on disk with the highest safe version does not set the next version or wedge the writer', async (t) => {
+  const dir = await tempDir(t);
+  const foreign = signerFromSeed(Buffer.alloc(32, 7));
+  const built = buildShare({ version: Number.MAX_SAFE_INTEGER, issuedAt: 1, random: seededRandom(3), keys: [toShareKey(windowed('OPENAI_ADMIN_KEY'))] });
+  writeFileSync(join(dir, 'share.json'), sealEnvelope(built.bytes, foreign.sign(built.bytes)));
+  const w = await shareWorld(t, { store: [windowed('OPENAI_ADMIN_KEY')], shareDir: dir });
+  assert.equal(w.writer.serve().version, 1, 'the box writes from its own state');
+  assert.ok(openShare(fileOf(w), publicKeyOf(w)).ok, 'signed by this box');
+  w.store.push(windowed('OPENAI_ADMIN_KEY', 2));
+  w.core.meta.putKey(row('OPENAI_ADMIN_KEY', 2));
+  await w.writer.idle();
+  assert.equal(w.writer.serve().version, 2);
 });

@@ -1,10 +1,11 @@
 // KBOX-18: the watch tier of a key, from the adapter's shape and the value itself. Windowed: a random core of 32 to 256
 // characters over an alphabet of at least 16 symbols (every 24-character window of every shared form then holds at least 72
 // bits). Anchored: a random core of at least 72 bits behind a fixed public prefix of at least 4 characters. Everything else is
-// not watched. Eligibility comes from the strict shape check or from box generation, never from a pasted value's length.
+// not watched. The 72 bits are counted over each digested run itself, in every shared form and alignment (KBOX-2), not over the
+// whole core. Eligibility comes from the strict shape check or from box generation, never from a pasted value's length.
 import type { Coverage } from '../ports/meta.ts';
 import type { Alphabet, KeyShape } from '../ports/types.ts';
-import { coresOf } from './forms.ts';
+import { base64InteriorSpan, coresOf } from './forms.ts';
 
 export const WINDOWED_MIN_CORE = 32;
 export const WINDOWED_MAX_CORE = 256;
@@ -12,7 +13,17 @@ export const WINDOWED_MIN_ALPHABET = 16;
 export const ANCHORED_MIN_BITS = 72;
 export const ANCHORED_MIN_PREFIX = 4;
 
-export const ALPHABET_SIZE: Readonly<Record<Alphabet, number>> = { hex: 16, base62: 62, base64: 64, base64url: 64 };
+const SYMBOLS: Readonly<Record<Alphabet, string>> = {
+  hex: '0123456789abcdef',
+  base62: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789',
+  base64: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',
+  base64url: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_',
+};
+
+export const ALPHABET_SIZE: Readonly<Record<Alphabet, number>> = { hex: SYMBOLS.hex.length, base62: SYMBOLS.base62.length, base64: SYMBOLS.base64.length, base64url: SYMBOLS.base64url.length };
+
+/** The spellings a core of the alphabet may use: hex keys come in either case. */
+const spellings = (alphabet: Alphabet): readonly string[] => (alphabet === 'hex' ? [SYMBOLS.hex, SYMBOLS.hex.toUpperCase()] : [SYMBOLS[alphabet]]);
 
 const ALPHABET_CHARS: Readonly<Record<Alphabet, RegExp>> = {
   hex: /^[0-9a-fA-F]+$/,
@@ -34,6 +45,32 @@ export function tierOfParts(p: TierParts): Coverage {
   if (p.coreLength >= WINDOWED_MIN_CORE && p.coreLength <= WINDOWED_MAX_CORE && p.alphabetSize >= WINDOWED_MIN_ALPHABET) return 'windowed';
   if (p.prefixLength >= ANCHORED_MIN_PREFIX && p.coreLength * Math.log2(p.alphabetSize) >= ANCHORED_MIN_BITS) return 'anchored';
   return 'none';
+}
+
+/** Bits of a symbol's byte at bit positions `lo` to `hi` (exclusive, 0 = the top bit): log2 of how many values they take over the symbols. */
+function fieldBits(symbols: string, lo: number, hi: number): number {
+  const mask = 2 ** (hi - lo) - 1;
+  return Math.log2(new Set([...symbols].map((c) => (c.charCodeAt(0) >> (8 - hi)) & mask)).size);
+}
+
+/** The bits a run holds when it covers bits `startBit` to `endBit` of a core whose every byte is one symbol drawn at random. */
+function coveredBits(symbols: string, startBit: number, endBit: number): number {
+  let bits = 0;
+  for (let byte = Math.floor(startBit / 8); byte * 8 < endBit; byte += 1) {
+    const lo = Math.max(startBit - byte * 8, 0);
+    const hi = Math.min(endBit - byte * 8, 8);
+    bits += lo === 0 && hi === 8 ? Math.log2(symbols.length) : fieldBits(symbols, lo, hi);
+  }
+  return bits;
+}
+
+/**
+ * The fewest random bits any digested run of an anchored core holds: the core itself in the raw form, and the base64 characters
+ * that core bytes alone fix at each of the three alignments (the standard and the url-safe form spell the same bits).
+ */
+export function anchoredRunBits(alphabet: Alphabet, coreLength: number): number {
+  const spans = [0, 1, 2].map((alignment) => base64InteriorSpan(coreLength, alignment));
+  return Math.min(...spellings(alphabet).flatMap((symbols) => [coveredBits(symbols, 0, 8 * coreLength), ...spans.map((span) => coveredBits(symbols, span.startBit, span.endBit))]));
 }
 
 /** `generated`: the box made the value (an UNVERIFIED length range can only move a tier). `pasted`: it must fit the shape's core range. */
@@ -70,5 +107,7 @@ export function assess(input: AssessInput): Assessment {
   if (origin === 'pasted' && (core.length < shape.coreLength.min || core.length > shape.coreLength.max)) return NONE;
   const prefix = shape.prefix ?? '';
   const tier = tierOfParts({ prefixLength: prefix.length, alphabetSize: ALPHABET_SIZE[shape.alphabet], coreLength: core.length, random: true });
-  return tier === 'none' ? NONE : { tier, prefix, core };
+  if (tier === 'none') return NONE;
+  if (tier === 'anchored' && anchoredRunBits(shape.alphabet, core.length) < ANCHORED_MIN_BITS) return NONE;
+  return { tier, prefix, core };
 }

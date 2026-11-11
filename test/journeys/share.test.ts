@@ -119,3 +119,18 @@ test('J6 a vault value that is not UTF-8 text, or is missing, is not watched and
   assert.deepEqual(body.coverage.map((c) => `${c.name}:${c.tier}`), ['OPENAI_BINARY_KEY:none', 'OPENAI_MISSING_KEY:none']);
   assert.equal(body.entries.length, 0);
 });
+
+test('J6 a key row that lists the same project twice has one entry set for it and does not stop the file', async (t) => {
+  const key = fakeKey(rng, 'OPENAI_ADMIN_KEY', 48);
+  const w = await shareWorld(t, {
+    noStart: true,
+    source: (core) => createMetaShareSource({ meta: core.meta, values: core.share.values, shapeOf: (platform) => SHAPES[platform] }),
+  });
+  w.core.vault.put('openai/admin', 1, Buffer.from(key.value));
+  w.core.meta.putKey(row('openai/admin', 'openai', 'OPENAI_ADMIN_KEY', 'admin', 1, ['shop', 'site', 'shop']));
+  await w.writer.start();
+  const body = JSON.parse(Buffer.from((JSON.parse((await w.core.call('/api/share', { token: w.core.enrol('mc', 'control') })).body) as { body_b64: string }).body_b64, 'base64').toString('utf8')) as {
+    coverage: { project: string; name: string; tier: string }[];
+  };
+  assert.deepEqual(body.coverage.map((c) => `${c.project}/${c.name}/${c.tier}`), ['shop/OPENAI_ADMIN_KEY/windowed', 'site/OPENAI_ADMIN_KEY/windowed']);
+});
