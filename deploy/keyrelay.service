@@ -1,0 +1,22 @@
+[Unit]
+Description=Key box relay
+After=network-online.target keybox.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=keyrelay
+Group=keyrelay
+UMask=0007
+ExecStart=/opt/keybox/current/bin/node /opt/keybox/current/src/main-relay.ts
+Restart=on-failure
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ReadWritePaths=/run/keyrelay
+InaccessiblePaths=/var/lib/keybox
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

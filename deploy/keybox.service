@@ -1,0 +1,21 @@
+[Unit]
+Description=Key box core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=keybox
+Group=keybox
+UMask=0007
+Environment=KB_STATE_DIR=/var/lib/keybox KB_SOCKET=/run/keybox/http.sock
+ExecStart=/opt/keybox/current/bin/node /opt/keybox/current/src/main-core.ts
+Restart=on-failure
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ReadWritePaths=/var/lib/keybox /run/keybox /run/keybox-lend
+
+[Install]
+WantedBy=multi-user.target
