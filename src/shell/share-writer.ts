@@ -1,8 +1,9 @@
 // KBOX-33: the share writer. At start and on every `key.changed` of an admin or master key it reads the store, builds the share
 // file (src/pure/share-build.ts), signs it with a key of its own (a master value in the key store), writes it durably (temp
 // file, fsync, rename, fsync of the directory), and only then announces the version (one `share.version` event). A version is never
-// reused and never lower: it is above the database's last, and a file already on disk counts only when this box signed it (a file
-// signed by this box holds a version the database may not know yet, which the writer announces first). A file the box cannot
+// reused and never lower: it is above the database's last, and a file already on disk is reused only when this box signed it (a file
+// signed by this box holds a version the database may not know yet, which the writer announces first), and one it did not sign
+// raises the floor under the next version only when that version and the next are safe integers. A file the box cannot
 // refresh is served as stale (503), not as an old file that lacks a new generation: the file is fresh again only when no refresh is
 // still queued, and a refresh that failed is tried again on the injected scheduler, with no limit on tries.
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
@@ -169,7 +170,9 @@ export function createShareWriter(deps: ShareWriterDeps): ShareWriter {
     const keys = await deps.source.keys();
     const raw = readFileIfAny(deps.dir);
     const summary = raw === null ? undefined : summaryOf(raw);
-    // A file on disk counts only when this box signed it; a file it did not sign sets nothing, not even a floor under the version.
+    // A file on disk counts as the box's own only when this box signed it. One it did not sign (a restored or foreign one) only
+    // raises the floor under the next version, so a reader that saw it does not take the new file for a rollback, and only when
+    // that version and the next are safe integers: any other is ignored, as an unreadable file is.
     const known: { readonly raw: Buffer; readonly summary: FileSummary } | undefined = raw !== null && summary !== undefined && signer.verify(summary.body, summary.signature) ? { raw, summary } : undefined;
     let announced = deps.meta.shareState().version;
     if (known !== undefined && known.summary.version > announced) {
@@ -177,7 +180,8 @@ export function createShareWriter(deps: ShareWriterDeps): ShareWriter {
       deps.meta.announceShare(known.summary.version);
       announced = known.summary.version;
     }
-    const version = announced + 1;
+    const floor = summary !== undefined && Number.isSafeInteger(summary.version + 1) ? Math.max(announced, summary.version) : announced;
+    const version = floor + 1;
     const built = buildShare({ version, issuedAt: deps.clock.now(), random: deps.random, keys });
     // A file below the announced version is never reused: a reader may have seen the higher one, and would take this for a rollback.
     if (known !== undefined && known.summary.version === announced && known.summary.contentKey === built.contentKey) {

@@ -485,13 +485,14 @@ test('KBOX-33 a file this box signed whose version is below the announced one is
   assert.equal(again.core.meta.snapshot().box.share_version, 6);
 });
 
-test('KBOX-33 a foreign file on disk with the highest safe version does not set the next version or wedge the writer', async (t) => {
+test('KBOX-33 a foreign file on disk with the highest safe version is ignored: the writer is not wedged, writes announced + 1 and serves it', async (t) => {
   const dir = await tempDir(t);
   const foreign = signerFromSeed(Buffer.alloc(32, 7));
   const built = buildShare({ version: Number.MAX_SAFE_INTEGER, issuedAt: 1, random: seededRandom(3), keys: [toShareKey(windowed('OPENAI_ADMIN_KEY'))] });
   writeFileSync(join(dir, 'share.json'), sealEnvelope(built.bytes, foreign.sign(built.bytes)));
   const w = await shareWorld(t, { store: [windowed('OPENAI_ADMIN_KEY')], shareDir: dir });
-  assert.equal(w.writer.serve().version, 1, 'the box writes from its own state');
+  assert.equal(w.writer.serve().version, 1, 'announced (0) + 1: the unusable version is ignored, as for an unreadable file');
+  assert.equal(w.core.meta.snapshot().box.share_version, 1);
   assert.ok(openShare(fileOf(w), publicKeyOf(w)).ok, 'signed by this box');
   w.store.push(windowed('OPENAI_ADMIN_KEY', 2));
   w.core.meta.putKey(row('OPENAI_ADMIN_KEY', 2));
