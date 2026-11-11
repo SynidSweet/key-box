@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import type { Issuer, IssuerCapabilities, IssueRequest, IssuedKey, KeyLister, PlatformKeyInfo, Verifier } from '../../src/ports/issuer.ts';
 import type { KeyClass, KeyLocation, Lent, PlatformKeyId, Scope } from '../../src/ports/types.ts';
 import type { Vault } from '../../src/ports/vault.ts';
+import type { EventLog } from '../../src/ports/events.ts';
+import type { EventData, EventKind } from '../../src/pure/schemas.ts';
 import { createOrchestrator } from '../../src/shell/orchestrator.ts';
 import type { NewKey, Orchestrator } from '../../src/shell/orchestrator.ts';
 import type { Point } from '../../src/shell/rotation-ports.ts';
@@ -52,6 +54,8 @@ export interface RotationWorld {
   readonly platform: FakePlatformWorld;
   readonly trace: string[];
   readonly faults: Faults;
+  /** Told the kind of every event the orchestrator and reconcile append, before it is written. */
+  appending: ((kind: EventKind) => void) | undefined;
   readonly destinations: { readonly a: RecordingDestination; readonly redeployer: RecordingRedeployer };
   readonly checkpoints: {
     crashAt: { point: Point; nth: number } | undefined;
@@ -139,6 +143,14 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
     lend: (ref, gen) => parts.vault.lend(ref, gen),
     retire: (ref, gen) => parts.vault.retire(ref, gen),
   };
+  const events: EventLog = {
+    head: () => parts.events.head(),
+    after: (since) => parts.events.after(since),
+    append: <K extends EventKind>(kind: K, data: EventData<K>): number => {
+      world.appending?.(kind);
+      return parts.events.append(kind, data);
+    },
+  };
   const counts = new Map<Point, number>();
   const checkpoints: RotationWorld['checkpoints'] = {
     crashAt: undefined,
@@ -157,6 +169,7 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
     platform,
     trace,
     faults,
+    appending: undefined,
     destinations: recording,
     checkpoints,
     orch: undefined as never,
@@ -173,7 +186,7 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
         scheduler: clock,
         random,
         audit: parts.audit,
-        events: parts.events,
+        events,
         push,
         checkpoint: async (point: Point): Promise<void> => {
           checkpoints.seen.push(point);

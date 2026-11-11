@@ -508,3 +508,17 @@ test('KBOX-51 reconcile alone (no resume) continues an issuing run that holds a 
   assert.equal(w.store.runs().filter((r) => r.state === 'abandoned').length, 0, 'nothing was abandoned');
   assert.deepEqual(await w.live(), [genOf(w, keyref, 2)?.platformKeyId]);
 });
+
+// --- the one notice is persisted before it is sent (review m1) -----------------------------------------------------------------
+
+test('KBOX-17 a failed run records that its notice went out before it sends it, so a crash in between never gives a second card', async (t) => {
+  const { w, keyref } = await seeded(t);
+  const recordedAtSend: (boolean | undefined)[] = [];
+  w.appending = (kind) => {
+    if (kind === 'rotation.failed') recordedAtSend.push(w.store.activeRunOf(keyref)?.failedNotified);
+  };
+  w.faults.verifyAt = 1;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.deepEqual(recordedAtSend, [true]);
+});

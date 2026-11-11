@@ -391,11 +391,21 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   /** One notice for the run, then the rollback. */
   async function fail(run: RunRow, stepName: string, code: string, fresh?: Fresh): Promise<Next> {
     const head = store.key(run.keyref);
-    if (!run.failedNotified) noticeFailed(run, head, underscored(stepName), code);
-    const failed = store.update(run.runId, { state: 'rolling_back', failedStep: underscored(stepName), reasonCode: code, failedNotified: true });
-    if (head !== undefined) store.setStatus(run.keyref, 'failed');
+    const failed = markFailed(run, head, stepName, code);
     const kit = kitOf(run.keyref);
     return kit === undefined || head === undefined ? settleFailed(failed) : rollBack(failed, head, kit, fresh);
+  }
+
+  /**
+   * The run turns to rolling back and records that its one notice is sent, THEN the notice goes out: a crash in between may lose the card
+   * but never sends a second one (review m1). Answers the run as written.
+   */
+  function markFailed(run: RunRow, head: KeyHead | undefined, stepName: string, code: string): RunRow {
+    const step = underscored(stepName);
+    const failed = store.update(run.runId, { state: 'rolling_back', failedStep: step, reasonCode: code, failedNotified: true });
+    if (!run.failedNotified) noticeFailed(run, head, step, code);
+    if (head !== undefined) store.setStatus(run.keyref, 'failed');
+    return failed;
   }
 
   const settleFailed = (run: RunRow): Next => {
