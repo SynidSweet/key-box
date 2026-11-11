@@ -221,3 +221,13 @@ test('KBOX-49 the running core without KB_DOMAIN serves the machine API only: no
   assert.equal(exit.status, 0, exit.stderr);
   assert.match(exit.stderr, /keybox core: no_domain/);
 });
+
+test('KBOX-9 the phone page builds the denial challenge the box checks, and it differs from the approval challenge over the same approval, digest and nonce', async () => {
+  const client = await import('../src/web/webauthn-client.js');
+  const nonce = Uint8Array.from({ length: 32 }, (_, i) => i * 5);
+  const digest = Uint8Array.from({ length: 32 }, (_, i) => 200 - i);
+  const hexOf = (b: Uint8Array): string => Buffer.from(b).toString('hex');
+  const denial = hexOf(await client.denialChallenge('apr_AAAAAAAAAAAAAAAA', digest, nonce));
+  assert.equal(denial, hexOf(challenges.denial('apr_AAAAAAAAAAAAAAAA', digest, nonce)));
+  assert.notEqual(denial, hexOf(challenges.approval('apr_AAAAAAAAAAAAAAAA', digest, nonce)));
+});

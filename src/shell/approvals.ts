@@ -12,7 +12,7 @@ import type { Random } from '../ports/random.ts';
 import type { ApprovalProof } from '../ports/trust.ts';
 import { parseAction } from '../pure/actions.ts';
 import type { Action, ActionKind } from '../pure/actions.ts';
-import { actionDigest, approvalChallenge } from '../pure/challenge.ts';
+import { actionDigest, approvalChallenge, denialChallenge } from '../pure/challenge.ts';
 import { ApiError } from '../pure/errors.ts';
 import { decideSlot, parseRequester, pushOnOpen, requesterText, slotOf } from '../pure/slots.ts';
 import type { Requester, SlotDecision } from '../pure/slots.ts';
@@ -249,7 +249,8 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
     if (held === undefined) throw new ApiError('not_found');
     if (held.status !== 'pending') throw new ApiError('conflict', 'not_pending');
     const digest = Uint8Array.from(Buffer.from(held.digest_hex, 'hex'));
-    const verdict = deps.approvers.check({ kind: 'decide', approvalId, revision: held.revision }, (nonce) => approvalChallenge(approvalId, digest, nonce), proof);
+    const challenge = decision === 'approve' ? approvalChallenge : denialChallenge;
+    const verdict = deps.approvers.check({ kind: 'decide', approvalId, revision: held.revision }, (nonce) => challenge(approvalId, digest, nonce), proof);
     if (!verdict.ok) throw new ApiError('forbidden', 'proof_refused');
     const action = actionOf(held);
     const now = deps.clock.now();

@@ -44,6 +44,7 @@ const sha = (...parts: (string | Uint8Array)[]): Uint8Array => {
 /** The challenges, written again here from the spec text (KBOX-9), so the world is an independent oracle of the box's own. */
 export const challenges = {
   approval: (id: string, digest: Uint8Array, nonce: Uint8Array): Uint8Array => sha('kbox-v1', id, digest, nonce),
+  denial: (id: string, digest: Uint8Array, nonce: Uint8Array): Uint8Array => sha('kbox-v1-deny', id, digest, nonce),
   view: (nonce: Uint8Array): Uint8Array => sha('kbox-v1-view', nonce),
   op: (op: { kind: string; label: string }, nonce: Uint8Array): Uint8Array => sha('kbox-v1-op', sha(`{"kind":${JSON.stringify(op.kind)},"label":${JSON.stringify(op.label)}}`), nonce),
   register: (nonce: Uint8Array): Uint8Array => sha('kbox-v1-register', nonce),
@@ -104,7 +105,13 @@ export interface World {
   /** The queue as the phone sees it. */
   queue(approver?: SoftApprover): Promise<readonly QueueItem[]>;
   /** A proof for one queue item, as the phone would build it; `quirks` plants one fault under a valid signature. */
-  proofFor(item: QueueItem, approver?: SoftApprover, quirks?: Quirks): WireProof;
+  /** `decision` names the challenge signed (approval or denial); a proof for one decision is refused by the other's route. */
+  proofFor(item: QueueItem, approver?: SoftApprover, quirks?: Quirks, decision?: 'approve' | 'deny'): WireProof;
+  /**
+   * Posts a proof to the decision's route. A proof made by `proofFor` with no decision and handed unchanged to `'deny'` is
+   * signed again over the denial challenge (the phone signs when the button is pressed); anything else goes as it is, so a
+   * test that wants the wrong challenge posts with `call`.
+   */
   decide(id: string, decision: 'approve' | 'deny', proof: WireProof): Promise<DriveReply>;
   /** Proposes through the service (no route), as a token, the box or an enrol would. */
   propose(action: Action, requester?: string | 'box'): ReturnType<ApproveCore['approvals']['propose']>;
@@ -187,12 +194,20 @@ export async function approveWorld(t: TestContext, options: WorldOptions = {}): 
     assert.equal(reply.status, 200, reply.body);
     return (reply.json() as { approvals: QueueItem[] }).approvals;
   };
-  const proofFor: World['proofFor'] = (item, approver = owner, quirks) => {
+  const approvalProofs = new Map<string, { readonly made: WireProof; readonly redo: (decision: 'deny') => WireProof }>();
+  const proofFor: World['proofFor'] = (item, approver = owner, quirks, decision = 'approve') => {
     const n = Uint8Array.from(Buffer.from(item.nonce_b64, 'base64url'));
     const digest = Uint8Array.from(Buffer.from(item.digest_b64, 'base64url'));
-    return wire(n, approver.prove(challenges.approval(item.approval_id, digest, n), RP, quirks));
+    const challenge = decision === 'approve' ? challenges.approval : challenges.denial;
+    const made = wire(n, approver.prove(challenge(item.approval_id, digest, n), RP, quirks));
+    if (decision === 'approve') approvalProofs.set(made.nonce, { made, redo: (d) => proofFor(item, approver, quirks, d) });
+    return made;
   };
-  const decide: World['decide'] = (id, decision, proof) => call(`/app/${decision}/${id}`, { json: { proof } });
+  const decide: World['decide'] = (id, decision, proof) => {
+    const own = approvalProofs.get(proof.nonce);
+    const sent = decision === 'deny' && own !== undefined && JSON.stringify(own.made) === JSON.stringify(proof) ? own.redo('deny') : proof;
+    return call(`/app/${decision}/${id}`, { json: { proof: sent } });
+  };
   const requesterOf = (r: string): Parameters<ApproveCore['approvals']['propose']>[0]['requester'] =>
     r === 'box' ? { kind: 'box' } : r.startsWith('enrol:') ? { kind: 'enrol', address: r.slice(6) } : { kind: 'token', label: r };
 

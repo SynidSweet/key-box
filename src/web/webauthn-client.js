@@ -64,6 +64,9 @@ async function sha256(...parts) {
 /** `SHA-256("kbox-v1" || approvalId || actionDigest || nonce)`. @param {string} approvalId @param {Uint8Array} digest @param {Uint8Array} nonce */
 export const approvalChallenge = (approvalId, digest, nonce) => sha256('kbox-v1', approvalId, digest, nonce);
 
+/** `SHA-256("kbox-v1-deny" || approvalId || actionDigest || nonce)`. @param {string} approvalId @param {Uint8Array} digest @param {Uint8Array} nonce */
+export const denialChallenge = (approvalId, digest, nonce) => sha256('kbox-v1-deny', approvalId, digest, nonce);
+
 /** `SHA-256("kbox-v1-view" || nonce)`. @param {Uint8Array} nonce */
 export const viewChallenge = (nonce) => sha256('kbox-v1-view', nonce);
 

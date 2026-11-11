@@ -392,6 +392,26 @@ test('KBOX-9 KBOX-7 a replaced action is stored under the digest of its new cont
   assert.equal((await w.decide(item.approval_id, 'approve', overOld)).status, 403, 'a fresh nonce over the digest of the action that was replaced');
 });
 
+test('KBOX-9 the decision is in the challenge: an approve proof cannot deny, a deny proof cannot approve, and each decides with its own', async (t) => {
+  const w = await approveWorld(t);
+  const first = await pending(w, { kind: 'demote', keyref: 'k1' });
+  const id = first.approval_id;
+  const fresh = async () => {
+    const item = (await w.queue()).find((q) => q.approval_id === id);
+    assert.ok(item);
+    return item;
+  };
+  const stillPending = (): boolean => w.parts.meta.snapshot().approvals.some((p) => p.approval_id === id);
+  assert.equal((await w.call(`/app/deny/${id}`, { json: { proof: w.proofFor(first) } })).status, 403, 'an approval proof sent to deny');
+  assert.equal(stillPending(), true);
+  assert.equal((await w.call(`/app/approve/${id}`, { json: { proof: w.proofFor(await fresh(), w.owner, undefined, 'deny') } })).status, 403, 'a denial proof sent to approve');
+  assert.equal(stillPending(), true);
+  assert.deepEqual(refusedCodes(w), ['challenge', 'challenge']);
+  assert.equal((await w.call(`/app/deny/${id}`, { json: { proof: w.proofFor(await fresh(), w.owner, undefined, 'deny') } })).status, 200, 'control: a denial proof denies');
+  const other = await pending(w, { kind: 'demote', keyref: 'k2' });
+  assert.equal((await w.call(`/app/approve/${other.approval_id}`, { json: { proof: w.proofFor(other) } })).status, 200, 'control: an approval proof approves');
+});
+
 // --- pins for bindings the code has and no test held (kernel-approve minors 1 to 5) -----------------------------------
 
 /** The codes of every refused proof so far, oldest first. */

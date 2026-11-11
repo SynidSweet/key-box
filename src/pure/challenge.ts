@@ -1,6 +1,6 @@
 // KBOX-9: what the approver signs, and the check that an approver proof is the passkey AND the device key of the same
-// approver over the same challenge. The one home of every challenge the box builds (approval, view, operation, paste,
-// registration) and of the single-use nonces the pages carry. core and kb-install import this file; it has no state.
+// approver over the same challenge. The one home of every challenge the box builds (approval, denial, view, operation,
+// paste, registration) and of the single-use nonces the pages carry. core and kb-install import this file; it has no state.
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { canonicalJson } from './canonical.ts';
 import type { Es256PublicKey } from './cose.ts';
@@ -29,6 +29,11 @@ export function actionDigest(action: object): Uint8Array {
 /** `SHA-256("kbox-v1" || approvalId || actionDigest || nonce)`. */
 export function approvalChallenge(approvalId: string, digest: Uint8Array, nonce: Uint8Array): Uint8Array {
   return sha256('kbox-v1', approvalId, fixed(digest, DIGEST_BYTES, 'the action digest'), fixed(nonce, NONCE_BYTES, 'the nonce'));
+}
+
+/** `SHA-256("kbox-v1-deny" || approvalId || actionDigest || nonce)`: a denial signs this, so an approval proof cannot deny and a denial proof cannot approve. */
+export function denialChallenge(approvalId: string, digest: Uint8Array, nonce: Uint8Array): Uint8Array {
+  return sha256('kbox-v1-deny', approvalId, fixed(digest, DIGEST_BYTES, 'the action digest'), fixed(nonce, NONCE_BYTES, 'the nonce'));
 }
 
 /** `SHA-256("kbox-v1-view" || nonce)`. */

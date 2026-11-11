@@ -1,6 +1,6 @@
 // The app shell (KBOX-8, KBOX-9, KBOX-11): a view session opens the queue; each approval, each denial and each signed
 // operation asks for the passkey and the device key again over its own challenge. Box words are shown as text only.
-import { approvalChallenge, browser, byId, call, fromB64u, nonce, notifier, operationChallenge, prove, viewChallenge } from './webauthn-client.js';
+import { approvalChallenge, browser, byId, call, denialChallenge, fromB64u, nonce, notifier, operationChallenge, prove, viewChallenge } from './webauthn-client.js';
 
 /** @typedef {{ approval_id: string, kind: string, title: string, lines: string[], digest_b64: string, nonce_b64: string }} Item */
 
@@ -15,7 +15,8 @@ function isItem(v) {
 async function decide(item, decision) {
   try {
     const n = fromB64u(item.nonce_b64);
-    const proof = await prove(n, await approvalChallenge(item.approval_id, fromB64u(item.digest_b64), n));
+    const challenge = decision === 'approve' ? approvalChallenge : denialChallenge;
+    const proof = await prove(n, await challenge(item.approval_id, fromB64u(item.digest_b64), n));
     const answer = /** @type {{ registration_code?: unknown }} */ (await call(`/app/${decision}/${item.approval_id}`, { proof }));
     if (typeof answer.registration_code === 'string') notifier.say(`On the new phone, open /recover and enter: ${answer.registration_code}`);
     else notifier.say(decision === 'approve' ? 'Approved.' : 'Denied.');
