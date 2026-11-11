@@ -11,7 +11,7 @@ import type { PlatformEntry } from '../ports/platform.ts';
 import type { RelayProfile } from '../ports/relay-profile.ts';
 import { parseClientAddress } from '../pure/address.ts';
 import type { ClientAddress } from '../pure/address.ts';
-import type { RelayAuditRow } from '../pure/lend-protocol.ts';
+import type { LendRefusal, RelayAuditRow } from '../pure/lend-protocol.ts';
 import { DEFAULT_REQUEST_HEADERS, DEFAULT_RESPONSE_HEADERS, assertRegistry, compileProfile } from '../pure/profile.ts';
 import type { ProfileEngine } from '../pure/profile.ts';
 import { FORCED_RESPONSE_HEADERS, METHOD_OVERRIDE_HEADERS, RELAY_ERRORS, relayErrorBody, upstreamRefusedBody } from '../pure/relay-errors.ts';
@@ -63,6 +63,19 @@ class Refused extends Error {
   }
 }
 
+/** Core could not be asked: the pass is neither confirmed nor refused, and the audit row that would follow cannot be written either. */
+class CoreUnreachable extends Refused {
+  constructor() {
+    super('unavailable');
+  }
+}
+
+/** A refusal core gave for a pass. `forbidden` means core knows the pass and refused the key or the machine, so the request is audited. */
+function refusedFor(code: LendRefusal, trace: Trace): Refused {
+  if (code === 'forbidden') trace.confirmed = true;
+  return new Refused(code === 'bad_token' ? 'bad_token' : 'forbidden');
+}
+
 /** What one request leaves for the audit row; filled in as the request goes. */
 interface Trace {
   route: RelayAuditRow['route'];
@@ -77,6 +90,8 @@ interface Trace {
   bytes: number;
   code?: string;
   reason?: RelayAuditRow['reason'];
+  /** Core confirmed the pass (or knew it and refused the key): only then is the request audited. */
+  confirmed: boolean;
 }
 
 const one = (headers: IncomingHttpHeaders, name: string): string | undefined => {
@@ -135,6 +150,33 @@ function passedHeaders(profile: RelayProfile, upstream: IncomingMessage): { read
 }
 
 const IDENTITY = /^\s*identity\s*$/i;
+const CHUNKED = /^\s*chunked\s*$/i;
+
+/** A body the scanner cannot see inside (KBOX-14): any `Content-Encoding` but identity, and any `Transfer-Encoding` but exactly `chunked` (which the HTTP layer decodes). */
+function isEncoded(headers: IncomingHttpHeaders): boolean {
+  const content = one(headers, 'content-encoding');
+  const transfer = one(headers, 'transfer-encoding');
+  return (content !== undefined && !IDENTITY.test(content)) || (transfer !== undefined && !CHUNKED.test(transfer));
+}
+
+/** Writes one piece of the answer. False when the caller went away, including while the write waited for the caller to read. */
+async function writeToCaller(res: ServerResponse, piece: Buffer): Promise<boolean> {
+  if (res.destroyed) return false;
+  if (res.write(piece)) return true;
+  await new Promise<void>((resolve) => {
+    const done = (): void => {
+      res.off('drain', done);
+      res.off('close', done);
+      resolve();
+    };
+    res.once('drain', done);
+    res.once('close', done);
+  });
+  return !res.destroyed;
+}
+
+/** How the upstream body ended: read through, a hit, a stream that broke or stopped short of its framing, or a caller who left. */
+type Drained = { readonly kind: 'ended' | 'broken' | 'gone' } | { readonly kind: 'hit'; readonly reason: RelayAuditRow['reason'] };
 
 export function createRelayServer(deps: RelayDeps): RelayServer {
   assertRegistry(deps.registry);
@@ -162,7 +204,8 @@ export function createRelayServer(deps: RelayDeps): RelayServer {
     if (req.method !== 'GET') throw new Refused('not_found');
     const pass = passOf(req);
     const answer = await deps.lend.grants({ op: 'grants', token_hash: hashToken(pass.token), network: source.network });
-    if (!answer.ok) throw new Refused(answer.code === 'bad_token' ? 'bad_token' : 'forbidden');
+    if (!answer.ok) throw refusedFor(answer.code, trace);
+    trace.confirmed = true;
     trace.label = answer.machine;
     const list = answer.grants.map((g) => {
       const relayUrl = `https://api.keys.${domain}/r/${g.keyref}`;
@@ -180,7 +223,8 @@ export function createRelayServer(deps: RelayDeps): RelayServer {
     const pass = passOf(req);
     const tokenHash = hashToken(pass.token);
     const resolved = await deps.lend.resolve({ op: 'resolve', token_hash: tokenHash, keyref: target.keyref, network: source.network });
-    if (!resolved.ok) throw new Refused(resolved.code === 'bad_token' ? 'bad_token' : 'forbidden');
+    if (!resolved.ok) throw refusedFor(resolved.code, trace);
+    trace.confirmed = true;
     trace.label = resolved.label;
     const engine = engines.get(resolved.platform);
     if (engine === undefined) throw new Refused('forbidden');
@@ -238,8 +282,7 @@ export function createRelayServer(deps: RelayDeps): RelayServer {
       upstream.destroy();
       throw new Refused('withheld', 'partial');
     }
-    const encoding = one(upstream.headers, 'content-encoding');
-    if (encoding !== undefined && !IDENTITY.test(encoding)) {
+    if (isEncoded(upstream.headers)) {
       upstream.destroy();
       throw new Refused('withheld', 'encoded');
     }
@@ -256,7 +299,8 @@ export function createRelayServer(deps: RelayDeps): RelayServer {
     let written = 0;
     let headSent = false;
     held.push(block);
-    const release = async (upTo: number): Promise<void> => {
+    /** Sends what the scanner has released; false when the caller went away. */
+    const release = async (upTo: number): Promise<boolean> => {
       if (!headSent && upTo >= block.length) {
         res.writeHead(status, [...headers, ...Object.entries(FORCED_RESPONSE_HEADERS)]);
         headSent = true;
@@ -264,7 +308,7 @@ export function createRelayServer(deps: RelayDeps): RelayServer {
         written = block.length;
         held.splice(0, 1);
       }
-      if (!headSent) return;
+      if (!headSent) return true;
       while (written < upTo) {
         const first = held[0];
         if (first === undefined) break;
@@ -274,8 +318,9 @@ export function createRelayServer(deps: RelayDeps): RelayServer {
         if (held[0].length === 0) held.shift();
         written += take;
         trace.bytes += take;
-        if (!res.write(piece)) await new Promise<void>((resolve) => res.once('drain', resolve));
+        if (!(await writeToCaller(res, piece))) return false;
       }
+      return true;
     };
     const cut = (code: RelayErrorCode, reason?: RelayAuditRow['reason']): void => {
       held.length = 0;
@@ -286,37 +331,38 @@ export function createRelayServer(deps: RelayDeps): RelayServer {
       else throw new Refused(code, reason);
     };
 
-    let step = await scan.feed(block);
+    const head = await scan.feed(block);
     fed = block.length;
-    /** The body read to its end, a hit, or a stream that broke or ended short of its framing. */
-    const drain = async (): Promise<'ended' | 'hit' | 'broken'> => {
+    /** The body read to its end; it stops at the first hit, without waiting for upstream's next chunk. */
+    const drain = async (): Promise<Drained> => {
+      let step = head;
+      if (step.kind === 'hit') return { kind: 'hit', reason: step.reason };
       try {
         for await (const chunk of upstream) {
-          if (step.kind === 'hit') return 'hit';
           const piece = chunk as Buffer;
           held.push(piece);
           fed += piece.length;
           step = await scan.feed(piece);
-          if (step.kind === 'progress') await release(step.releasable);
+          if (step.kind === 'hit') return { kind: 'hit', reason: step.reason };
+          if (!(await release(step.releasable))) return { kind: 'gone' };
         }
       } catch (error) {
         if (!(error instanceof Error)) throw error;
-        return 'broken';
+        return { kind: 'broken' };
       }
-      if (step.kind === 'hit') return 'hit';
-      return upstream.complete ? 'ended' : 'broken';
+      return { kind: upstream.complete ? 'ended' : 'broken' };
     };
     const drained = await drain();
-    if (step.kind === 'hit') return cut('withheld', step.reason);
-    if (drained !== 'ended') return cut('upstream_unreachable');
+    if (drained.kind === 'hit') return cut('withheld', drained.reason);
+    if (drained.kind !== 'ended') return cut('upstream_unreachable');
     const last = await scan.end();
     if (last.kind === 'hit') return cut('withheld', last.reason);
-    await release(fed);
+    if (!(await release(fed))) return cut('upstream_unreachable');
     res.end();
   }
 
   async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const trace: Trace = { route: 'unmatched', method: HTTP_METHODS.find((m) => m === req.method) ?? 'OTHER', status: 500, bytes: 0 };
+    const trace: Trace = { route: 'unmatched', method: HTTP_METHODS.find((m) => m === req.method) ?? 'OTHER', status: 500, bytes: 0, confirmed: false };
     const gone = new AbortController();
     res.on('close', () => {
       if (!res.writableFinished) gone.abort();
@@ -329,6 +375,11 @@ export function createRelayServer(deps: RelayDeps): RelayServer {
       trace.status = RELAY_ERRORS[refused.code].status;
       if (!res.headersSent) sendJson(res, trace.status, relayErrorBody(refused.code));
       else res.destroy();
+    }
+    if (refused !== undefined && !trace.confirmed && !(refused instanceof CoreUnreachable)) {
+      // KBOX-50: a caller core did not vouch for leaves no row, which the internet could otherwise grow; the journal gets the fixed code.
+      deps.journal(`pre_auth_${refused.code}`);
+      return;
     }
     const audited = await auditOnce(auditRow(trace));
     if (audited !== 'audited') deps.journal(audited);
@@ -348,7 +399,7 @@ export function createRelayServer(deps: RelayDeps): RelayServer {
     if (error instanceof Refused) return error;
     if (error instanceof LendUnavailable) {
       deps.journal('lend_unavailable');
-      return new Refused('unavailable');
+      return new CoreUnreachable();
     }
     deps.journal('relay_failed');
     return new Refused('internal');

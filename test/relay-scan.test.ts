@@ -2,7 +2,9 @@
 // shapes, the hold counted in the stripped view, candidate decisions); the second half runs the relay over a fake upstream.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { request } from 'node:http';
 import { test } from 'node:test';
+import { gzipSync } from 'node:zlib';
 import { scanForms } from '../src/pure/forms.ts';
 import type { Form } from '../src/pure/forms.ts';
 import { createResponseScanner, parseCredentialShapes } from '../src/pure/scanner.ts';
@@ -475,4 +477,122 @@ test('KBOX-14 a response trailer carrying the held value is not passed; the body
   });
   const reply = await w.call(MODELS);
   assert.deepEqual([reply.status, reply.complete, reply.body.toString(), reply.trailers, reply.headers['trailer']], [200, true, '{"ok":true}', {}, undefined]);
+});
+
+// ---------------------------------------------------------------- a caller that goes away, a stalled upstream, framing and headers
+
+/** The unix-socket and pipe handles the process holds: the relay's, core's lend connections and the test client's. */
+const pipeHandles = (): number => process.getActiveResourcesInfo().filter((r) => r === 'PipeWrap').length;
+
+/** Waits until `read()` has moved at least once and then stayed put for `QUIET_POLLS` polls: a stream that has backed up. An early false "still" only makes a test less sharp, never fail it. */
+const QUIET_POLLS = 10;
+async function untilStill(read: () => number, what: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = performance.now() + timeoutMs;
+  let last = -1;
+  let quiet = 0;
+  while (quiet < QUIET_POLLS) {
+    if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    const now = read();
+    quiet = now > 1 && now === last ? quiet + 1 : 0;
+    last = now;
+  }
+}
+
+test('KBOX-14, KBOX-50 a caller that pauses and then disconnects under backpressure still gets one audit row, leaks no lend connection and does not hold stop() up', { timeout: 30_000 }, async (t) => {
+  const w = await relayWorld(t);
+  const piece = Buffer.alloc(64 * 1024, 'a');
+  let pieces = 0;
+  w.upstream.respond(async (_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    while (!res.destroyed) {
+      pieces += 1;
+      if (res.write(piece)) continue;
+      await new Promise<void>((resolve) => {
+        res.once('drain', resolve);
+        res.once('close', resolve);
+      });
+    }
+  });
+  const handlesBefore = pipeHandles();
+  const call = request({ socketPath: w.socket, path: MODELS, headers: { authorization: `Bearer ${w.pass}`, 'x-kb-client-ip': '203.0.113.9' } }, (res) => res.pause());
+  call.on('error', () => undefined);
+  call.end();
+  // The paused caller backs the relay up, which backs the upstream up: the relay is waiting to write when the count stops moving.
+  await untilStill(() => pieces, 'the relay to be held up by the paused caller');
+  call.destroy();
+  const row = await settledRow(w);
+  assert.equal(row.detail['route'], 'relay');
+  await w.upstream.lastClosed();
+  await waitUntil(() => pipeHandles() <= handlesBefore, 'the scan connection to core to close');
+  await w.stop();
+  assert.equal(relayRows(w).length, 1, 'one audit row for the one request');
+});
+
+test('KBOX-14 a hit is cut at once, not when upstream sends its next chunk: the caller is answered while upstream is still stalled (before and after the head was sent)', { timeout: 30_000 }, async (t) => {
+  const w = await relayWorld(t);
+  let letGo: () => void = () => undefined;
+  const stall = new Promise<void>((resolve) => (letGo = resolve));
+  t.after(() => letGo());
+  // before the head: the value is in the first chunk, then upstream says nothing more
+  w.upstream.respond(async (_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.write(`{"k":"${heldText(w)}"}`);
+    await stall;
+  });
+  let early: RelayReply | undefined;
+  const first = w.call(MODELS).then((r) => void (early = r));
+  await waitUntil(() => early !== undefined, 'the 502 before upstream continues', 2000);
+  assert.deepEqual([early?.status, early?.body.toString()], [502, WITHHELD]);
+  // after the head: a clean first chunk is released, then the value arrives and upstream stalls
+  const lead = Buffer.from(`{"pad":"${'p'.repeat(256 * 1024)}","k":"`);
+  let headSeen: () => void = () => undefined;
+  const seen = new Promise<void>((resolve) => (headSeen = resolve));
+  w.upstream.respond(async (_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.write(lead);
+    await seen;
+    res.write(`${heldText(w)}"}`);
+    await stall;
+  });
+  let late: RelayReply | undefined;
+  const second = w.call(MODELS, { onBody: () => headSeen() }).then((r) => void (late = r));
+  await waitUntil(() => late !== undefined, 'the cut before upstream continues', 2000);
+  assert.deepEqual([late?.status, late?.complete], [200, false]);
+  letGo();
+  await Promise.all([first, second]);
+});
+
+test('KBOX-14 a response Transfer-Encoding other than exactly chunked ("gzip, chunked") is 502 withheld with zero body bytes, audit reason encoded; chunked passes', async (t) => {
+  const w = await relayWorld(t);
+  w.upstream.respond((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain', 'transfer-encoding': 'gzip, chunked' });
+    res.end(gzipSync(Buffer.from(`{"k":"${heldText(w)}"}`)));
+  });
+  const encoded = await w.call(MODELS);
+  assert.deepEqual([encoded.status, encoded.body.toString()], [502, WITHHELD]);
+  assert.equal((await settledRow(w)).detail['reason'], 'encoded');
+  w.upstream.respond((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain', 'transfer-encoding': 'chunked' });
+    res.write('one ');
+    res.end('two');
+  });
+  const plain = await w.call(MODELS);
+  assert.deepEqual([plain.status, plain.body.toString()], [200, 'one two']);
+});
+
+test('KBOX-14 Location is passed on a 3xx only: a 200 carrying one loses it, and the body arrives whole', async (t) => {
+  const w = await relayWorld(t);
+  w.upstream.respond((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain', location: 'https://elsewhere.example/x' });
+    res.end('body');
+  });
+  const ok = await w.call(MODELS);
+  assert.deepEqual([ok.status, ok.headers['location'], ok.body.toString()], [200, undefined, 'body']);
+  w.upstream.respond((_req, res) => {
+    res.writeHead(302, { location: 'https://elsewhere.example/x' });
+    res.end();
+  });
+  const moved = await w.call(MODELS);
+  assert.deepEqual([moved.status, moved.headers['location']], [302, 'https://elsewhere.example/x']);
 });

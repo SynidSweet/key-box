@@ -338,3 +338,27 @@ test('KBOX-13 a pass for a key without a grant is 403 forbidden, and an unlisted
   assert.equal((await w.call(`${PATH}/v1/models`, { method: 'DELETE' })).status, 403);
   assert.equal(w.upstream.requests.length, 0);
 });
+
+test('KBOX-50 a request whose pass core did not confirm writes no audit row, whatever it carries: the journal gets a fixed code per refusal and nothing the caller chose', async (t) => {
+  const w = await relayWorld(t);
+  const attacker = { 'x-agent': 'evil-agent', 'x-project': 'evil-project' };
+  const unknown = `kbt_${'B'.repeat(43)}`;
+  const calls: [string, CallOptions][] = [
+    [`${PATH}/v1/models`, { pass: null, headers: attacker }],
+    [`${PATH}/v1/models`, { pass: unknown, headers: attacker }],
+    [`${PATH}/v1/models`, { headers: { ...attacker, apikey: `kbt_${'C'.repeat(43)}` } }],
+    [`/r/evilkeyref0/v1/models`, { pass: unknown, headers: attacker }],
+    ['/not/a/relay/path', { headers: attacker }],
+    [`${PATH}/v1/a%2Fb`, { pass: unknown, headers: attacker }],
+    [`${PATH}/v1/models`, { ip: null, headers: attacker }],
+    [`${PATH}/v1/models`, { headers: { ...attacker, origin: 'https://evil.example' } }],
+  ];
+  for (const [path, options] of calls) assert.ok((await w.call(path, options)).status >= 400, path);
+  assert.equal((await w.call(`${PATH}/v1/organization/admin_api_keys`, { method: 'POST', headers: attacker })).status, 403, 'control: a confirmed pass is refused and audited');
+  await w.stop();
+  const rows = w.lend.core.audit.read(0).entries.filter((r) => r.action === 'relay.request');
+  assert.deepEqual(rows.map((r) => [r.actor, r.detail['agent'], r.detail['project'], r.detail['code']]), [['laptop', 'evil-agent', 'evil-project', 'forbidden']], 'only the confirmed pass is audited');
+  assert.deepEqual([...w.journal].sort(), ['pre_auth_bad_path', 'pre_auth_bad_request', 'pre_auth_bad_request', 'pre_auth_bad_token', 'pre_auth_bad_token', 'pre_auth_bad_token', 'pre_auth_browser_call', 'pre_auth_not_found']);
+  w.canary.assertAbsent({ journal: w.journal.join('\n') });
+  assert.ok(!w.journal.join('\n').includes('evil'));
+});

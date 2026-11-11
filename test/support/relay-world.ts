@@ -114,6 +114,8 @@ export interface RelayWorld {
   readonly pass: string;
   /** Upstream hosts whose connect never finishes. */
   readonly hung: Set<string>;
+  /** Stops the relay now (it waits for every request in flight to finish its audit); the world's cleanup calls it again harmlessly. */
+  stop(): Promise<void>;
   call(path: string, options?: CallOptions): Promise<RelayReply>;
 }
 
@@ -164,5 +166,5 @@ export async function relayWorld(t: TestContext, options: RelayWorldOptions = {}
       req.end();
     });
 
-  return { lend, upstream: up, socket, journal, value, canary: c, pass, hung, call };
+  return { lend, upstream: up, socket, journal, value, canary: c, pass, hung, call, stop: () => server.stop() };
 }
