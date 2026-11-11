@@ -74,6 +74,18 @@ export interface InstallerDeps {
   readonly domain: string | undefined;
   /** A fixed code for the journal when a request fails in a way no refusal code names. */
   readonly journal?: (code: string) => void;
+  /** Makes a directory's renames and removals durable (fsync of the directory); `syncDirectory` unless a test watches it. */
+  readonly syncDir?: (dir: string) => void;
+}
+
+/** fsyncs a directory, so an entry renamed into it, or removed from it, survives a power cut in that state. */
+export function syncDirectory(dir: string): void {
+  const fd = openSync(dir, constants.O_RDONLY | constants.O_DIRECTORY);
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export const COPY_DEADLINE_MS = 60_000;
@@ -123,6 +135,7 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
   const { paths } = deps;
   const hooks = deps.hooks ?? {};
   const runDeadline = deps.clock.now() + RUN_BUDGET_MS;
+  const syncDir = deps.syncDir ?? syncDirectory;
   const noCodes = (): never => {
     throw new Error('kb-install checks codes and never makes one');
   };
@@ -162,6 +175,7 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
       closeSync(fd);
     }
     renameSync(temp, paths.trustFile);
+    syncDir(dirname(paths.trustFile));
   };
 
   // Every approval id root acted on (install and trust alike): each approval works once.
@@ -175,6 +189,8 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     } finally {
       closeSync(fd);
     }
+    // The first spend makes the file: its entry must be durable too before the change it guards is written.
+    syncDir(paths.results);
   };
 
   /** The release `current` names, or undefined when it names none (it never leaves releases/ through kb-install). */
@@ -196,6 +212,7 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     rmSync(temp, { force: true });
     symlinkSync(join(paths.releases, h), temp);
     renameSync(temp, paths.current);
+    syncDir(dirname(paths.current));
   };
 
   // --- the safe copy ------------------------------------------------------------------------------------------------
@@ -325,8 +342,12 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
       closeSync(fd);
     }
     renameSync(temp, switchingFile);
+    syncDir(paths.results);
   };
-  const clearSwitching = (): void => rmSync(switchingFile, { force: true });
+  const clearSwitching = (): void => {
+    rmSync(switchingFile, { force: true });
+    syncDir(paths.results);
+  };
 
   /** A restart that cannot be made in time is journalled: `current` is already where it must be, nothing else is left to do. */
   const restartBy = (until: number): Promise<void> => deps.units.restart(until).catch(() => deps.journal?.('restart_failed'));
@@ -335,6 +356,7 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
    * `current` is left as it is and a fixed code is journalled: the run goes on to serve requests, never wedged by it. */
   const setAside = (): void => {
     renameSync(switchingFile, join(paths.results, `switching.bad-${deps.clock.now()}`));
+    syncDir(paths.results);
     deps.journal?.('switching_bad');
   };
 
@@ -385,6 +407,7 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     }
     hooks.afterCopy?.();
     renameSync(temp, release);
+    syncDir(paths.releases);
     // Spent before the switch: an approval that ever reached `current` never installs again, whatever follows.
     spend(req.approval.approval_id);
     switchCurrent(h);

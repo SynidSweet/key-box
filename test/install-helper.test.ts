@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, closeSync, constants, existsSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { softApprover } from './kit/approver.ts';
 import { runShell } from './kit/index.ts';
@@ -687,6 +687,33 @@ test('KBOX-6 a kill between copy and switch leaves the base current and no relea
   assert.deepEqual(w.releases(), [w.h0]);
   assert.equal(w.result(h), 'failed:interrupted');
   assert.deepEqual(w.units.restarts, [], 'current never moved, so nothing is restarted');
+});
+
+// --- durability: each rename is followed by an fsync of its directory --------------------------------------------------
+
+test('KBOX-6 the directory is fsynced after the switching record, the release and current land and after the record goes; and after the spend, before trust.json is written', async (t) => {
+  const w = await installWorld(t);
+  const h = w.stage(RELEASE_1);
+  w.installRequest(h);
+  await w.run();
+  assert.equal(w.result(h), 'installed');
+  const at = (dir: string, holds: (s: InstallWorld['syncs'][number]) => boolean, after = -1): number => w.syncs.findIndex((s, i) => i > after && s.dir === dir && holds(s));
+  const record = at(w.paths.results, (s) => s.entries.includes('switching'));
+  assert.ok(record >= 0, `the switching record is durable: ${JSON.stringify(w.syncs)}`);
+  const release = at(w.paths.releases, (s) => s.entries.includes(h) && !s.entries.includes(`${h}.tmp`), record);
+  assert.ok(release > record, 'releases/<H> is durable after the record');
+  const current = at(dirname(w.paths.current), (s) => s.current === h, release);
+  assert.ok(current > release, 'the switched current is durable');
+  assert.ok(at(w.paths.results, (s) => !s.entries.includes('switching'), current) > current, 'the cleared record is durable');
+
+  const added = w.trusted('ap-second-0002', softApprover());
+  w.request('trust-a', { kind: 'trust', change: 'approver_add', approval: w.proof(addActionOf(added)), approver: added });
+  const before = w.syncs.length - 1;
+  await w.run();
+  assert.equal(w.result('trust-a'), 'applied');
+  const spend = at(w.paths.results, (s) => s.entries.includes('trust-spent'), before);
+  const trust = at(dirname(w.paths.trustFile), (s) => s.entries.includes('trust.json') && !s.entries.includes('trust.json.tmp'), before);
+  assert.ok(spend > before && trust > spend, `the spend is durable before trust.json is written (a lost approval, never a replay): spend ${spend}, trust ${trust}`);
 });
 
 // --- a switching record root cannot act on: set aside, never a wedge -------------------------------------------------

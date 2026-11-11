@@ -15,7 +15,7 @@ import { WORDLIST } from './approve-world.ts';
 import { createCodeRoot } from '../../src/shell/console.ts';
 import type { CodeRoot } from '../../src/shell/console.ts';
 import { releaseHash } from '../../src/pure/release-hash.ts';
-import { runInstaller } from '../../src/shell/installer.ts';
+import { runInstaller, syncDirectory } from '../../src/shell/installer.ts';
 import type { InstallHooks, InstallPaths, ReleaseUnits } from '../../src/shell/installer.ts';
 import type { ApprovalProof, TrustApprover } from '../../src/ports/trust.ts';
 
@@ -140,6 +140,8 @@ export interface InstallWorld {
   readonly console: string[];
   /** The fixed codes kb-install journalled, in order. */
   readonly journal: string[];
+  /** Each directory kb-install made durable (fsync), in order, with what was in it and where `current` pointed then. */
+  readonly syncs: { readonly dir: string; readonly entries: readonly string[]; readonly current: string }[];
   /** Writes a tree to staging/<H>/ and returns H. */
   stage(tree: Tree, name?: string): string;
   /** A kept approval proof for an action, signed by an approver (the owner by default) over the `kbox-v1` challenge. */
@@ -176,6 +178,7 @@ export async function installWorld(t: TestContext, options: { readonly trust?: f
   const clock = new FakeClock(1_700_000_000_000);
   const consoleLines: string[] = [];
   const journal: string[] = [];
+  const syncs: InstallWorld['syncs'] = [];
   const codes = createCodeRoot({ dir: paths.codesDir, sink: (l) => void consoleLines.push(l), random: { bytes: (n) => Uint8Array.from(randomBytes(n)) }, clock, wordlist: WORDLIST });
 
   const writeTree = (dir: string, tree: Tree): void => {
@@ -192,6 +195,10 @@ export async function installWorld(t: TestContext, options: { readonly trust?: f
   symlinkSync(r0, paths.current);
   const current = (): string => readlinkSync(paths.current).split('/').at(-1) ?? '';
   const units = fakeUnits(current, () => clock.now());
+  const recordSync = (dir: string): void => {
+    syncs.push({ dir, entries: readdirSync(dir).sort(), current: current() });
+    syncDirectory(dir);
+  };
 
   const owner = softApprover();
   const ownerId = 'ap-owner-00001';
@@ -211,6 +218,7 @@ export async function installWorld(t: TestContext, options: { readonly trust?: f
     codes,
     console: consoleLines,
     journal,
+    syncs,
     stage(tree, name) {
       const h = hashOf(tree);
       writeTree(join(paths.staging, name ?? h), tree);
@@ -225,7 +233,7 @@ export async function installWorld(t: TestContext, options: { readonly trust?: f
       world.request(h, { kind: 'install', install: h, commit: COMMIT, base, ...(approval === undefined ? {} : { approval }) });
     },
     runKilledAt: (step) => runNode([new URL('./install-kill.ts', import.meta.url).pathname, JSON.stringify(paths), step], root),
-    run: (hooks) => runInstaller({ paths, units, clock, wordlist: WORDLIST, domain: DOMAIN, journal: (code) => void journal.push(code), ...(hooks === undefined ? {} : { hooks }) }).then(() => undefined),
+    run: (hooks) => runInstaller({ paths, units, clock, wordlist: WORDLIST, domain: DOMAIN, journal: (code) => void journal.push(code), syncDir: recordSync, ...(hooks === undefined ? {} : { hooks }) }).then(() => undefined),
     result(name) {
       const file = join(paths.results, `${name}.result`);
       return existsSync(file) ? readFileSync(file, 'utf8') : undefined;
