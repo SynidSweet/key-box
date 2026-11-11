@@ -227,9 +227,31 @@ test('KBOX-3 the relay with core down answers 503 unavailable and journals fixed
 
 // ---------------------------------------------------------------- the key's own allow set (KBOX-3, KBOX-25)
 
+/** An admin key of the path profile whose own allow set is the one rule `model-get`. */
+function addNarrowKey(w: LendWorld): void {
+  w.addKey({ keyref: 'narrowkey1', value: Buffer.from('NarrowKeyValue0123456789abcdefgh'), grants: ['laptop'] });
+  w.core.meta.putAllowRule('narrowkey1', 'model-get');
+}
+
+/** A key the meta store lists whose current generation is not in the vault (yet). */
+function addUnstoredKey(w: LendWorld, keyref: string): void {
+  w.core.meta.putKey({
+    keyref,
+    platform: 'pathplat',
+    name: `KEY_${keyref.toUpperCase()}`,
+    projects: ['shop'],
+    class: 'admin',
+    status: 'works',
+    gen_current: 1,
+    schedule: { rotate_every_days: 30, grace_hours: 24, next_due_at: null, expires_at: null },
+    coverage: null,
+    last_use_at: null,
+  });
+}
+
 test('KBOX-3 a key with its own allow set is lent only for a rule in that set; with none set it gets the profile list', async (t) => {
   const { w, pass } = await granted(t);
-  w.addKey({ keyref: 'narrowkey1', value: Buffer.from('NarrowKeyValue0123456789abcdefgh'), grants: ['laptop'], allowRules: ['model-get'] });
+  addNarrowKey(w);
   assert.equal((await lendOf(w, pass, 'narrowkey1', 'model-get')).ok, true, 'a rule in the key set');
   assert.deepEqual(await lendOf(w, pass, 'narrowkey1', 'models-list'), { ok: false, code: 'forbidden' }, 'a profile rule outside the key set');
   assert.deepEqual(await lendOf(w, pass, 'narrowkey1', 'no-such-rule'), { ok: false, code: 'forbidden' });
@@ -239,7 +261,7 @@ test('KBOX-3 a key with its own allow set is lent only for a rule in that set; w
 
 test('KBOX-3 through the relay: a request matching a profile rule outside the key set is 403 with no upstream call; one inside the set passes', async (t) => {
   const w = await relayWorld(t);
-  w.lend.addKey({ keyref: 'narrowkey1', value: Buffer.from('NarrowKeyValue0123456789abcdefgh'), grants: ['laptop'], allowRules: ['model-get'] });
+  addNarrowKey(w.lend);
   const outside = await w.call('/r/narrowkey1/v1/models');
   assert.deepEqual([outside.status, outside.body.toString()], [403, relayErrorBody('forbidden')]);
   assert.equal(w.upstream.requests.length, 0);
@@ -296,7 +318,7 @@ test('KBOX-14 a minted value the scanner cannot build forms of (empty, a NUL byt
 
 test('KBOX-14 a generation that is not in the vault yet is scanned from the moment it is stored: an empty result is never cached', async (t) => {
   const { w, pass } = await granted(t);
-  w.addKey({ keyref: 'latekey001', value: Buffer.from('LateValue0123456789abcdefghijklmn'), stored: false });
+  addUnstoredKey(w, 'latekey001');
   assert.equal(await cutsStream(w, pass, '{"echo":"LateValue0123456789abcdefghijklmn"}'), false, 'nothing to match yet');
   w.core.vault.put('latekey001', 1, Buffer.from('LateValue0123456789abcdefghijklmn'));
   assert.equal(await cutsStream(w, pass, '{"echo":"LateValue0123456789abcdefghijklmn"}'), true);

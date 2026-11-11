@@ -23,10 +23,6 @@ export interface NewKey {
   readonly cls?: KeyClass;
   readonly grants?: readonly string[];
   readonly gen?: number;
-  /** The key's own allow set (meta rows); none leaves it to the profile's whole list. */
-  readonly allowRules?: readonly string[];
-  /** False leaves the value out of the vault, as a key whose generation is not stored yet. */
-  readonly stored?: boolean;
 }
 
 export interface LendWorld {
@@ -96,7 +92,6 @@ export function seedKey(core: CoreParts, key: NewKey): void {
     coverage: null,
     last_use_at: null,
   });
-  if (key.stored !== false) core.vault.put(key.keyref, gen, key.value);
-  for (const rule of key.allowRules ?? []) core.meta.putAllowRule(key.keyref, rule);
+  core.vault.put(key.keyref, gen, key.value);
   for (const machine of key.grants ?? []) core.meta.putGrant(key.keyref, machine);
 }

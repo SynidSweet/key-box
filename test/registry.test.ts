@@ -3,12 +3,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { PlatformEntry } from '../src/ports/platform.ts';
-import type { RelayProfile, SampleRequest } from '../src/ports/relay-profile.ts';
+import type { RelayProfile } from '../src/ports/relay-profile.ts';
+import type { SampleRequest } from '../src/ports/relay-profile.ts';
 import { RegistryRefused, assertRegistry, checkRegistry } from '../src/pure/profile.ts';
 import { REGISTRY } from '../src/platforms/registry.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
 import { seededRandom } from './kit/index.ts';
-import { PATH_HOST, hostProfile, leakyProfile, pathProfile, variants } from './fixtures/profiles.ts';
+import { hostProfile, leakyProfile, pathProfile } from './fixtures/profiles.ts';
+import { PATH_HOST, variants } from './fixtures/profiles.ts';
 
 const failure = (entries: readonly PlatformEntry[]): string => {
   const result = checkRegistry(entries);
