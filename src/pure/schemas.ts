@@ -207,6 +207,20 @@ export const AUDIT_SCHEMAS = {
   'push.failed': { code: text(CODE), status: optional(int(100, 599)) },
   /** An orphan temp file of a vault write was zero-filled and removed at start; the row's ref is the key, nothing else is recorded. */
   'vault.temp_swept': {},
+  // relay (KBOX-13 step 9, KBOX-50): one row per relayed request; the row's ref is the keyref (or the route) and its actor the
+  // pass's label. The query, the path and every body are left out; `rule_id` names the operation.
+  'relay.request': {
+    route: oneOf('relay', 'grants', 'unmatched'),
+    method: oneOf(...HTTP_METHODS),
+    status: int(100, 599),
+    bytes: int(),
+    source: optional(text(ADDRESS)),
+    agent: optional(text(LABEL)),
+    project: optional(text(NAME)),
+    rule_id: optional(text(NAME)),
+    code: optional(text(CODE)),
+    reason: optional(text(CODE)),
+  },
 } as const satisfies Readonly<Record<string, Schema>>;
 
 export type AuditAction = keyof typeof AUDIT_SCHEMAS;

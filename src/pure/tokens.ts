@@ -24,8 +24,12 @@ export function parseBearer(header: string | undefined): BearerParse {
 }
 
 /** The record whose hash equals the token's. Every record is compared, whatever the outcome, with a constant-time comparison. */
-export function findToken(records: readonly TokenRecord[], token: string): TokenRecord | undefined {
-  const wanted = Buffer.from(hashToken(token), 'hex');
+export const findToken = (records: readonly TokenRecord[], token: string): TokenRecord | undefined => findTokenHash(records, hashToken(token));
+
+/** The same for a token's lower-case hex SHA-256, as kb-relay sends it on the lend socket (KBOX-3). */
+export function findTokenHash(records: readonly TokenRecord[], tokenSha256: string): TokenRecord | undefined {
+  const wanted = Buffer.from(tokenSha256, 'hex');
+  if (wanted.length !== 32) return undefined;
   let found: TokenRecord | undefined;
   for (const record of records) {
     const stored = Buffer.from(record.tokenSha256, 'hex');

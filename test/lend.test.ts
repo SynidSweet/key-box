@@ -1,0 +1,214 @@
+// KBOX-3: master keys never reach the relay. Core lends a value over the lend socket only for an admin key granted to the
+// pass's machine whose profile has the asked rule; the class check is in the lend handler. These tests talk to core's lend
+// socket the way kb-relay does, and through the running relay where the relay's answer is the point.
+import assert from 'node:assert/strict';
+import { chmodSync, statSync } from 'node:fs';
+import { connect } from 'node:net';
+import { test } from 'node:test';
+import { FRAME_JSON } from '../src/pure/lend-protocol.ts';
+import { hashToken } from '../src/pure/tokens.ts';
+import { FrameDecoder, LendUnavailable, createLendClient, encodeFrame } from '../src/shell/lend-socket.ts';
+import { bytesOf, canary, waitUntil } from './kit/index.ts';
+import { lendWorld } from './support/lend-world.ts';
+import type { LendWorld } from './support/lend-world.ts';
+
+const NETWORK = '203.0.113.0/24';
+const textValue = (bytes: Uint8Array): Uint8Array => Buffer.from(Buffer.from(bytes).toString('hex'));
+
+async function granted(t: Parameters<typeof lendWorld>[0]): Promise<{ readonly w: LendWorld; readonly pass: string; readonly value: Uint8Array; readonly c: ReturnType<typeof canary> }> {
+  const w = await lendWorld(t);
+  const c = canary();
+  const value = textValue(c.bytes);
+  const pass = w.enrol('laptop');
+  w.addKey({ keyref: 'adminkey1', value, grants: ['laptop'] });
+  return { w, pass, value, c };
+}
+
+const lendOf = (w: LendWorld, pass: string, keyref: string, rule = 'models-list') => w.client.lend({ op: 'lend', token_hash: hashToken(pass), keyref, rule_id: rule });
+
+test('KBOX-3 an admin key granted to the pass machine, with a rule of its profile, is lent for that one call', async (t) => {
+  const { w, pass, value } = await granted(t);
+  const answer = await lendOf(w, pass, 'adminkey1');
+  assert.ok(answer.ok);
+  assert.deepEqual(Buffer.from(await bytesOf(answer.value)), Buffer.from(value));
+  assert.equal(String(answer.value).includes(Buffer.from(value).toString()), false);
+});
+
+test('KBOX-3 a master keyref is refused with no value sent, even when granted and the rule matches', async (t) => {
+  const { w, pass, c } = await granted(t);
+  w.addKey({ keyref: 'masterkey1', value: textValue(c.bytes), cls: 'master', grants: ['laptop'] });
+  assert.deepEqual(await lendOf(w, pass, 'masterkey1'), { ok: false, code: 'forbidden' });
+  const raw = await rawExchange(w.socket, { op: 'lend', token_hash: hashToken(pass), keyref: 'masterkey1', rule_id: 'models-list' });
+  c.assertAbsent({ answer: raw });
+});
+
+test('KBOX-3 an ordinary keyref is refused', async (t) => {
+  const { w, pass, c } = await granted(t);
+  w.addKey({ keyref: 'ordinary01', value: textValue(c.bytes), cls: 'ordinary', grants: ['laptop'] });
+  assert.deepEqual(await lendOf(w, pass, 'ordinary01'), { ok: false, code: 'forbidden' });
+});
+
+test('KBOX-3 a keyref without a grant for the pass machine, or unknown, is refused', async (t) => {
+  const { w, pass } = await granted(t);
+  const other = w.enrol('desktop');
+  w.addKey({ keyref: 'adminkey2', value: Buffer.from('another value'), grants: ['desktop'] });
+  assert.deepEqual(await lendOf(w, pass, 'adminkey2'), { ok: false, code: 'forbidden' });
+  assert.deepEqual(await lendOf(w, pass, 'nosuchkey'), { ok: false, code: 'forbidden' });
+  assert.equal((await lendOf(w, other, 'adminkey2')).ok, true);
+});
+
+test('KBOX-3 a revoked pass, an unknown pass and a control token are refused as bad_token', async (t) => {
+  const { w, pass } = await granted(t);
+  const control = w.enrol('desk', 'control');
+  w.core.meta.putGrant('adminkey1', 'desk');
+  assert.deepEqual(await lendOf(w, control, 'adminkey1'), { ok: false, code: 'bad_token' });
+  assert.deepEqual(await lendOf(w, `kbt_${'A'.repeat(43)}`, 'adminkey1'), { ok: false, code: 'bad_token' });
+  w.core.meta.revokeMachine('laptop');
+  assert.deepEqual(await lendOf(w, pass, 'adminkey1'), { ok: false, code: 'bad_token' });
+});
+
+test('KBOX-3 a rule id not in the key profile, or a key whose platform has no relay profile, is refused', async (t) => {
+  const { w, pass } = await granted(t);
+  assert.deepEqual(await lendOf(w, pass, 'adminkey1', 'accounts-list'), { ok: false, code: 'forbidden' });
+  assert.deepEqual(await lendOf(w, pass, 'adminkey1', 'no-such-rule'), { ok: false, code: 'forbidden' });
+  w.addKey({ keyref: 'plainkey1', value: Buffer.from('plain value'), platform: 'plain', grants: ['laptop'] });
+  assert.deepEqual(await lendOf(w, pass, 'plainkey1'), { ok: false, code: 'forbidden' });
+});
+
+/** Sends one JSON frame on a fresh connection and returns everything core sent before it closed. */
+async function rawExchange(socket: string, request: unknown, second?: unknown): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const conn = connect(socket);
+    const got: Buffer[] = [];
+    conn.on('data', (d: Buffer) => {
+      got.push(d);
+      if (second !== undefined) conn.write(encodeFrame(FRAME_JSON, Buffer.from(JSON.stringify(second))));
+    });
+    conn.on('error', reject);
+    conn.on('close', () => resolve(Buffer.concat(got)));
+    conn.write(encodeFrame(FRAME_JSON, Buffer.from(JSON.stringify(request))));
+  });
+}
+
+test('KBOX-3 a lend answer is one-shot: a second request on the same connection gets nothing', async (t) => {
+  const { w, pass, value } = await granted(t);
+  const request = { op: 'lend', token_hash: hashToken(pass), keyref: 'adminkey1', rule_id: 'models-list' };
+  const raw = await rawExchange(w.socket, request, request);
+  const frames = new FrameDecoder().push(raw);
+  assert.equal(frames.length, 1, 'one answer frame, then the connection closed');
+  assert.deepEqual(Buffer.from(frames[0]?.body ?? []), Buffer.from(value));
+});
+
+test('KBOX-3 a malformed request, an unknown op or an oversized frame is refused and lends nothing', async (t) => {
+  const { w, pass, c } = await granted(t);
+  for (const request of [{ op: 'lend', token_hash: hashToken(pass), keyref: 'adminkey1' }, { op: 'give', token_hash: hashToken(pass), keyref: 'adminkey1', rule_id: 'models-list' }, 'lend', { op: 'lend', token_hash: hashToken(pass), keyref: 'adminkey1', rule_id: 'models-list', extra: 1 }]) {
+    const raw = await rawExchange(w.socket, request);
+    c.assertAbsent({ answer: raw });
+    const frames = new FrameDecoder().push(raw);
+    assert.equal(frames[0]?.kind, FRAME_JSON);
+    assert.deepEqual(JSON.parse(Buffer.from(frames[0]?.body ?? []).toString()), { ok: 'false', code: 'bad_request' });
+  }
+  const oversized = await new Promise<Buffer>((resolve, reject) => {
+    const conn = connect(w.socket);
+    const got: Buffer[] = [];
+    conn.on('data', (d: Buffer) => got.push(d));
+    conn.on('error', reject);
+    conn.on('close', () => resolve(Buffer.concat(got)));
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(64 * 1024 * 1024);
+    conn.write(header);
+  });
+  c.assertAbsent({ answer: oversized });
+});
+
+test('KBOX-3 the lend socket is made 0660 whatever the umask, and a process the socket mode refuses gets no lend (relay answer: unavailable)', async (t) => {
+  const before = process.umask(0o000);
+  let world: Awaited<ReturnType<typeof granted>>;
+  try {
+    world = await granted(t);
+  } finally {
+    process.umask(before);
+  }
+  const { w, pass } = world;
+  assert.equal(statSync(w.socket).mode & 0o777, 0o660);
+  chmodSync(w.socket, 0o440);
+  try {
+    await assert.rejects(lendOf(w, pass, 'adminkey1'), (e: unknown) => e instanceof LendUnavailable);
+  } finally {
+    chmodSync(w.socket, 0o660);
+  }
+});
+
+test('KBOX-3 core down: a lend client on a socket nobody listens on fails as unavailable', async (t) => {
+  const w = await lendWorld(t);
+  await w.server.stop();
+  await assert.rejects(createLendClient(w.socket).resolve({ op: 'resolve', token_hash: '0'.repeat(64), keyref: 'adminkey1', network: NETWORK }), (e: unknown) => e instanceof LendUnavailable);
+});
+
+test('KBOX-3 resolve names the pass label and the key platform for a granted key and records the pass network once', async (t) => {
+  const { w, pass } = await granted(t);
+  const resolve = (network: string) => w.client.resolve({ op: 'resolve', token_hash: hashToken(pass), keyref: 'adminkey1', network });
+  assert.deepEqual(await resolve(NETWORK), { ok: true, label: 'laptop', platform: 'pathplat' });
+  await resolve(NETWORK);
+  const networks = w.core.events.after(0).filter((e) => e.kind === 'token.new_network');
+  assert.deepEqual(networks.map((e) => e.data), [{ label: 'laptop', network: NETWORK }]);
+  assert.deepEqual(await w.client.resolve({ op: 'resolve', token_hash: hashToken(pass), keyref: 'nosuchkey', network: NETWORK }), { ok: false, code: 'forbidden' });
+});
+
+test('KBOX-32 grants lists the admin keys granted to the pass machine with a relay profile, never another machine key and never a value', async (t) => {
+  const { w, pass, c } = await granted(t);
+  w.enrol('desktop');
+  w.addKey({ keyref: 'desktopkey', value: textValue(c.bytes), grants: ['desktop'] });
+  w.addKey({ keyref: 'masterkey1', value: textValue(c.bytes), cls: 'master', grants: ['laptop'] });
+  w.addKey({ keyref: 'hostkey001', value: textValue(c.bytes), platform: 'hostplat', grants: ['laptop'] });
+  const answer = await w.client.grants({ op: 'grants', token_hash: hashToken(pass), network: NETWORK });
+  assert.deepEqual(answer, {
+    ok: true,
+    machine: 'laptop',
+    grants: [
+      { keyref: 'adminkey1', platform: 'pathplat', name: 'KEY_ADMINKEY1', projects: ['shop'] },
+      { keyref: 'hostkey001', platform: 'hostplat', name: 'KEY_HOSTKEY001', projects: ['shop'] },
+    ],
+  });
+  c.assertAbsent({ answer: JSON.stringify(answer) });
+});
+
+test('KBOX-14 a scan session in core catches a copy of any value the box holds, a master value included, which never reaches the relay', async (t) => {
+  const { w, pass, c } = await granted(t);
+  const master = Buffer.from('MasterValueOnlyCoreHolds0123456789abcdef');
+  w.addKey({ keyref: 'masterkey1', value: master, cls: 'master' });
+  const opened = await w.client.scan({ op: 'scan', token_hash: hashToken(pass), keyref: 'adminkey1' });
+  assert.ok(opened.ok);
+  const first = await opened.session.feed(Buffer.from('{"data":"'));
+  assert.equal(first.kind, 'progress');
+  const hit = await opened.session.feed(Buffer.from(`${master.toString('base64')}"}`));
+  assert.deepEqual(hit, { kind: 'hit', reason: 'value' });
+  opened.session.close();
+  c.assertAbsent({ step: JSON.stringify(hit) });
+});
+
+test('KBOX-14 a scan session releases a clean stream whole at its end, and refuses a pass with no grant', async (t) => {
+  const { w, pass } = await granted(t);
+  const opened = await w.client.scan({ op: 'scan', token_hash: hashToken(pass), keyref: 'adminkey1' });
+  assert.ok(opened.ok);
+  await opened.session.feed(Buffer.from('{"ok":true,"items":[1,2,3]}'));
+  assert.deepEqual(await opened.session.end(), { kind: 'progress', releasable: 27 });
+  const stranger = w.enrol('stranger');
+  assert.deepEqual(await w.client.scan({ op: 'scan', token_hash: hashToken(stranger), keyref: 'adminkey1' }), { ok: false, code: 'forbidden' });
+});
+
+test('KBOX-50 a relay audit row is written closed (rule id, status, bytes, source, no query) and a withheld response raises the owner notice', async (t) => {
+  const { w } = await granted(t);
+  await w.client.audit({ label: 'laptop', source: '203.0.113.9', agent: 'claude', project: 'shop', keyref: 'adminkey1', route: 'relay', method: 'GET', rule_id: 'models-list', status: 200, bytes: 12 });
+  await w.client.audit({ label: 'laptop', source: '203.0.113.9', keyref: 'adminkey1', route: 'relay', method: 'GET', rule_id: 'models-list', status: 502, bytes: 0, code: 'withheld', reason: 'credential' });
+  const rows = w.core.audit.read(0).entries.filter((r) => r.action === 'relay.request');
+  assert.deepEqual(
+    rows.map((r) => [r.actor, r.ref, r.detail]),
+    [
+      ['laptop', 'adminkey1', { route: 'relay', method: 'GET', status: 200, bytes: 12, source: '203.0.113.9', agent: 'claude', project: 'shop', rule_id: 'models-list' }],
+      ['laptop', 'adminkey1', { route: 'relay', method: 'GET', status: 502, bytes: 0, source: '203.0.113.9', rule_id: 'models-list', code: 'withheld', reason: 'credential' }],
+    ],
+  );
+  await waitUntil(() => w.core.events.after(0).some((e) => e.kind === 'box.notice'), 'the withheld notice');
+  assert.deepEqual(w.core.events.after(0).filter((e) => e.kind === 'box.notice').map((e) => e.data), [{ code: 'credential_withheld', text: 'credential withheld' }]);
+});
