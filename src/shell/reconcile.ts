@@ -54,7 +54,7 @@ export function createReconciler(deps: ReconcileDeps): Reconciler {
       const dead = await revokeAndConfirm({ kit, platform, id: key.platformKeyId, value: undefined, master: deps.master(platform) });
       if (!dead) continue;
       deps.audit.append({ action: 'rotation.orphan_revoked', subject: run.keyref, at: deps.clock.now(), detail: { run_id: run.runId } });
-      if (run.state === 'issuing') orchestrator.restart(run.runId);
+      if (run.state === 'issuing') orchestrator.retake(run.runId);
     }
   }
 
@@ -70,11 +70,12 @@ export function createReconciler(deps: ReconcileDeps): Reconciler {
         }
         await sweepPlatform(platform, keys);
       }
-      // An unleased issuing run no listed key explains stored nothing: it goes again, unless its platform could not be listed.
+      // An unleased issuing run goes again (continued when it stored its generation, else under a new run id), unless its platform could not
+      // be listed: an unlisted orphan would be left live.
       for (const run of store.activeRuns()) {
         const platform = store.key(run.keyref)?.platform;
         if (run.state !== 'issuing' || orchestrator.isLeased(run.keyref) || platform === undefined || unlisted.has(platform)) continue;
-        orchestrator.restart(run.runId);
+        orchestrator.retake(run.runId);
       }
     },
   };

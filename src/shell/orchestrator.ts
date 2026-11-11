@@ -64,10 +64,13 @@ export interface Orchestrator {
   start(input: StartInput): RunRow;
   /** Writes a key's rows and runs its first generation to the end. Answers the status the key ended in. */
   create(key: NewKey, value?: Uint8Array): Promise<{ readonly status: 'works' | 'failed' }>;
-  /** After a start: works on every unfinished run that holds a stored generation again, re-leasing it. */
+  /** After a start: works on every unfinished run again, re-leasing it, except an `issuing` run that stored nothing (reconcile's). */
   resume(): Promise<void>;
-  /** Abandons a run that stored nothing and opens a new one for its key under a new run id. */
-  restart(runId: string): RunRow;
+  /**
+   * Takes up an unleased `issuing` run again (reconcile): continues it when its new generation is stored (KBOX-51: a crash between store and
+   * the step's write), else abandons it and opens a new run for its key under a new run id.
+   */
+  retake(runId: string): RunRow;
   /** True while this process works on a run of the key: reconcile leaves it alone. */
   isLeased(keyref: string): boolean;
   /** Resolves when every run this process works on has finished or is waiting for a clock. */
@@ -201,10 +204,15 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
   // --- steps 3 and 4: create and store ----------------------------------------------------------------------------------------
 
+  /** An `issuing` run whose new generation was never stored: a key its platform made, if any, is an orphan for reconcile. */
+  const storedNothing = (run: RunRow): boolean => run.state === 'issuing' && store.gen(run.keyref, run.genNew) === undefined;
+
   async function issue(run: RunRow, head: KeyHead, kit: PlatformKit): Promise<Next> {
     const issuer = kit.issuer;
     const info = store.keyInfo(run.keyref);
     if (issuer === undefined || info === undefined) return fail(run, 'issuing', 'no_issuer');
+    // Stored before the process stopped: the platform key is this generation's, so the run goes on and nothing is issued twice.
+    if (!storedNothing(run)) return advance(run, 'issuing');
     const made: { issued?: IssuedKey } = {};
     const created = await attempt(
       run,
@@ -230,6 +238,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       'store_failed',
     );
     if (!stored.ok) return fail(run, 'issuing', 'store_failed', { id: issued.platformKeyId, value: issued.value });
+    await point('stored');
     deps.audit.append({ action: 'key.issued', subject: run.keyref, at: now() });
     return advance(run, 'issuing');
   }
@@ -534,12 +543,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       return { status: store.key(key.keyref)?.status === 'works' ? 'works' : 'failed' };
     },
     async resume() {
-      for (const run of store.activeRuns()) if (run.state !== 'issuing') launch(run.runId);
+      for (const run of store.activeRuns()) if (!storedNothing(run)) launch(run.runId);
       await idle();
     },
-    restart(runId) {
+    retake(runId) {
       const old = store.run(runId);
       if (old === undefined) throw new ApiError('not_found');
+      if (!storedNothing(old)) {
+        launch(runId);
+        return old;
+      }
       store.update(runId, { state: 'abandoned' });
       const next = start({ keyref: old.keyref, origin: 'reconcile' });
       deps.audit.append({ action: 'rotation.restarted', subject: old.keyref, at: now(), detail: { old_run: runId, new_run: next.runId } });

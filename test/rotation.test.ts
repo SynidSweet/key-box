@@ -474,3 +474,37 @@ test('KBOX-17 a create run whose removal is refused keeps the new key unrevoked 
   assert.deepEqual(await w.live(), []);
   assert.equal(w.store.runs().at(-1)?.state, 'failed');
 });
+
+// --- a crash after the generation is stored and before the step is persisted (review M1) ------------------------------------------
+
+test('KBOX-51 a crash between storing the new generation and persisting the step is continued, not restarted: exactly one platform key is left, the tracked one', async (t) => {
+  const { w, keyref } = await seeded(t);
+  w.checkpoints.arm('stored');
+  const first = w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  assert.equal(w.checkpoints.seen.at(-1), 'stored');
+  assert.equal(w.store.run(first.runId)?.state, 'issuing', 'the run row still says issuing');
+  assert.equal(genOf(w, keyref, 2)?.status, 'pending', 'and generation 2 is stored');
+  w.checkpoints.crashAt = undefined;
+  w.build();
+  await w.orch.resume();
+  await w.reconciler.run();
+  await w.settle();
+  assert.deepEqual(w.store.runs().filter((r) => r.origin !== 'create').map((r) => [r.runId, r.state]), [[first.runId, 'done']], 'the same run finished; none was opened beside it');
+  assert.deepEqual(await w.live(), [genOf(w, keyref, 2)?.platformKeyId], 'exactly one platform key: generation 2, tracked');
+  assert.equal(w.store.gens(keyref).find((g) => g.status === 'current')?.gen, 2);
+});
+
+test('KBOX-51 reconcile alone (no resume) continues an issuing run that holds a stored generation instead of restarting it', async (t) => {
+  const { w, keyref } = await seeded(t);
+  w.checkpoints.arm('stored');
+  const first = w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.checkpoints.crashAt = undefined;
+  w.build();
+  await w.reconciler.run();
+  await w.settle();
+  assert.equal(w.store.run(first.runId)?.state, 'done');
+  assert.equal(w.store.runs().filter((r) => r.state === 'abandoned').length, 0, 'nothing was abandoned');
+  assert.deepEqual(await w.live(), [genOf(w, keyref, 2)?.platformKeyId]);
+});
