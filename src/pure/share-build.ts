@@ -209,19 +209,37 @@ export function sealEnvelope(bodyBytes: Uint8Array, signature: Uint8Array): Uint
   return utf8.encode(JSON.stringify({ format: SHARE_FORMAT, v: SHARE_V, body_b64: Buffer.from(bodyBytes).toString('base64'), sig_b64: Buffer.from(signature).toString('base64') }));
 }
 
-/** What the writer needs of a file already on disk: its version and what it covered; undefined for anything it cannot read as that. */
-export function summaryOf(envelope: Uint8Array): { readonly version: number; readonly contentKey: string } | undefined {
+/** What the writer needs of a file already on disk: its version, what it covered, and the signed bytes with their signature. */
+export interface FileSummary {
+  readonly version: number;
+  readonly contentKey: string;
+  readonly body: Uint8Array;
+  readonly signature: Uint8Array;
+}
+
+type Json = { readonly ok: true; readonly value: unknown } | { readonly ok: false };
+
+const parseJson = (text: string): Json => {
   try {
-    const outer: unknown = JSON.parse(Buffer.from(envelope).toString('utf8'));
-    const bodyB64 = typeof outer === 'object' && outer !== null && 'body_b64' in outer ? outer.body_b64 : undefined;
-    if (typeof bodyB64 !== 'string') return undefined;
-    const body: unknown = JSON.parse(Buffer.from(bodyB64, 'base64').toString('utf8'));
-    if (typeof body !== 'object' || body === null || !('header' in body) || !('coverage' in body)) return undefined;
-    const { header, coverage } = body;
-    if (typeof header !== 'object' || header === null || !('version' in header) || !('set_id' in header)) return undefined;
-    const { version, set_id: setId } = header;
-    return typeof version === 'number' && Number.isSafeInteger(version) && typeof setId === 'string' ? { version, contentKey: `${setId}:${JSON.stringify(coverage)}` } : undefined;
+    return { ok: true, value: JSON.parse(text) };
   } catch {
-    return undefined;
+    return { ok: false };
   }
+};
+
+const member = (value: unknown, name: string): unknown => (typeof value === 'object' && value !== null && name in value ? (value as Record<string, unknown>)[name] : undefined);
+
+/** The summary of a share envelope, or undefined for anything that is not one. The signature is NOT checked here. */
+export function summaryOf(envelope: Uint8Array): FileSummary | undefined {
+  const outer = parseJson(Buffer.from(envelope).toString('utf8'));
+  const bodyB64 = outer.ok ? member(outer.value, 'body_b64') : undefined;
+  const sigB64 = outer.ok ? member(outer.value, 'sig_b64') : undefined;
+  if (typeof bodyB64 !== 'string' || typeof sigB64 !== 'string') return undefined;
+  const bodyBytes = Buffer.from(bodyB64, 'base64');
+  const body = parseJson(bodyBytes.toString('utf8'));
+  const header = body.ok ? member(body.value, 'header') : undefined;
+  const version = member(header, 'version');
+  const setId = member(header, 'set_id');
+  if (!body.ok || typeof version !== 'number' || !Number.isSafeInteger(version) || typeof setId !== 'string') return undefined;
+  return { version, contentKey: `${setId}:${JSON.stringify(member(body.value, 'coverage'))}`, body: bodyBytes, signature: Buffer.from(sigB64, 'base64') };
 }
