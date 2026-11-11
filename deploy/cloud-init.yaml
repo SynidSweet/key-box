@@ -39,8 +39,11 @@ runcmd:
     curl --proto '=https' -fsSLo caddy.tar.gz "https://github.com/caddyserver/caddy/releases/download/v2.10.2/caddy_2.10.2_linux_arm64.tar.gz"
     printf '%s  node.tar.gz\n%s  caddy.tar.gz\n' "$NODE_ARCHIVE_SHA256" "$CADDY_ARCHIVE_SHA256" | sha256sum -c
     mkdir src && tar xzf src.tar.gz -C src --strip-components=1 --no-same-owner
-    # H as the box computes it (KBOX-6): one line per file, sorted bytewise, "<mode> <sha256> <path>".
-    H=$(cd src && find . -type f | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do m=0644; case $(stat -c %a "$f") in [1357]??) m=0755;; esac; printf '%s %s %s\n' "$m" "$(sha256sum < "$f" | cut -c1-64)" "$f"; done | sha256sum | cut -c1-64)
+    # H as the box computes it (KBOX-6): one line per file, sorted bytewise, "<mode> <sha256> <path>", 0755 exactly when the
+    # owner-execute bit is set (setuid or not). A tree with anything H cannot hold (not a regular file or directory, a name
+    # with a control byte or a backslash) stops the bootstrap here rather than install what was not hashed.
+    [ -z "$(cd src && find . \( \( ! -type f ! -type d \) -o -name '*[[:cntrl:]\\]*' \) -print -quit)" ]
+    H=$(cd src && find . -type f | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do m=0644; case $(stat -c %A "$f") in ???[xs]*) m=0755;; esac; printf '%s %s %s\n' "$m" "$(sha256sum < "$f" | cut -c1-64)" "$f"; done | sha256sum | cut -c1-64)
     [ "$H" = "$KB_RELEASE" ]
     R=/opt/keybox/releases/$KB_RELEASE && mkdir -p "$R/bin" && cp -a src/. "$R/"
     tar xzf node.tar.gz --strip-components=2 -C "$R/bin" node-v24.11.1-linux-arm64/bin/node && tar xzf caddy.tar.gz -C "$R/bin" caddy

@@ -3,13 +3,16 @@
 // show (the Run Command plugin command, Caddy's real header handling, the console device, the apt mirror) is UNVERIFIED
 // and reported by the builder, never run here.
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { FIXED } from '../src/pure/words.ts';
 import { parseRuntimeLock } from '../src/pure/runtime-lock.ts';
 import { coreRoutes } from '../src/main-core.ts';
 import { createUpdater } from '../src/shell/updater.ts';
-import { directives, missingDirectives } from './kit/index.ts';
+import { directives, missingDirectives, runShell, tempDir } from './kit/index.ts';
+import { releaseHash } from '../src/pure/release-hash.ts';
 import { approveWorld } from './support/approve-world.ts';
 
 const read = (path: string): string => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
@@ -100,6 +103,66 @@ test('KBOX-48 the cloud-init names commit C and hash H of release 1 and four pin
   assert.match(cloudInit, /^\s*KB_RELEASE=[0-9a-f]{64}$/m);
   for (const name of ['NODE_ARCHIVE_SHA256', 'NODE_SHA256', 'CADDY_ARCHIVE_SHA256', 'CADDY_SHA256']) assert.match(cloudInit, new RegExp(`^\\s*${name}=[0-9a-f]{64}$`, 'm'), name);
   for (const step of ['codeload.github.com', 'sha256sum -c', 'keybox-tmpfiles.conf', 'kb-install.path', 'kb-code.service', '/opt/keybox/current/src/cli/kb-code.ts setup']) assert.ok(cloudInit.includes(step), step);
+});
+
+/** The bootstrap's own lines that compute H, as cloud-init runs them: from its "H as the box computes it" comment to the check. */
+const hPipeline = (): string => {
+  const lines = cloudInit.split('\n');
+  const from = lines.findIndex((l) => l.includes('# H as the box computes it'));
+  const to = lines.findIndex((l) => l.trim() === '[ "$H" = "$KB_RELEASE" ]');
+  assert.ok(from > 0 && to > from, 'the cloud-init computes H and then checks it');
+  return lines
+    .slice(from, to)
+    .map((l) => l.trim())
+    .join('\n');
+};
+const runHPipeline = (dir: string) => runShell(`set -eu\n${hPipeline()}\nprintf '%s' "$H"`, dir);
+
+/** Writes `files` under dir/src with the given modes (chmod after writing, so the umask cannot change them). */
+const writeSrc = (dir: string, files: Readonly<Record<string, { readonly body: string; readonly mode: number }>>): void => {
+  for (const [path, f] of Object.entries(files)) {
+    const file = join(dir, 'src', path);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, f.body);
+    chmodSync(file, f.mode);
+  }
+};
+
+test('KBOX-48 the bootstrap computes the same H as the box: owner-execute bit only (setuid, group- and other-execute included), bytewise order, spaces and non-ASCII names', async (t) => {
+  const dir = await tempDir(t);
+  const files = {
+    'run.sh': { body: '#!/bin/sh\n', mode: 0o755 },
+    'README.md': { body: 'readme\n', mode: 0o644 },
+    'group-exec-only': { body: 'g\n', mode: 0o654 },
+    'other-exec-only': { body: 'o\n', mode: 0o645 },
+    'owner-exec-only': { body: 'u\n', mode: 0o700 },
+    'setuid-exec': { body: 's\n', mode: 0o4755 },
+    'setgid-exec': { body: 'sg\n', mode: 0o2755 },
+    'a.b': { body: 'dot\n', mode: 0o644 },
+    'a/b': { body: 'slash\n', mode: 0o644 },
+    'Z': { body: 'upper\n', mode: 0o644 },
+    'z': { body: 'lower\n', mode: 0o644 },
+    'with space/a b.txt': { body: 'space\n', mode: 0o644 },
+    'é.txt': { body: 'non-ascii\n', mode: 0o644 },
+  };
+  writeSrc(dir, files);
+  const run = runHPipeline(dir);
+  assert.equal(run.status, 0, run.stderr);
+  const expected = releaseHash(Object.entries(files).map(([path, f]) => ({ path, executable: (f.mode & 0o100) !== 0, sha256: createHash('sha256').update(f.body).digest('hex') })));
+  assert.equal(run.stdout, expected);
+});
+
+test('KBOX-48 the bootstrap aborts on anything in the source tree H cannot hold: a symlink, a FIFO, a name with a newline or a backslash', async (t) => {
+  for (const plant of ['symlink', 'fifo', 'newline', 'backslash'] as const) {
+    const dir = await tempDir(t);
+    writeSrc(dir, { 'README.md': { body: 'readme\n', mode: 0o644 } });
+    const src = join(dir, 'src');
+    if (plant === 'symlink') symlinkSync('README.md', join(src, 'link'));
+    else if (plant === 'fifo') assert.equal(runShell('mkfifo pipe', src).status, 0);
+    else writeFileSync(join(src, plant === 'newline' ? 'two\nlines' : 'back\\slash'), 'x\n');
+    const run = runHPipeline(dir);
+    assert.notEqual(run.status, 0, `${plant}: the bootstrap must stop, not install a tree it did not hash`);
+  }
 });
 
 test('KBOX-48 the cloud-init calls no host but the declared ones and holds no value', () => {
