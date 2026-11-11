@@ -31,7 +31,7 @@ import type { PlatformSource } from '../../src/shell/rotation-ports.ts';
 import { createUpdater } from '../../src/shell/updater.ts';
 import { FakePush } from '../fakes/push.ts';
 import { FakeTrust } from '../fakes/trust.ts';
-import { makeCertificate } from '../kit/cert.ts';
+import { makeCertificate } from '../kit/tls.ts';
 import { drive, lent } from '../kit/index.ts';
 import type { Driver } from '../kit/index.ts';
 import { softApprover } from '../kit/approver.ts';

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Key box</title>
 <link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/app.css">
 <script type="module" src="/app.js"></script>
 </head>
@@ -23,6 +24,11 @@
 <button id="window">Let this machine enrol for ten minutes</button>
 <button id="revoke" class="deny">Revoke this machine's pass</button>
 <p><button id="add-phone">Add another phone</button></p>
+<div id="new-phone" hidden>
+<p>On the new phone, open /recover and enter these words within 10 minutes.</p>
+<p id="new-phone-words" class="words"></p>
+<p>Then approve here only if the words match the new phone.</p>
+</div>
 </div>
 </main>
 </body>

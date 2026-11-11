@@ -17,6 +17,7 @@ import { ApiError } from '../pure/errors.ts';
 import { PROPOSAL_TTL_MS, decideSlot, parseRequester, pushOnOpen, requesterText, slotOf } from '../pure/slots.ts';
 import type { Requester, SlotDecision } from '../pure/slots.ts';
 import { renderPage, titleOf } from '../pure/words.ts';
+import type { Fingerprint } from '../pure/words.ts';
 import type { PageContext, Reason, UpdateChanges } from '../pure/words.ts';
 import { inTransaction } from './db.ts';
 import { insertEvent } from './events.ts';
@@ -68,6 +69,8 @@ export interface QueueItem {
   readonly kind: ActionKind;
   readonly title: string;
   readonly lines: readonly string[];
+  /** approver_add: the words to compare, apart from the sentence that names them. */
+  readonly fingerprint?: Fingerprint;
   readonly digest_b64: string;
   readonly nonce_b64: string;
   readonly expires_at: number;
@@ -243,6 +246,7 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
           kind: action.kind,
           title: page.title,
           lines: page.lines,
+          ...(page.fingerprint === undefined ? {} : { fingerprint: page.fingerprint }),
           digest_b64: Buffer.from(r.digest_hex, 'hex').toString('base64url'),
           nonce_b64: Buffer.from(nonce).toString('base64url'),
           expires_at: r.expires_at,

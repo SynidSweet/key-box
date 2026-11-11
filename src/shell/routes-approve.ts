@@ -122,6 +122,7 @@ const ASSETS: readonly (readonly [path: string, file: string, type: string])[] =
   ['/recover.js', 'recover.js', 'text/javascript; charset=utf-8'],
   ['/register.js', 'register.js', 'text/javascript; charset=utf-8'],
   ['/app.css', 'app.css', 'text/css; charset=utf-8'],
+  ['/icon.svg', 'icon.svg', 'image/svg+xml'],
 ];
 export const PAGE_HEADERS = { 'content-security-policy': "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'", 'x-content-type-options': 'nosniff' };
 export const file = (name: string, type: string): Reply => ({ raw: { type, bytes: readFileSync(new URL(name, WEB)) }, headers: PAGE_HEADERS });

@@ -9,8 +9,12 @@ p { margin: 0 0 1rem; }
 .soft { color: var(--soft); }
 .card { background: var(--card); border-radius: 14px; padding: 16px; margin: 0 0 16px; box-shadow: 0 1px 3px rgb(0 0 0 / 8%); }
 label { display: block; margin: 0 0 1rem; }
-input { display: block; width: 100%; margin-top: 4px; padding: 12px; font: inherit; border-radius: 10px; border: 0; background: var(--bg); color: var(--ink); }
+input, textarea { display: block; width: 100%; margin-top: 4px; padding: 12px; font: inherit; border-radius: 10px; border: 0; background: var(--bg); color: var(--ink); }
 button { font: inherit; padding: 12px 18px; border-radius: 10px; border: 0; background: var(--accent); color: var(--card); margin: 0 8px 8px 0; }
 button.deny { background: var(--deny); }
 button:disabled { opacity: 0.5; }
 .status { min-height: 1.5em; }
+textarea { resize: none; line-height: 1.4; }
+a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.words { font-size: 1.4rem; line-height: 1.45; font-weight: 600; letter-spacing: 0.01em; margin: 0 0 1rem; padding: 14px 16px; border-radius: 12px; background: var(--bg); overflow-wrap: normal; word-break: normal; }
+.words-label { margin: 0 0 6px; }

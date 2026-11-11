@@ -113,12 +113,12 @@ function sentences(action: Action, ctx: PageContext): string[] {
   }
 }
 
-function requesterLine(r: Requester): string {
+function requesterLine(r: Requester, action: Action): string {
   switch (r.kind) {
     case 'token':
       return `Asked for by the machine token ${r.label}.`;
     case 'box':
-      return 'Asked for by the box itself (a schedule or a platform expiry).';
+      return action.kind === 'approver_add' ? 'Asked for by the box because a new phone registered with a code from this app.' : 'Asked for by the box itself (a schedule or a platform expiry).';
     case 'enrol':
       return 'Asked for by an enrol request that carried no token.';
     case 'approver':
@@ -151,8 +151,9 @@ export interface PageContext {
 }
 
 /** The approving phone compares this line with the new phone; without a fingerprint the page says not to approve. */
+const COMPARE_LABEL = 'Compare with the new phone';
 const compareLine = (fingerprint: string | undefined): string =>
-  fingerprint === undefined ? 'The new phone\'s fingerprint could not be made here: do not approve.' : `Compare with the new phone: ${fingerprint}`;
+  fingerprint === undefined ? 'The new phone\'s fingerprint could not be made here: do not approve.' : `${COMPARE_LABEL}: ${fingerprint}`;
 
 /** The file counts and the binary changes of an update; nothing when they were not counted. */
 function changeLines(update: UpdateChanges | undefined): string[] {
@@ -162,19 +163,29 @@ function changeLines(update: UpdateChanges | undefined): string[] {
   return [files, ...update.binaries.map((b) => `New ${b.name} binary ${b.version} (sha256 ${short(b.sha256)}), official download ${b.url}`)];
 }
 
+/** The words to compare, as data: what to call them, the words, and the index of the line in `lines` that says them in a sentence. */
+export interface Fingerprint {
+  readonly label: string;
+  readonly words: string;
+  readonly at: number;
+}
+
 export interface Page {
   readonly title: string;
   readonly lines: readonly string[];
+  /** Only an approver_add whose fingerprint could be made carries one. */
+  readonly fingerprint?: Fingerprint;
 }
 
 /** The page of one approval: title, the kind's sentences, who asked, the coverage warning, and the reason set apart. */
 export function renderPage(action: Action, ctx: PageContext): Page {
-  const lines = [...sentences(action, ctx), requesterLine(ctx.requester)];
+  const lines = [...sentences(action, ctx), requesterLine(ctx.requester, action)];
   if (ctx.coverage === 'none' || ctx.coverage === null) lines.push(FIXED.noCoverage);
   if (ctx.reason !== undefined) {
     const r = ctx.requester;
     const machine = r.kind === 'token' ? r.label : r.kind === 'approver' ? r.approverId : action.kind === 'enrol' ? action.label : 'box';
     lines.push(reasonLine(machine, ctx.reason.agent, ctx.reason.text));
   }
-  return { title: titleOf(action), lines };
+  const fingerprint = action.kind === 'approver_add' && ctx.fingerprint !== undefined ? { fingerprint: { label: COMPARE_LABEL, words: ctx.fingerprint, at: lines.indexOf(compareLine(ctx.fingerprint)) } } : {};
+  return { title: titleOf(action), lines, ...fingerprint };
 }

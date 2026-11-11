@@ -220,12 +220,12 @@ async function walk(phone: Phone, demo: Demo, notes: string[]): Promise<void> {
   ok('deny update', await settled(phone, "document.querySelector('#status').textContent === 'Denied.'", 'the denial'));
   await phone.shot('after-deny-update');
   await phone.tapCardButton(phoneAdd, 'Approve');
-  ok('approve new phone (last card: the page then says Nothing waits)', await settled(phone, "['Approved.', 'Nothing waits.'].includes(document.querySelector('#status').textContent)", 'the new phone approval'));
+  ok('approve new phone (last card: Approved, nothing else waits)', await settled(phone, "document.querySelector('#status').textContent.startsWith('Approved.')", 'the new phone approval'));
   await phone.shot('after-approve-new-phone');
 
   // The tools: a machine may enrol for ten minutes; another phone's registration code.
   await phone.tap('#add-phone');
-  await phone.waitFor("document.querySelector('#status').textContent.includes('registration') || document.querySelector('#status').textContent.includes('On the new phone')", 'the registration code');
+  await phone.waitFor("document.querySelector('#new-phone-words').textContent.length > 0", 'the registration code');
   await phone.shot('add-another-phone-code');
   await phone.fill('#label', 'ws-1');
   await phone.tap('#window');
