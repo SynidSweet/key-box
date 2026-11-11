@@ -330,6 +330,13 @@ test('KBOX-54 matcher: a copy whose last byte is a backslash before a newline is
   }
 });
 
+test('KBOX-54 a copy that starts with a backslash still waiting for its line break is held, even when the form is only two bytes long', () => {
+  const form: Form = { name: 'raw', core: 'written', bytes: bytes('\\X') };
+  const data = bytes('\\\rXb');
+  const planted: Planted = { data, start: 0, end: 3 };
+  assertSafeAtEverySplit([form], planted, 0, 'two-byte form');
+});
+
 // ---------------------------------------------------------------- property: split anywhere, found exactly once, the release point never passes a copy
 
 const COPY_CHARS = [...'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.~+/=-'];
