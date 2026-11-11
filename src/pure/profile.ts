@@ -5,6 +5,7 @@ import type { PlatformEntry } from '../ports/platform.ts';
 import type { AllowRule, DenyRule, RelayProfile, SampleRequest } from '../ports/relay-profile.ts';
 import { compileTemplate, matchTemplate, queryFits } from './rule-match.ts';
 import type { Template } from './rule-match.ts';
+import { HTTP_METHODS } from './schemas.ts';
 import { canonicalPath, canonicalQuery, parseRelayTarget } from './target-parse.ts';
 import type { QueryPair, RelayTarget } from './target-parse.ts';
 
@@ -73,26 +74,66 @@ function requestOf(profile: RelayProfile, method: string, target: RelayTarget): 
 const ruleMatches = (compiled: CompiledRule, request: RelayRequest): boolean =>
   compiled.rule.method === request.method && compiled.rule.host === request.host && matchTemplate(compiled.template, request.segments) && queryFits(compiled.rule.query, request.query);
 
-function relayTargetOf(profile: RelayProfile, sample: SampleRequest, keyref: string): string | undefined {
-  if (!sample.url.startsWith('https://')) return undefined;
-  const rest = sample.url.slice('https://'.length);
+/** `https://<host><tail>` split into its host and the rest, or undefined for another scheme or an empty host. */
+function splitSample(url: string): { readonly host: string; readonly tail: string } | undefined {
+  if (!url.startsWith('https://')) return undefined;
+  const rest = url.slice('https://'.length);
   const cut = rest.search(/[/?]/);
   const host = cut < 0 ? rest : rest.slice(0, cut);
-  const tail = cut < 0 ? '' : rest.slice(cut);
-  if (!hostsOf(profile).includes(host)) return undefined;
-  return profile.origin.kind === 'fixed' ? `/r/${keyref}${tail}` : `/r/${keyref}/${host}${tail}`;
+  return host === '' ? undefined : { host, tail: cut < 0 ? '' : rest.slice(cut) };
+}
+
+function relayTargetOf(profile: RelayProfile, sample: SampleRequest, keyref: string): string | undefined {
+  const parts = splitSample(sample.url);
+  if (parts === undefined || !hostsOf(profile).includes(parts.host)) return undefined;
+  return profile.origin.kind === 'fixed' ? `/r/${keyref}${parts.tail}` : `/r/${keyref}/${parts.host}${parts.tail}`;
 }
 
 /** Any keyref the parse accepts: samples are about the path, never the key. */
 const SAMPLE_KEYREF = 'sample';
 
+/** The methods a sample may name, compared case-exactly: `OTHER` is the audit's placeholder, not a method. */
+const SAMPLE_METHODS: readonly string[] = HTTP_METHODS.filter((m) => m !== 'OTHER');
+
+/**
+ * What one mustDeny sample is. A `request` parses to one the rules can match. A `variant` is a canonicalisation variant of
+ * KBOX-13 that the one parse refuses on purpose. `unparsed` is anything else that never reaches the rules: a typo host, another
+ * scheme, a method that is not spelled exactly.
+ */
+type SampleKind = { readonly kind: 'request'; readonly request: RelayRequest } | { readonly kind: 'variant' } | { readonly kind: 'unparsed' };
+
+const UNPARSED: SampleKind = { kind: 'unparsed' };
+const VARIANT: SampleKind = { kind: 'variant' };
+
+function classifySample(sample: SampleRequest, targetOf: (sample: SampleRequest) => string | undefined, toRequest: (target: RelayTarget) => RelayRequest | undefined): SampleKind {
+  if (!SAMPLE_METHODS.includes(sample.method)) return UNPARSED;
+  const text = targetOf(sample);
+  if (text === undefined) return UNPARSED;
+  const target = parseRelayTarget(text);
+  if (!target.ok) return target.code === 'bad_path' || target.code === 'bad_query' ? VARIANT : UNPARSED;
+  const request = toRequest(target.value);
+  return request === undefined ? UNPARSED : { kind: 'request', request };
+}
+
+const classifyForProfile = (profile: RelayProfile, sample: SampleRequest): SampleKind =>
+  classifySample(sample, (s) => relayTargetOf(profile, s, `${SAMPLE_KEYREF}01`), (target) => requestOf(profile, sample.method, target));
+
+/** A denyOnly list has no profile: the host is the sample's own, and it must be a plain host name. */
+const classifyDenyOnly = (sample: SampleRequest): SampleKind =>
+  classifySample(
+    sample,
+    (s) => {
+      const parts = splitSample(s.url);
+      return parts === undefined || !HOST.test(parts.host) ? undefined : `/r/${SAMPLE_KEYREF}01${parts.tail}`;
+    },
+    (target) => ({ method: sample.method, host: '', segments: target.segments, query: target.query }),
+  );
+
 function sampleRequests(profile: RelayProfile, rules: readonly DenyRule[]): RelayRequest[] {
   const out: RelayRequest[] = [];
   for (const sample of rules.flatMap((r) => r.samples)) {
-    const text = relayTargetOf(profile, sample, `${SAMPLE_KEYREF}01`);
-    const target = text === undefined ? undefined : parseRelayTarget(text);
-    const request = target?.ok === true ? requestOf(profile, sample.method, target.value) : undefined;
-    if (request !== undefined) out.push(request);
+    const kind = classifyForProfile(profile, sample);
+    if (kind.kind === 'request') out.push(kind.request);
   }
   return out;
 }
@@ -155,6 +196,8 @@ export function refuseWidening(engine: ProfileEngine, rules: readonly AllowRule[
 export type RegistryFailure =
   | ProfileFailure
   | 'no_must_deny'
+  | 'must_deny_sample_unparsed'
+  | 'must_deny_untested'
   | 'allow_matches_must_deny'
   | 'partial_content_header'
   | 'relay_owned_header'
@@ -168,6 +211,16 @@ export type RegistryCheck = { readonly ok: true } | { readonly ok: false; readon
 
 const hasSamples = (rules: readonly DenyRule[] | undefined): boolean => rules !== undefined && rules.length > 0 && rules.every((r) => r.samples.length > 0);
 
+/** KBOX-23: every sample is a request or a deliberate variant, and each rule has at least one request, or its list tests nothing. */
+function checkSamples(rules: readonly DenyRule[], classify: (sample: SampleRequest) => SampleKind): RegistryFailure | undefined {
+  for (const rule of rules) {
+    const kinds = rule.samples.map(classify);
+    if (kinds.some((k) => k.kind === 'unparsed')) return 'must_deny_sample_unparsed';
+    if (!kinds.some((k) => k.kind === 'request')) return 'must_deny_untested';
+  }
+  return undefined;
+}
+
 function checkRelay(profile: RelayProfile): RegistryFailure | undefined {
   const requestHeaders = profile.requestHeaders.map((h) => h.toLowerCase());
   if (requestHeaders.some((h) => PARTIAL_CONTENT.has(h))) return 'partial_content_header';
@@ -175,6 +228,8 @@ function checkRelay(profile: RelayProfile): RegistryFailure | undefined {
   const compiled = compileProfile(profile);
   if (!compiled.ok) return compiled.code;
   if (!hasSamples(profile.mustDeny)) return 'no_must_deny';
+  const unparsed = checkSamples(profile.mustDeny, (sample) => classifyForProfile(profile, sample));
+  if (unparsed !== undefined) return unparsed;
   if (leakingRule(compiled.engine, profile.allow, profile.tailRules) !== undefined) return 'allow_matches_must_deny';
   return undefined;
 }
@@ -184,6 +239,8 @@ function checkEntry(entry: PlatformEntry): RegistryFailure | undefined {
   if (RELAY_DENY_ONLY.includes(entry.id)) {
     if (entry.relay !== undefined) return 'deny_only_with_relay';
     if (!hasSamples(entry.denyOnly)) return 'deny_only_without_must_deny';
+    const unparsed = checkSamples(entry.denyOnly ?? [], classifyDenyOnly);
+    if (unparsed !== undefined) return unparsed;
   }
   if (entry.relay === undefined) return undefined;
   if (entry.relay.platform !== entry.id) return 'platform_mismatch';

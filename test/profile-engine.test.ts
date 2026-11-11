@@ -105,6 +105,19 @@ test('KBOX-25 a request equal to a mustDeny sample is refused even when an allow
   assert.equal(engine.isDenied('GET', models.value), false);
 });
 
+test('KBOX-25 the engine itself denies a mustDeny sample that an allow rule would take (the runtime backstop behind the registry check), and only that sample', () => {
+  const engine = engineOf(leakyProfile);
+  const decide = (method: string, path: string): string => {
+    const target = parseRelayTarget(`/r/abc123${path}`);
+    if (!target.ok) throw new Error(`refused with ${target.code}`);
+    const decided = engine.decide(method, target.value);
+    return decided.ok ? decided.rule.id : decided.code;
+  };
+  assert.equal(decide('POST', '/v1/organization/other'), 'org-anything', 'the leaky rule does take a request that is not a sample');
+  assert.equal(decide('POST', '/v1/organization/admin_api_keys'), 'forbidden');
+  assert.equal(decide('POST', '/v1/organization/projects/proj01/api_keys'), 'forbidden');
+});
+
 test('KBOX-25 widening refusal: a proposed rule that matches a mustDeny sample is refused, naming the rule', () => {
   const engine = engineOf(pathProfile);
   const leak: AllowRule = { id: 'org-anything', method: 'POST', host: PATH_HOST, pathTemplate: '/v1/organization/{rest:**}', query: {} };
