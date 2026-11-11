@@ -24,7 +24,7 @@ Spec: `docs/spec.md`. Run units with the compound-loop driver and `-G loop/gate.
 - `src/pure/` (no I/O):
   - `webauthn.ts` (assertion check by hand: clientData type/challenge/origin/crossOrigin/topOrigin, 37-byte authData, AT/ED
     refused, rpIdHash, UP, UV, counter, ES256 over DER; `derToRaw`, `verifyEs256Raw`), `cose.ts` (strict CBOR subset, EC2 P-256
-    ES256 only, on-curve check), `challenge.ts` (the one home of every challenge: approval, view, op, paste, registration;
+    ES256 only, on-curve check), `challenge.ts` (the one home of every challenge: approval, denial (`kbox-v1-deny`), view, op, paste, registration;
     `verifyProof` = passkey AND device key of the same approver; stateless HMAC nonces bound to purpose, approval id and
     revision). Core and kb-install share these three; `test/kit` must not import them (arch check).
   - `actions.ts` (closed `Action` union of 16 kinds, `parseAction`, `PROPOSAL_ROUTE_KINDS`, `DOMAIN_NAME`), `slots.ts` (`slotOf`,
@@ -35,7 +35,10 @@ Spec: `docs/spec.md`. Run units with the compound-loop driver and `-G loop/gate.
   - `approve-core.ts` `openApproveCore(deps)`: wires approvers, approvals, machine tokens and the phone routes over `CoreParts`;
     executes grant, revoke_grant, add/remove_destination, enrol, approver_remove itself; other kinds come in `executors`.
   - `approvers.ts` (the proof check, nonces, view sessions `__Host-kb_view` 15 min, setup/recover/add/remove through the
-    TrustPort; core's table changes only after `applied`), `approvals.ts` (proposals, 14-day expiry swept lazily, decide,
+    TrustPort; core's table changes only after `applied`; an approver_add's registration code carries a `settle` callback
+    that ends its approval as done or failed: root_refused, proof_refused, code_expired, superseded, cancelled by a recovery or
+    by removing the approver who approved it; `GET /app/queue` answers `{phrase, approvals}`, the viewer's own phrase),
+    `approvals.ts` (proposals, 14-day expiry swept lazily, decide,
     kept proofs for install_update/approver_add/approver_remove), `tokens.ts` (enrol window 10 min, one enrol; signed revoke;
     new-network push), `routes-approve.ts` (`/api/proposals`, `/api/enrol`, `/api/enrol/:sha`, every phone route and asset),
     `push.ts` + `push-transport.ts` (Web Push sender, 10 s timeout, 404/410 removes), `console.ts` (root's code store:
@@ -70,7 +73,15 @@ Spec: `docs/spec.md`. Run units with the compound-loop driver and `-G loop/gate.
 
 Open items, not fixed:
 - Old approvers' push subscriptions are not removed on recovery or removal: subscriptions carry no approver link.
-- Deny signs the same approval challenge as approve (spec as written); the decision is not in the challenge.
+- The control enrol window is per label only (spec KBOX-11): the first `POST /api/enrol` with the label inside the 10 minutes
+  takes it, so an agent that polls can win the race against the real machine. The fix (the signed `enrol_window_open` operation
+  also names `token_sha256`, which the owner pastes from the machine) changes the operation shape the spec and these tests pin:
+  machine-tokens (window tests, `op` helper), proposal-routes (the three enrol cases), setup (client op challenge) and the phone
+  page. Needs the owner's decision and authorised test flips; not built.
+- Unchanged and judged harmless (kernel-approve verdict): the `ENROL_LABEL` check on `enrol_window_open`, the future-nonce
+  guard, the duplicate COSE label check, the DER zero r/s check, `records().length <= 1` in `remove`. `private.db` from before
+  kernel-approve would fail `listApprovers` (no migration; no box is deployed). The audit grows with each refused proof by
+  design (owner: no numeric caps); spent nonces are pruned after 10 minutes. `deploy/keybox.service` sets no `KB_DOMAIN` until `update`.
 - Recovery and approver_add need a real TrustPort before J5 can run against two processes; J5 runs core in-process now.
 - The phone app was never run in a real browser (no WebAuthn here); only its challenge builders and COSE extraction are tested.
 - kernel-store review items: `put()` replaces a generation via rename; `retire()` does not sweep temps; a temp under a ref over 128
@@ -103,3 +114,8 @@ Open items, not fixed:
 
 kernel-approve (KBOX-7, 8, 9, 11, 20, 22, 49, 53) on main after 76537bd: verifier, codes and kb-code, TrustPort, Web Push, the frame
 extension, approvals and slots, the phone app, recovery, machine tokens, proposal routes, main-core wiring, J5, mutants.
+Then the kernel-approve review fixes (verdict SOUND WITH FIXES): five test gaps pinned (nonce key per process, signature counter,
+view cookie flags, registration nonce spent, nonce purpose tag), the decision in the challenge (`test/support/approve-world.ts`:
+`proofFor(..., decision)`; `decide('deny')` re-signs an unchanged approval proof over the denial challenge, so older deny tests
+run as they were), the approver_add code lifecycle, the phrase in the queue, a VAPID pair that fails to decode is a fault,
+kb-code tightens an existing code directory. Open: the enrol window (above).
