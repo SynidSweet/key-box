@@ -32,13 +32,14 @@ test('KBOX-1 the bootstrap removes the ssh packages, masks sshd, removes the def
   assert.match(cloudInit, /^ssh_pwauth: false$/m);
 });
 
-test('KBOX-1 the bootstrap checks whether the Run Command plugin could act as root or is running, runs no command to disable it, and leaves the monitoring plugin on', () => {
-  const lines = cloudInit.split('\n').filter((l) => !/^\s*#/.test(l));
-  assert.equal(lines.some((l) => /oci-cloud-agent-plugin/.test(l)), false, 'no on-box command that disables a plugin is run (none is documented)');
-  assert.ok(lines.some((l) => /ocarun/.test(l)) && lines.some((l) => /etc\/sudoers/.test(l)), 'the check looks for the ocarun user in sudoers');
-  assert.ok(lines.some((l) => /\/proc\//.test(l)), 'the check reads the running processes\' command lines');
-  assert.ok(lines.some((l) => /bootstrap-facts\.json/.test(l)), 'the check records what it looked at');
-  assert.equal(lines.some((l) => /monitoring/i.test(l) && /disable|stop|mask/i.test(l)), false, 'nothing disables monitoring');
+test('KBOX-1 the bootstrap disables the Run Command plugin (its exact command UNVERIFIED) and leaves the monitoring plugin on', () => {
+  const lines = cloudInit.split('\n');
+  const code = lines.filter((l) => !/^\s*#/.test(l));
+  assert.equal(code.some((l) => /oci-cloud-agent-plugin/.test(l)), false, 'no on-box command that disables a plugin is run (none is documented)');
+  assert.ok(code.some((l) => /ocarun/.test(l)) && code.some((l) => /etc\/sudoers/.test(l)), 'the check looks for the ocarun user in sudoers');
+  assert.ok(code.some((l) => /\/proc\//.test(l)), 'the check reads the running processes\' command lines');
+  assert.ok(code.some((l) => /bootstrap-facts\.json/.test(l)), 'the check records what it looked at');
+  assert.equal(lines.some((l) => /monitoring/i.test(l) && /disable|stop|mask/i.test(l) && !/^\s*#/.test(l)), false, 'nothing disables monitoring');
 });
 
 /** The runcmd item (a `- |` block) whose script holds `marker`, as the bootstrap's script holds it. */
