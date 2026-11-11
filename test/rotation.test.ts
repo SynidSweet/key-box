@@ -968,3 +968,21 @@ test('KBOX-17 KBOX-51 a run whose platform master is ambiguous files exactly one
   assert.deepEqual(await w.live(), [oldId], 'nothing was issued without a master');
   assert.equal(w.events('rotation.failed').length, 1);
 });
+
+// --- an overlap:false run needs a current generation to set back (review N6) -----------------------------------------------------
+
+test('KBOX-17 KBOX-51 an overlap:false key with no current generation (its paste create failed) is refused a run with no_current_generation: no row, nothing set at the platform', async (t) => {
+  const w = await rotationWorld(t, { overlap: false });
+  w.destinations.a.refuse('app-b');
+  const keyref = await w.seedKey();
+  assert.equal(w.store.gens(keyref).some((g) => g.status === 'current'), false, 'the create failed: no generation is current');
+  const runs = w.store.runs().length;
+  w.trace.length = 0;
+  assert.throws(
+    () => w.orch.start({ keyref, origin: 'owner' }),
+    (e: unknown) => e instanceof ApiError && e.code === 'rejected' && JSON.stringify(e.detail) === JSON.stringify({ code: 'no_current_generation' }),
+  );
+  await w.orch.idle();
+  assert.equal(w.store.runs().length, runs, 'no run was opened');
+  assert.deepEqual(w.trace, [], 'the platform was not asked to take a value');
+});

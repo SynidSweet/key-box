@@ -669,6 +669,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     // KBOX-34: a paste-source platform cannot issue; its keys change only by a paste (a value), never by an api run.
     if (input.value === undefined && isPasteSource(deps, head.platform)) throw new ApiError('rejected', 'no_issuer');
     const genOld = store.gens(input.keyref).find((g) => g.status === 'current')?.gen ?? 0;
+    // overlap:false (review N6): the platform's one credential is set to a value the box chose, and a failure sets the current one back; with
+    // no current generation there is nothing to set back, and the box would overwrite a credential it never held.
+    if (input.value === undefined && genOld === 0 && !overlapOf(deps.platform(head.platform))) throw new ApiError('rejected', 'no_current_generation');
     const genNew = store.topGen(input.keyref) + 1;
     const runId = `run_${hex(deps.random.bytes(8))}`;
     const withValue = input.value !== undefined;
