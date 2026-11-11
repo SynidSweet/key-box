@@ -2,6 +2,7 @@
 // Every state-changing phone route takes an approver proof in its body; the view cookie alone opens nothing but reads.
 import { readFileSync } from 'node:fs';
 import type { MetaStore } from '../ports/meta.ts';
+import type { PushSubscriptions } from '../ports/push.ts';
 import { PROPOSAL_ROUTE_KINDS, ENROL_LABEL, parseAction } from '../pure/actions.ts';
 import type { Action } from '../pure/actions.ts';
 import { operationChallenge, viewChallenge } from '../pure/challenge.ts';
@@ -22,6 +23,7 @@ export interface ApproveRouteDeps {
   readonly approvers: Approvers;
   readonly tokens: MachineTokens;
   readonly meta: MetaStore;
+  readonly push: PushSubscriptions;
 }
 
 const refused = { ok: false } as const;
@@ -118,6 +120,8 @@ const ASSETS: readonly (readonly [path: string, file: string, type: string])[] =
   ['/manifest.webmanifest', 'manifest.webmanifest', 'application/manifest+json'],
   ['/setup.js', 'setup.js', 'text/javascript; charset=utf-8'],
   ['/recover.js', 'recover.js', 'text/javascript; charset=utf-8'],
+  ['/register.js', 'register.js', 'text/javascript; charset=utf-8'],
+  ['/app.css', 'app.css', 'text/css; charset=utf-8'],
 ];
 const PAGE_HEADERS = { 'content-security-policy': "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'", 'x-content-type-options': 'nosniff' };
 const file = (name: string, type: string): Reply => ({ raw: { type, bytes: readFileSync(new URL(name, WEB)) }, headers: PAGE_HEADERS });
@@ -194,6 +198,8 @@ export function approveRoutes(deps: ApproveRouteDeps): Route[] {
       query: { purpose: oneOf('view', 'op', 'register') },
       handle: ({ query }) => ({ json: { nonce_b64: b64u(approvers.nonce(noncePurpose(query.purpose))) } }),
     }),
+
+    route({ method: 'GET', path: '/app/push-key', surface: 'phone', handle: () => ({ json: { application_server_key_b64: deps.push.applicationServerKey() } }) }),
 
     route({ method: 'GET', path: '/healthz', surface: 'phone', handle: () => ({ json: { release: deps.meta.snapshot().box.release } }) }),
 

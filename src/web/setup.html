@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Set up the key box</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/app.css">
+<script type="module" src="/setup.js"></script>
+</head>
+<body>
+<main>
+<h1>Set up the key box</h1>
+<div class="card">
+<p>This phone becomes the one that approves key actions. It makes a passkey and a device key that never leaves this phone. Both are needed for every approval.</p>
+<p>If you reinstall the app or clear its data, the device key is gone and the only way back is recovery from the box's console.</p>
+<p class="soft">The box sends its traffic only to the services it needs and refuses the rest. These limits do not stop an approved update that is malicious.</p>
+</div>
+<div class="card">
+<label>The twelve words the box's console shows<input id="code" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+<label>A phrase you will recognise on paste pages<input id="phrase" autocomplete="off" maxlength="64"></label>
+<button id="go">Set up this phone</button>
+<p id="status" class="status" role="status"></p>
+</div>
+</main>
+</body>
+</html>

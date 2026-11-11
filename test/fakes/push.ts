@@ -17,4 +17,9 @@ export class FakePush implements Push, PushSubscriptions {
     this.subscriptions.push(input);
     return { ok: true };
   }
+
+  /** A fixed 65-byte point; the fake signs nothing. */
+  applicationServerKey(): string {
+    return Buffer.from(Uint8Array.of(4, ...new Uint8Array(64).fill(7))).toString('base64url');
+  }
 }

@@ -107,5 +107,5 @@ export function openApproveCore(deps: ApproveCoreDeps): ApproveCore {
     executors: { ...deps.executors, ...own },
   });
   const tokens = createMachineTokens({ meta: parts.meta, events: parts.events, approvals, push: deps.push, audit: parts.audit, clock: deps.clock });
-  return { approvals, approvers, tokens, routes: approveRoutes({ approvals, approvers, tokens, meta: parts.meta }) };
+  return { approvals, approvers, tokens, routes: approveRoutes({ approvals, approvers, tokens, meta: parts.meta, push: deps.push }) };
 }

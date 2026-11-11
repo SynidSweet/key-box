@@ -1,0 +1,9 @@
+{
+  "name": "Key box",
+  "short_name": "Key box",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#faf7f2",
+  "theme_color": "#faf7f2"
+}

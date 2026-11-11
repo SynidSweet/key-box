@@ -502,3 +502,17 @@ test('KBOX-22 send with no subscriptions does nothing and a malformed stored sub
   assert.deepEqual(w.transport.sent.map((s) => s.endpoint), [GOOD_ENDPOINTS[1]], 'the good one still gets its push');
   assert.deepEqual(w.audit.entries().map((e) => [e.action, e.detail]), [['push.failed', { code: 'bad_secret' }]]);
 });
+
+test('KBOX-22 the applicationServerKey the phone subscribes with is the public half of the key that signs every VAPID JWT, the same before and after the first send', async (t) => {
+  const w = await world(t);
+  const before = w.push.applicationServerKey();
+  assert.equal(Buffer.from(before, 'base64url').length, 65, 'an uncompressed P-256 point');
+  subscribeAll(w, [HOSTS_SUB]);
+  w.push.send({ title: 'x', kind: 'enrol' });
+  const sent = w.transport.sent[0];
+  assert.ok(sent !== undefined);
+  const { jwt, key } = parseAuthorization(sent.headers['Authorization'] ?? '');
+  assert.equal(toB64u(key), before, 'the k= of the VAPID header is the key handed to the phone');
+  assert.equal(verifyEs256(jwt, key), true);
+  assert.equal(w.push.applicationServerKey(), before);
+});

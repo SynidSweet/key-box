@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recover the key box</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/app.css">
+<script type="module" src="/recover.js"></script>
+</head>
+<body>
+<main>
+<h1>Recover or add a phone</h1>
+<div class="card">
+<p>With the twelve words from the box's console, this phone becomes the only approver and every other phone stops approving.</p>
+<p>With the words an approving phone was shown when it added a phone, this phone joins as one more approver.</p>
+</div>
+<div class="card">
+<label>The twelve words<input id="code" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+<label>A phrase you will recognise on paste pages<input id="phrase" autocomplete="off" maxlength="64"></label>
+<button id="recover">Recover with the console words</button>
+<button id="add">Join with words from another phone</button>
+<p id="status" class="status" role="status"></p>
+</div>
+</main>
+</body>
+</html>

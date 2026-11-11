@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Key box</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/app.css">
+<script type="module" src="/app.js"></script>
+</head>
+<body>
+<main>
+<h1>Key box</h1>
+<div class="card">
+<p>Open the list of what waits for your approval. Your passkey and this phone's device key are both asked for.</p>
+<button id="open">Open</button>
+<p id="status" class="status" role="status"></p>
+</div>
+<div id="queue"></div>
+<div id="tools" class="card" hidden>
+<label>A machine's label<input id="label" autocomplete="off" spellcheck="false" maxlength="64"></label>
+<button id="window">Let this machine enrol for ten minutes</button>
+<button id="revoke" class="deny">Revoke this machine's pass</button>
+<p><button id="add-phone">Add another phone</button></p>
+</div>
+</main>
+</body>
+</html>

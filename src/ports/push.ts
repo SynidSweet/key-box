@@ -27,6 +27,8 @@ export type SubscribeResult = { readonly ok: true } | { readonly ok: false; read
 export interface PushSubscriptions {
   /** Accepts an endpoint only over https with a host in `src/data/push-hosts.json`, and only well-formed keys. */
   subscribe(input: PushSubscriptionInput): SubscribeResult;
+  /** The box's VAPID public key (base64url, 65-byte uncompressed point): the applicationServerKey the phone subscribes with. */
+  applicationServerKey(): string;
 }
 
 /** The one outside call: one POST to a push service. Answers the HTTP status, or rejects when the call failed or was aborted. */

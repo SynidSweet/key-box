@@ -113,6 +113,10 @@ export function createPush(deps: PushDeps): Push & PushSubscriptions {
       return { ok: true };
     },
 
+    applicationServerKey(): string {
+      return b64u(vapidKeys().publicKey);
+    },
+
     send(message: PushMessage): void {
       try {
         const subs = deps.store.listPushSubscriptions();
