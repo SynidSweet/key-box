@@ -7,6 +7,7 @@ import type { Clock, Scheduler } from '../ports/clock.ts';
 import type { PrivateStore, PushSubscriptionRow } from '../ports/private.ts';
 import type { Push, PushMessage, PushSubscriptionInput, PushSubscriptions, PushTransport, SubscribeResult } from '../ports/push.ts';
 import type { Random } from '../ports/random.ts';
+import { ApiError } from '../pure/errors.ts';
 import { encryptPayload, vapidAuthorization } from '../pure/pushcrypto.ts';
 import type { P256KeyPair } from '../pure/pushcrypto.ts';
 import { decodeBase64Url, parseSubscription } from '../pure/pushsub.ts';
@@ -61,9 +62,13 @@ export function createPush(deps: PushDeps): Push & PushSubscriptions {
   /** The box's one VAPID key pair: made at the first send, then read back from the store. */
   function vapidKeys(): P256KeyPair {
     const stored = deps.store.getVapidKeyPair();
-    const privateKey = stored === undefined ? undefined : decodeBase64Url(stored.privateKey);
-    const publicKey = stored === undefined ? undefined : decodeBase64Url(stored.publicKey);
-    if (privateKey !== undefined && publicKey !== undefined) return { privateKey, publicKey };
+    if (stored !== undefined) {
+      const privateKey = decodeBase64Url(stored.privateKey);
+      const publicKey = decodeBase64Url(stored.publicKey);
+      // A stored pair that will not decode is a fault to show, never a reason to make a new one: every subscription is bound to the old public key.
+      if (privateKey === undefined || publicKey === undefined) throw new ApiError('internal');
+      return { privateKey, publicKey };
+    }
     const made = newKeyPair(deps.random);
     deps.store.putVapidKeyPair({ privateKey: b64u(made.privateKey), publicKey: b64u(made.publicKey) });
     return made;

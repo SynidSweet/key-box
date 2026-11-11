@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import type { PrivateStore } from '../src/ports/private.ts';
 import type { Push, PushSubscriptionInput, PushSubscriptions, PushTransport } from '../src/ports/push.ts';
+import { ApiError } from '../src/pure/errors.ts';
 import { encryptPayload, vapidAuthorization } from '../src/pure/pushcrypto.ts';
 import type { P256KeyPair } from '../src/pure/pushcrypto.ts';
 import { AUDIT_SCHEMAS, isAuditAction, parseObject } from '../src/pure/schemas.ts';
@@ -563,4 +564,16 @@ test('KBOX-22 a closed-schema walk of every approval-flow response, event, push 
   for (const [i, e] of w.parts.events.after(0).entries()) urlMembers(e, `event[${i}]`, found);
   assert.deepEqual(found, ['meta.box.oidc_issuer']);
   assert.ok(bodies.some(([, b]) => JSON.stringify(b).includes('evil.example')), 'control: the reason text with its link is in the queue, as a sentence');
+});
+
+test('KBOX-22 a stored VAPID pair that does not decode is never replaced (that would orphan every subscription): the key is refused, a send audits store_failed, the row stays', async (t) => {
+  const w = await world(t);
+  subscribeAll(w, [HOSTS_SUB]);
+  const bad = { privateKey: '***', publicKey: '***' };
+  w.store.putVapidKeyPair(bad);
+  assert.throws(() => w.push.applicationServerKey(), (e: unknown) => e instanceof ApiError && e.code === 'internal');
+  w.push.send({ title: 'x', kind: 'enrol' });
+  assert.deepEqual(w.store.getVapidKeyPair(), bad, 'the stored row is untouched');
+  assert.equal(w.transport.sent.length, 0, 'nothing was signed with a made-up key');
+  assert.ok(w.audit.entries().some((e) => e.action === 'push.failed' && e.detail?.['code'] === 'store_failed'));
 });
