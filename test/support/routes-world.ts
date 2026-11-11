@@ -84,6 +84,7 @@ export async function routesWorld(t: TestContext): Promise<RoutesWorld> {
       revoke: 'paste',
       selfRotate: false,
       overlap: true,
+      set: 'none',
       revealOnce: false,
       scopeSchema: { fields: ['items'] },
       shape: { prefix: 'pk-', alphabet: 'hex', coreLength: { min: 32, max: 32 }, random: true },

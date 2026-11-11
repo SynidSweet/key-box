@@ -35,6 +35,31 @@ const ALPHABETS: Readonly<Record<Alphabet, RegExp>> = {
   base64url: /^[0-9A-Za-z_-]*$/,
 };
 
+/** The characters of each alphabet, for a value the box mints; `ALPHABETS` above is the check every minted value passes (tested as a property). */
+const CHARACTERS: Readonly<Record<Alphabet, string>> = {
+  hex: '0123456789abcdef',
+  base62: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',
+  base64: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',
+  base64url: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_',
+};
+
+/**
+ * KBOX-51, overlap:false (design §5.2): a value the box chooses for a platform that takes one. The prefix, then the longest core the shape
+ * allows, each character drawn evenly from its alphabet (bytes at or above the largest multiple of its size are drawn again). `draw` is the
+ * Random port's `bytes`.
+ */
+export function mintValue(shape: KeyShape, draw: (n: number) => Uint8Array): string {
+  const characters = CHARACTERS[shape.alphabet];
+  const even = 256 - (256 % characters.length);
+  let core = '';
+  while (core.length < shape.coreLength.max) {
+    for (const byte of draw(shape.coreLength.max - core.length)) {
+      if (byte < even && core.length < shape.coreLength.max) core += characters.charAt(byte % characters.length);
+    }
+  }
+  return (shape.prefix ?? '') + core;
+}
+
 /** The adapter's strict shape check: the prefix, then a core of the alphabet within the core length. Nothing is trimmed. */
 export function matchesShape(shape: KeyShape, value: string): boolean {
   const prefix = shape.prefix ?? '';

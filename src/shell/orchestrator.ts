@@ -13,16 +13,19 @@ import type { Random } from '../ports/random.ts';
 import type { KeyClass, KeyLocation, Lent } from '../ports/types.ts';
 import type { Vault } from '../ports/vault.ts';
 import { ApiError } from '../pure/errors.ts';
-import { admitDestination } from '../pure/class.ts';
+import { admitDestination, mintValue } from '../pure/class.ts';
 import { intentName, nextStep, retryDelayMs } from '../pure/rotation-machine.ts';
 import type { Step } from '../pure/rotation-machine.ts';
 import { revokeAndConfirm } from './revoke-confirm.ts';
+import { setterOf } from './rotation-ports.ts';
 import type { DestinationKit, PlatformKit, PlatformSource, Point } from './rotation-ports.ts';
 import type { DestinationRow, KeyHead, Receipt, RotationStore, RunOrigin, RunRow } from './rotation-store.ts';
 
 const HOUR_MS = 3600_000;
 /** The destination kind that is a delivery to the workstation, not an adapter (KBOX-34). */
 const WORKSTATION = 'workstation';
+/** The receipt kind of an overlap:false platform taking the new value: its intent is written before the set, and a rollback sets the old one back. */
+const PLATFORM_SET = 'platform_set';
 
 export interface NewKey {
   readonly keyref: string;
@@ -214,7 +217,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     if (head === undefined || info === undefined || kit === undefined) return fail(run, run.state === 'rolling_back' ? 'rollback' : run.state, 'no_adapter');
     switch (run.state) {
       case 'issuing':
-        return issue(run, head, kit);
+        return overlapOf(kit) ? issue(run, head, kit) : setNew(run, head, kit);
       case 'verifying':
         return verifyNew(run, head, kit, 'verifying', 'verify');
       case 'pushing':
@@ -298,6 +301,45 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     );
     if (!stored.ok) return fail(run, 'issuing', 'store_failed', { id: issued.platformKeyId, value: issued.value });
     await point('stored');
+    deps.audit.append({ action: 'key.issued', subject: run.keyref, at: now() });
+    return advance(run, 'issuing');
+  }
+
+  /**
+   * overlap:false (design §5.2: "set new"): the box chooses the value and stores it as generation N+1 BEFORE any platform call, so it is never
+   * lost; then the platform takes it and stops taking the old one. The set's intent receipt is written first: a rollback sets the old value
+   * back at the platform whatever the set answered. A generation stored before a restart is set again (the set is safe to repeat).
+   */
+  async function setNew(run: RunRow, head: KeyHead, kit: PlatformKit): Promise<Next> {
+    const set = setterOf(kit.issuer);
+    const info = store.keyInfo(run.keyref);
+    const shape = kit.issuer?.capabilities().shape;
+    if (set === undefined || info === undefined || shape === undefined) return fail(run, 'issuing', 'overlap_needs_set');
+    if (storedNothing(run)) {
+      const stored = await attempt(
+        run,
+        'issuing',
+        () => {
+          const bytes = Buffer.from(mintValue(shape, (n) => deps.random.bytes(n)), 'utf8');
+          try {
+            deps.vault.put(run.keyref, run.genNew, bytes);
+          } finally {
+            bytes.fill(0);
+          }
+          store.putGen({ keyref: run.keyref, gen: run.genNew, status: 'pending', platformKeyId: null, location: info.location });
+          return Promise.resolve();
+        },
+        'store_failed',
+      );
+      if (!stored.ok) return fail(run, 'issuing', 'store_failed');
+      await point('stored');
+    }
+    const value = lendOrUndefined(run.keyref, run.genNew);
+    if (value === undefined) return fail(run, 'issuing', 'store_failed');
+    store.intendPush(run.runId, PLATFORM_SET, head.platform);
+    const taken = await attempt(run, 'issuing', () => set(value, info.location, deps.master(head.platform)), 'set_failed');
+    if (!taken.ok) return fail(run, 'issuing', 'set_failed');
+    store.putReceipt(run.runId, PLATFORM_SET, head.platform, { pushed: true });
     deps.audit.append({ action: 'key.issued', subject: run.keyref, at: now() });
     return advance(run, 'issuing');
   }
@@ -508,6 +550,13 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
    * False while the destination holds (or may hold) the new value.
    */
   async function undo(run: RunRow, head: KeyHead, receipt: Receipt, old: Lent | undefined, master: Lent): Promise<boolean> {
+    if (receipt.kind === PLATFORM_SET) {
+      // overlap:false: the platform took the new value and dropped the old one; it takes the old one back, which the vault still holds. A
+      // first generation has no old value to set, so the platform keeps the new one and the run holds (the value stays in the vault).
+      const set = setterOf(deps.platform(head.platform)?.issuer);
+      if (set === undefined || old === undefined) return false;
+      return (await attempt(run, 'rollback', () => set(old, store.keyInfo(run.keyref)?.location ?? {}, master), 'reset_refused')).ok;
+    }
     const dk = deps.destination(receipt.kind);
     if (dk === undefined) return false;
     const target = { kind: dk.destination.kind, id: receipt.target };

@@ -7,6 +7,11 @@ export interface IssuerCapabilities {
   readonly selfRotate: boolean;
   /** Can old and new be valid at once (false: a database password). */
   readonly overlap: boolean;
+  /**
+   * Can the platform take a value the box chose (`Issuer.set`): what an `overlap: false` platform needs, so a failed run can set the old
+   * value back (design §5.2). An `overlap: false` platform without it is refused at configuration (`overlap_needs_set`).
+   */
+  readonly set: 'api' | 'none';
   /** The value is only in the create response. */
   readonly revealOnce: boolean;
   readonly scopeSchema: ScopeSchema;
@@ -31,6 +36,11 @@ export interface Issuer {
   issue(req: IssueRequest, intentName: string, master: Lent): Promise<IssuedKey>;
   /** A 404 is 'absent' and is not proof: the orchestrator confirms. */
   revoke(id: PlatformKeyId, master: Lent): Promise<'revoked' | 'absent'>;
+  /**
+   * Present exactly when `capabilities().set` is `api`: sets the platform's one credential at `at` to `value`; the value it held before stops
+   * working. "Make it so": safe to repeat.
+   */
+  set?(value: Lent, at: KeyLocation, master: Lent): Promise<void>;
 }
 
 export interface PlatformKeyInfo {

@@ -3,7 +3,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
-import { bytesOf } from './kit/index.ts';
+import { bytesOf, lent, seededRandom } from './kit/index.ts';
+import { FakePlatformWorld } from './fakes/platform.ts';
+import { newKeyOf } from '../src/shell/new-key.ts';
+import type { PlatformSource } from '../src/shell/rotation-ports.ts';
 import { ApiError } from '../src/pure/errors.ts';
 import { HOUR, MINUTE, rotationWorld } from './support/rotation-world.ts';
 import type { RotationWorld, WorldOptions } from './support/rotation-world.ts';
@@ -644,4 +647,61 @@ test('KBOX-51 with no verifier call, a lister that answers for another region th
   w.clock.advance(2 * MINUTE);
   await w.orch.idle();
   assert.equal(genOf(w, keyref, 1)?.status, 'retired');
+});
+
+// --- overlap:false: the platform takes a value the box chose (review M5) -----------------------------------------------------------
+
+const platformTakes = async (w: RotationWorld, value: string): Promise<string> =>
+  w.platform.verifier.verify(lent(Buffer.from(value), 'probe:1'), { platform: 'fake' });
+
+test('KBOX-51 overlap:false sets a value the box chose at the platform, which stops taking the old one, then pushes and redeploys at once and needs no revoke', async (t) => {
+  const { w, keyref, oldValue } = await seeded(t, { overlap: false });
+  w.trace.length = 0;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  assert.deepEqual(w.trace, ['set', 'verify', 'push:app-a', 'push:app-b', 'redeploy:app-a', 'redeploy:app-b', 'verify', 'verify']);
+  assert.equal(w.store.activeRuns().length, 0, 'done at once: no clock was advanced');
+  const newValue = await w.valueOf(keyref, 2);
+  assert.deepEqual([await platformTakes(w, newValue), await platformTakes(w, oldValue)], ['ok', 'rejected']);
+  assert.deepEqual(heldBy(w), [newValue, newValue]);
+  assert.equal(genOf(w, keyref, 1)?.status, 'retired', 'confirmed dead by the verifier rejecting it');
+});
+
+test('KBOX-17 overlap:false rollback sets the old value back at the platform, which had stopped taking it, and in every destination', async (t) => {
+  const { w, keyref, oldValue } = await seeded(t, { overlap: false });
+  let oldTakenAfterPush: string | undefined;
+  w.checkpoints.hook = async (point) => {
+    if (point === 'pushing') oldTakenAfterPush = await platformTakes(w, oldValue);
+  };
+  w.destinations.redeployer.failNext();
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.equal(oldTakenAfterPush, 'rejected', 'the platform really stopped taking the old value once the new one was set');
+  assert.deepEqual(heldBy(w), [oldValue, oldValue]);
+  assert.equal(await platformTakes(w, oldValue), 'ok', 'the platform takes the old value again');
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+  assert.equal(genOf(w, keyref, 2)?.status, 'failed');
+  assert.equal(genOf(w, keyref, 1)?.status, 'current');
+});
+
+test('KBOX-51 an overlap:false platform that cannot take a chosen value is refused at configuration with overlap_needs_set', () => {
+  const caps = (set: 'api' | 'none') => ({ ...new FakePlatformWorld(seededRandom(3)).issuer.capabilities(), overlap: false, set });
+  const sourceWith = (set: 'api' | 'none'): PlatformSource => ({
+    platform: () => ({
+      issuer: { platform: 'fake', capabilities: () => caps(set), issue: () => Promise.reject(new Error('unused')), revoke: () => Promise.resolve('absent' as const), ...(set === 'api' ? { set: () => Promise.resolve() } : {}) },
+    }),
+    destination: () => undefined,
+    master: () => new FakePlatformWorld(seededRandom(3)).master(),
+  });
+  const action = { kind: 'add_key', platform: 'fake', name: 'DB_PASSWORD', projects: ['shop'], scope: { items: ['read'] } } as const;
+  assert.throws(() => newKeyOf(action, sourceWith('none')), (e: unknown) => e instanceof ApiError && e.code === 'rejected' && JSON.stringify(e.detail) === JSON.stringify({ code: 'overlap_needs_set' }));
+  assert.equal(newKeyOf(action, sourceWith('api')).keyref, 'fake/shop/DB_PASSWORD');
+});
+
+test('KBOX-51 a run on an overlap:false platform that cannot take a chosen value fails before any platform call', async (t) => {
+  const w = await rotationWorld(t, { overlap: false, settable: false });
+  const created = await w.orch.create(w.newKey());
+  assert.equal(created.status, 'failed');
+  assert.deepEqual(w.trace, [], 'nothing was issued, set or pushed');
+  assert.deepEqual(await w.live(), []);
 });

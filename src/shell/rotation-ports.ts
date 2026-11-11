@@ -17,6 +17,18 @@ export interface PlatformKit {
   readonly keyPageUrl?: string;
 }
 
+type SetValue = NonNullable<Issuer['set']>;
+
+/**
+ * The issuer's `set` when it both declares the capability and has the call (neither alone is trusted), bound to the issuer: what an
+ * `overlap: false` platform needs (KBOX-51, design §5.2). Undefined otherwise.
+ */
+export function setterOf(issuer: Issuer | undefined): SetValue | undefined {
+  const set = issuer?.set;
+  if (issuer === undefined || set === undefined || issuer.capabilities().set !== 'api') return undefined;
+  return (value, at, master) => set.call(issuer, value, at, master);
+}
+
 export interface DestinationKit {
   readonly destination: Destination;
   readonly redeployer?: Redeployer;

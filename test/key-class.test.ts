@@ -1,8 +1,9 @@
 // KBOX-15 and KBOX-16: a key's class is computed and never lowered by a caller; admin and master keys go only to runtime destinations.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { checkProperty, seedFor } from './kit/index.ts';
 import type { KeyClass, KeyShape } from '../src/ports/types.ts';
-import { admitDestination, classOf, keyrefOf, matchesShape, raiseClass } from '../src/pure/class.ts';
+import { admitDestination, classOf, keyrefOf, matchesShape, mintValue, raiseClass } from '../src/pure/class.ts';
 
 const RANK: readonly KeyClass[] = ['ordinary', 'admin', 'master'];
 
@@ -54,4 +55,16 @@ test('KBOX-12 the strict shape check: prefix, core alphabet and core length, eac
   assert.equal(matchesShape({ ...hexShape, prefix: null }, '0123abcd'), true);
   assert.equal(matchesShape({ ...hexShape, alphabet: 'base64url', coreLength: { min: 3, max: 6 } }, 'fk-a_-'), true);
   assert.equal(matchesShape({ ...hexShape, alphabet: 'base62', coreLength: { min: 3, max: 6 } }, 'fk-a_-'), false);
+});
+
+test('KBOX-51 a value the box mints for a platform that takes a chosen value (overlap:false) always fits the platform shape, and two mints differ', () => {
+  const alphabets = ['hex', 'base62', 'base64', 'base64url'] as const;
+  checkProperty(seedFor(process.env), 200, (rng) => {
+    const min = 1 + rng.int(40);
+    const shape: KeyShape = { prefix: rng.int(2) === 0 ? null : 'db_', alphabet: alphabets[rng.int(alphabets.length)] ?? 'hex', coreLength: { min, max: min + rng.int(40) }, random: true };
+    const one = mintValue(shape, rng.bytes);
+    assert.equal(matchesShape(shape, one), true, `${JSON.stringify(shape)} ${one}`);
+    assert.equal(one.length, (shape.prefix ?? '').length + shape.coreLength.max, 'the longest core the shape allows');
+    if (shape.coreLength.max >= 16) assert.notEqual(mintValue(shape, rng.bytes), one);
+  });
 });

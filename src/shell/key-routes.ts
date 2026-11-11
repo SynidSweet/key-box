@@ -11,7 +11,7 @@ import type { Parsed } from '../pure/schemas.ts';
 import type { Approvals } from './approvals.ts';
 import { parsedRoute, route } from './http.ts';
 import type { Route } from './http.ts';
-import { newKeyOf } from './new-key.ts';
+import { capabilitiesFor, newKeyOf } from './new-key.ts';
 import type { RotateKey } from './new-key.ts';
 import type { Orchestrator } from './orchestrator.ts';
 import type { Paste } from './paste.ts';
@@ -80,8 +80,7 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
 
   /** The adapters and the class of a request, or the reason it cannot be issued. */
   const classify = (platform: string, items: readonly string[]): { readonly klass: KeyClass; readonly create: 'api' | 'paste' } => {
-    const caps = deps.source.platform(platform)?.issuer?.capabilities();
-    if (caps === undefined) throw rejected('unknown_platform');
+    const caps = capabilitiesFor(deps.source, platform);
     return { klass: classOf(caps.classify({ items }), undefined), create: caps.create };
   };
 

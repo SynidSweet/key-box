@@ -50,6 +50,8 @@ export interface WorldOptions {
   /** false: the platform has no verifier call, so a revoke is confirmed by the lister. */
   readonly verifier?: boolean;
   readonly klass?: KeyClass;
+  /** With `overlap: false`, whether the platform can take a value the box chose (true unless false). */
+  readonly settable?: boolean;
 }
 
 export interface RotationWorld {
@@ -107,9 +109,10 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
   const regionOf = new Map<PlatformKeyId, string>();
   const recording = { a: new RecordingDestination(trace), redeployer: new RecordingRedeployer(trace) };
 
+  const settable = options.overlap === false && options.settable !== false;
   const issuer: Issuer = {
     platform: 'fake',
-    capabilities: (): IssuerCapabilities => ({ ...platform.issuer.capabilities(), overlap: options.overlap ?? true, classify: classifyBy }),
+    capabilities: (): IssuerCapabilities => ({ ...platform.issuer.capabilities(), overlap: options.overlap ?? true, set: settable ? 'api' : 'none', classify: classifyBy }),
     issue: async (req: IssueRequest, intentName: string, master: Lent): Promise<IssuedKey> => {
       trace.push('issue');
       const row = store.runs().find((r) => r.intentName === intentName);
@@ -124,6 +127,16 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
       if (faults.revoke404) return 'absent';
       return platform.issuer.revoke(id, master);
     },
+    // overlap:false: the platform holds one credential and takes the value the box chose; the one it held before stops working at once.
+    ...(settable
+      ? {
+          set: async (value: Lent, at: KeyLocation, master: Lent): Promise<void> => {
+            void at;
+            trace.push('set');
+            await platform.set(value, master);
+          },
+        }
+      : {}),
   };
   const lister: KeyLister = {
     list: async (master: Lent): Promise<PlatformKeyInfo[]> => (await platform.lister.list(master)).map((k) => ({ ...k, location: { region: regionOf.get(k.platformKeyId) ?? 'eu' } satisfies KeyLocation })),
