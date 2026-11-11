@@ -16,7 +16,7 @@ if (pathsFile !== undefined) {
   process.stdout.write(`${limit ?? 'no limit line'}\n`);
   await runInstaller({
     paths,
-    units: { restart: () => Promise.resolve(), healthCheck: () => Promise.resolve(true) },
+    units: { restart: () => Promise.resolve(), healthCheck: () => Promise.resolve(true), selfCheck: () => Promise.resolve(true) },
     clock: systemClock,
     wordlist,
     domain: undefined,

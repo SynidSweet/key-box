@@ -11,6 +11,8 @@ import { softApprover } from './kit/approver.ts';
 import { runShell } from './kit/index.ts';
 import { BOOT, COMMIT, NODE_BIN, CADDY_BIN, RELEASE_0, addActionOf, hashOf, installWorld, lockFor, sha256Hex } from './support/install-world.ts';
 import type { InstallWorld, Tree } from './support/install-world.ts';
+import type { ReleaseUnits } from '../src/shell/installer.ts';
+import { systemdUnits } from '../src/shell/systemd.ts';
 
 const RELEASE_1: Tree = { 'runtime.lock': lockFor(NODE_BIN, CADDY_BIN), 'src/main-core.ts': 'new core\n', 'src/cli/kb-install.ts': 'installer\n', 'README.md': 'v1\n', 'run.sh': { body: '#!/bin/sh\n', exec: true } };
 
@@ -500,6 +502,56 @@ test('KBOX-6 a failure after the switch still rolls back: the hook after step 5 
   });
   assert.equal(w.result(h), 'rolled_back');
   assert.equal(w.current(), w.h0);
+});
+
+// --- the new release's own kb-install must load before the release counts as healthy ---------------------------------
+
+/** A release whose kb-install answers `--self-check` by loading what it imports and exiting 0. */
+const SELF_CHECKING: Tree = {
+  ...RELEASE_1,
+  'src/cli/kb-install.ts': "import { ok } from './part.ts';\nif (process.argv[2] === '--self-check') process.exitCode = ok;\n",
+  'src/cli/part.ts': 'export const ok = 0;\n',
+};
+
+/** The real self-check of systemd.ts, with this test's Node standing in for the release's pinned bin/node. */
+const realSelfCheck = (w: InstallWorld): ReleaseUnits['selfCheck'] =>
+  systemdUnits({ systemctl: '/bin/false', units: [], healthSockets: [], clock: w.clock, wait: () => Promise.resolve(), nodeOf: () => process.execPath }).selfCheck;
+
+test('KBOX-6 a release whose kb-install, or a module it imports, fails to load is rolled back: its own kb-install runs a no-op self-check before the release counts as healthy', async (t) => {
+  const cases = [
+    ['an import of kb-install throws', { ...SELF_CHECKING, 'src/cli/part.ts': "throw new Error('a module kb-install imports fails to load');\n" }, 'rolled_back'],
+    ['kb-install itself does not parse', { ...SELF_CHECKING, 'src/cli/kb-install.ts': 'import { ok from;\n' }, 'rolled_back'],
+    ['control: a kb-install that loads', SELF_CHECKING, 'installed'],
+  ] as const;
+  for (const [name, tree, expected] of cases) {
+    const w = await installWorld(t);
+    w.units.checkSelf = realSelfCheck(w);
+    const h = w.stage(tree);
+    w.installRequest(h);
+    await w.run();
+    assert.equal(w.result(h), expected, name);
+    assert.deepEqual(w.units.selfChecks.map((c) => c.release), [join(w.paths.releases, h)], `${name}: the new release's own kb-install was checked`);
+    assert.equal(w.current(), expected === 'installed' ? h : w.h0, name);
+  }
+});
+
+// The test's own timeout is the oracle that the check did not wait for a process that never ends.
+test('KBOX-6 the self-check is bounded: a kb-install that never exits is killed at the bound and fails', { timeout: 20_000 }, async (t) => {
+  const w = await installWorld(t);
+  const release = join(w.root, 'hangs');
+  mkdirSync(join(release, 'src/cli'), { recursive: true });
+  writeFileSync(join(release, 'src/cli/kb-install.ts'), 'setInterval(() => undefined, 1000);\n');
+  assert.equal(await realSelfCheck(w)(release, w.clock.now() + 300), false);
+});
+
+test('KBOX-6 kb-install --self-check loads every module and exits 0 without touching any path it is given', async (t) => {
+  const w = await installWorld(t);
+  const gone = join(w.root, 'not-made');
+  const env = { KB_STAGING_DIR: join(gone, 'staging'), KB_RELEASES_DIR: join(gone, 'releases'), KB_CURRENT: join(gone, 'current'), KB_TRUST_FILE: join(gone, 'trust.json'), KB_CODES_DIR: join(gone, 'codes'), KB_INSTALL_RESULTS: join(gone, 'results'), KB_BOOT_ID_FILE: join(gone, 'boot_id'), KB_SYSTEMCTL: '/bin/false' };
+  const run = spawnSync(process.execPath, [new URL('../src/cli/kb-install.ts', import.meta.url).pathname, '--self-check'], { env, encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(existsSync(gone), false, 'nothing was made');
+  assert.equal(run.stdout, '', 'it answered no request');
 });
 
 // --- time: every phase inside the unit's TimeoutStartSec, and a kill mid-install -------------------------------------

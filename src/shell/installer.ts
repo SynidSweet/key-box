@@ -49,6 +49,9 @@ export interface ReleaseUnits {
   restart(until: number): Promise<void>;
   /** True when both processes answer `GET /healthz` with this release within 60 s of the restart and before `until`. */
   healthCheck(release: string, until: number): Promise<boolean>;
+  /** True when the kb-install of the release in `releaseDir` loads every module it imports and exits 0 in its no-op
+   * `--self-check` mode before `until`: a release whose root installer cannot start must never stay current. */
+  selfCheck(releaseDir: string, until: number): Promise<boolean>;
 }
 
 /** Test seams between the steps of the safe copy, after it and after the switch. Production passes none. */
@@ -377,7 +380,8 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     hooks.afterSwitch?.();
     const healthy = await deps.units
       .restart(deps.clock.now() + RESTART_WITHIN_MS)
-      .then(() => deps.units.healthCheck(h, runDeadline - RESTART_WITHIN_MS))
+      .then(() => deps.units.selfCheck(release, runDeadline - RESTART_WITHIN_MS))
+      .then((loads) => loads && deps.units.healthCheck(h, runDeadline - RESTART_WITHIN_MS))
       .catch(() => false);
     if (!healthy) {
       switchCurrent(h0);

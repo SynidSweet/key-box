@@ -91,6 +91,10 @@ export interface FakeUnits extends ReleaseUnits {
   healthy: boolean;
   /** Called by each health check with its bound, e.g. to let it use all the time it is given. */
   onHealth: ((until: number | undefined) => void) | undefined;
+  /** Each release directory whose kb-install self-check was run, with its bound, in order. */
+  readonly selfChecks: { readonly release: string; readonly until: number }[];
+  /** The self-check to run instead of passing (the real one from systemd.ts, say); undefined passes every release. */
+  checkSelf: ReleaseUnits['selfCheck'] | undefined;
 }
 
 export function fakeUnits(current: () => string): FakeUnits {
@@ -108,6 +112,12 @@ export function fakeUnits(current: () => string): FakeUnits {
       units.bounds.push({ what: 'health', until });
       units.onHealth?.(until);
       return Promise.resolve(units.healthy && current() === release);
+    },
+    selfChecks: [],
+    checkSelf: undefined,
+    selfCheck(release: string, until: number): Promise<boolean> {
+      units.selfChecks.push({ release, until });
+      return units.checkSelf === undefined ? Promise.resolve(true) : units.checkSelf(release, until);
     },
   };
   return units;
