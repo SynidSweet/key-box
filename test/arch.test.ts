@@ -12,6 +12,7 @@ import {
   checkProbes,
   checkPure,
   checkSourceImports,
+  checkStaticCli,
   checkStrippedText,
   checkToolchain,
   checkTypecheck,
@@ -499,3 +500,24 @@ for (const [rule, name, check] of REPO_CHECKS) {
     assert.deepEqual(await check(REPO_ROOT), []);
   });
 }
+
+// ---------------------------------------------------------------- KBOX-6 (kb-install loads every module before its first step)
+
+test('KBOX-6 a dynamic import() or require() in src/cli is refused', async (t) => {
+  await refuses(t, withChanges({ 'src/cli/x.ts': "export const later = (): Promise<unknown> => import('./y.ts');\n", 'src/cli/y.ts': 'export const y = 1;\n' }), checkStaticCli, 'cli-dynamic-import');
+  await refuses(t, withChanges({ 'src/cli/x.ts': "declare const require: (s: string) => unknown;\nexport const y = require('./y.ts');\n" }), checkStaticCli, 'cli-dynamic-import');
+});
+
+test('KBOX-6 a dynamic import() in a module a src/cli file reaches, two imports away, is refused; one in a module it does not reach is not', async (t) => {
+  await refuses(
+    t,
+    withChanges({ 'src/cli/x.ts': "import { a } from '../shell/a.ts';\nexport const x = a;\n", 'src/shell/a.ts': "import { b } from './b.ts';\nexport const a = b;\n", 'src/shell/b.ts': "export const b = 1;\nexport const later = (): Promise<unknown> => import('./a.ts');\n" }),
+    checkStaticCli,
+    'cli-dynamic-import',
+  );
+  await accepts(t, withChanges({ 'src/cli/x.ts': 'export const x = 1;\n', 'src/shell/b.ts': "export const later = (): Promise<unknown> => import('./c.ts');\n", 'src/shell/c.ts': 'export const c = 1;\n' }), checkStaticCli);
+});
+
+test('KBOX-6 the repo\'s own src/cli loads only static imports', async () => {
+  assert.deepEqual(await checkStaticCli(REPO_ROOT), []);
+});

@@ -28,6 +28,8 @@ export type ViolationCode =
   // KBOX-28
   | 'pure-import'
   | 'pure-global'
+  // KBOX-6: kb-install's code is loaded before its first step
+  | 'cli-dynamic-import'
   | 'layer-import'
   | 'import-cycle'
   | 'silent-catch'
