@@ -16,7 +16,7 @@ import type { EventPoller } from './events.ts';
 import type { Route } from './http.ts';
 import { createMetaStore } from './meta.ts';
 import { controlRoutes } from './routes-control.ts';
-import { createFileVault } from './vault-fs.ts';
+import { createFileVault, sweepOrphanTemps } from './vault-fs.ts';
 
 /** The long poll holds a request this long before it answers an empty batch (KBOX-31). */
 const POLL_HOLD_MS = 25_000;
@@ -47,6 +47,8 @@ export function openCore(deps: CoreDeps): CoreParts {
   const poller = createEventPoller(events, hub, deps.scheduler, POLL_HOLD_MS);
   const meta = createMetaStore(db, deps.clock, hub);
   const audit = createAuditLog(db);
-  const vault = createFileVault(join(deps.stateDir, 'vault'));
+  const vaultRoot = join(deps.stateDir, 'vault');
+  for (const ref of sweepOrphanTemps(vaultRoot)) audit.append({ action: 'vault.temp_swept', subject: ref, at: deps.clock.now() });
+  const vault = createFileVault(vaultRoot);
   return { db, meta, audit, events, poller, vault, routes: controlRoutes({ meta, audit, events, poller }), close: () => db.close() };
 }

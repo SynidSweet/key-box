@@ -184,6 +184,8 @@ export const AUDIT_SCHEMAS = {
   },
   'key.issued': {},
   'key.revoked': {},
+  /** An orphan temp file of a vault write was zero-filled and removed at start; the row's ref is the key, nothing else is recorded. */
+  'vault.temp_swept': {},
 } as const satisfies Readonly<Record<string, Schema>>;
 
 export type AuditAction = keyof typeof AUDIT_SCHEMAS;

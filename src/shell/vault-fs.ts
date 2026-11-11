@@ -1,5 +1,5 @@
 // KBOX-4: the vault on disk, one file per generation: <root>/<ref>/<gen>, mode 0600 in 0700 directories.
-import { chmodSync, closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fchmodSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { VaultError, osErrorCode } from '../pure/errors.ts';
 import { makeLent } from '../pure/lent.ts';
@@ -102,4 +102,42 @@ export function createFileVault(root: string, ops: VaultFsOps = { rename: rename
       }
     },
   };
+}
+
+const ORPHAN_TEMP = /^\.[0-9]+\.tmp-[0-9]+-[0-9]+$/;
+
+function zeroFillAndUnlink(path: string): void {
+  const fd = openSync(path, 'r+');
+  try {
+    writeAll(fd, new Uint8Array(fstatSync(fd).size));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  rmSync(path);
+}
+
+/**
+ * A hard kill between open and rename leaves `.<gen>.tmp-<pid>-<n>` holding a full copy of a value. Zero-fills each such file under the
+ * vault root and unlinks it; returns the key reference each one sat under, one entry per file. Symlinks and other names are left alone.
+ * A failure throws the fixed vault error: the core does not start with a copy of a value still on disk.
+ */
+export function sweepOrphanTemps(root: string): KeyRef[] {
+  const swept: KeyRef[] = [];
+  const walk = (dir: string, ref: string[]): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path, [...ref, entry.name]);
+      else if (entry.isFile() && ORPHAN_TEMP.test(entry.name)) {
+        zeroFillAndUnlink(path);
+        swept.push(ref.join('/'));
+      }
+    }
+  };
+  try {
+    if (existsSync(root)) walk(root, []);
+  } catch (error) {
+    throw new VaultError('write_failed', osErrorCode(error));
+  }
+  return swept;
 }
