@@ -15,6 +15,7 @@ import type {
   MetaSnapshot,
   MetaStore,
   NewMachine,
+  ShareState,
   TokenRecord,
   TokenScope,
   TokenStore,
@@ -44,7 +45,9 @@ const DESTINATION_SCHEMA = { keyref: text(NAME), kind: text(NAME), target: text(
 const GRANT_SCHEMA = { keyref: text(NAME), machine: text(LABEL) } as const;
 const MACHINE_SCHEMA = { label: text(LABEL), scope: oneOf('control', 'relay'), token_sha256: text(/^[0-9a-f]{64}$/), enrolled_at: int() } as const;
 const APPROVAL_SCHEMA = { approval_id: text(NAME), kind: text(CODE), title: text(TITLE), slot: text(NAME), opened_at: int(), expires_at: int() } as const;
-const USE_SCHEMA = { label: text(LABEL), network: text(NETWORK) } as const;
+/** A raw 32-byte Ed25519 public key as base64: 43 characters and one `=`. */
+const SHARE_KEY_B64 = /^[A-Za-z0-9+/]{43}=$/;
+const USE_SCHEMA ={ label: text(LABEL), network: text(NETWORK) } as const;
 
 const closed = <T>(parsed: Parsed<T>): T => {
   if (!parsed.ok) throw new WriteRefused();
@@ -119,6 +122,30 @@ export function createMetaStore(db: DatabaseSync, clock: Clock, hub: EventSignal
     epoch: () => (db.prepare('SELECT epoch FROM box_info').get() as { epoch: string }).epoch,
 
     snapshot: () => inReadTransaction(db, () => readSnapshot(db)),
+
+    shareState(): ShareState {
+      const row = db.prepare('SELECT share_version, share_public_key_ed25519_b64 FROM box_info').get() as { share_version: number; share_public_key_ed25519_b64: string | null };
+      return { version: row.share_version, publicKeyB64: row.share_public_key_ed25519_b64 };
+    },
+
+    setSharePublicKey(keyB64: string): void {
+      const k = closed(parseObject({ key: text(SHARE_KEY_B64) }, { key: keyB64 }));
+      write(() => {
+        const current = (db.prepare('SELECT share_public_key_ed25519_b64 AS key FROM box_info').get() as { key: string | null }).key;
+        if (current !== null && current !== k.key) throw new WriteRefused();
+        db.prepare('UPDATE box_info SET share_public_key_ed25519_b64 = ?').run(k.key);
+      });
+    },
+
+    announceShare(version: number): void {
+      const v = closed(parseObject({ version: int(1) }, { version }));
+      write(() => {
+        const current = (db.prepare('SELECT share_version AS version FROM box_info').get() as { version: number }).version;
+        if (v.version <= current) throw new WriteRefused();
+        db.prepare('UPDATE box_info SET share_version = ?').run(v.version);
+        insertEvent(db, clock.now(), 'share.version', { version: v.version });
+      });
+    },
 
     putKey(key: KeyRow): void {
       const k = closed(

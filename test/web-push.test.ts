@@ -256,7 +256,10 @@ test('KBOX-22 a subscription key that is not a 65-byte uncompressed P-256 point,
   assert.deepEqual(code({ p256dh: toB64u(concat(Uint8Array.from([2]), b.publicKey.slice(1, 33))) }), bad, 'a compressed point');
   assert.deepEqual(code({ p256dh: toB64u(concat(Uint8Array.from([4]), new Uint8Array(64).fill(1))) }), bad, 'a point off the curve');
   assert.deepEqual(code({ p256dh: `${sub.p256dh}=` }), bad, 'padded base64');
-  assert.deepEqual(code({ p256dh: sub.p256dh.replace(/[-_]/, '+') }), bad, 'standard-alphabet base64');
+  // A key whose text holds '-' or '_' (about 94% of draws do), spelled in the standard alphabet: a lenient decoder reads the same point.
+  let urlKey = sub.p256dh;
+  while (!/[-_]/.test(urlKey)) urlKey = browser(w.rng).subscription(endpoint).p256dh;
+  assert.deepEqual(code({ p256dh: urlKey.replace(/[-_]/, (c) => (c === '-' ? '+' : '/')) }), bad, 'standard-alphabet base64');
   assert.deepEqual(code({ p256dh: '' }), bad);
   assert.deepEqual(code({ auth: toB64u(b.authSecret.slice(0, 15)) }), bad, '15 bytes');
   assert.deepEqual(code({ auth: toB64u(concat(b.authSecret, new Uint8Array(1))) }), bad, '17 bytes');
