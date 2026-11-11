@@ -361,6 +361,27 @@ test('KBOX-33 no window covers a prefix or a JWT header: the public part of a va
   }
 });
 
+test('KBOX-33 no probe is the digest of ANY 24-character window that touches a prefix or a JWT header or payload, in any form at any offset', () => {
+  const { envelope } = fileOver(goldenKeys());
+  const body = bodyOf(envelope);
+  const salt = Buffer.from(String(body.header['salt_b64']), 'base64');
+  const probed = new Set(body.probes.map((p) => p.d));
+  const mac = (text: string): string => createHmac('sha256', salt).update(text, 'latin1').digest('hex');
+  const withPublicPart = goldenKeys().filter((k) => k.value !== k.core);
+  assert.ok(withPublicPart.length >= 4, 'sb_secret_, GOCSPX-, vcp_ and the JWT');
+  for (const key of withPublicPart) {
+    const publicChars = key.value.length - key.core.length;
+    const texts: { readonly text: string; readonly firstCoreChar: number }[] = [{ text: key.value, firstCoreChar: publicChars }];
+    for (const a of [0, 1, 2]) {
+      const whole = Buffer.concat([Buffer.alloc(a), Buffer.from(key.value)]);
+      for (const kind of ['base64', 'base64url'] as const) texts.push({ text: whole.toString(kind), firstCoreChar: Math.ceil((8 * (a + publicChars)) / 6) });
+    }
+    for (const { text, firstCoreChar } of texts) {
+      for (let i = 0; i < firstCoreChar && i + 24 <= text.length; i += 1) assert.ok(!probed.has(mac(text.slice(i, i + 24))), `${key.name}: a window at ${i} of a form touches the public part`);
+    }
+  }
+});
+
 // ---------------------------------------------------------------- the carry-over from forms: decoys differ at interior bytes
 
 test('KBOX-33 a decoy that differs from a core only in its first or last byte is still found (so decoys here differ at interior bytes)', () => {
