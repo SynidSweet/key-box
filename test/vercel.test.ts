@@ -399,3 +399,19 @@ test('KBOX-42 the entry and unverified.json list the paging of the variable list
   assert.ok(world.entry.unverified.includes('vercel.env-list-pagination'));
   assert.ok(listed.includes('vercel.env-list-pagination'));
 });
+
+test('KBOX-36 KBOX-51 verifier: a project token refused on its own project (a plain 403) is no verdict; 401, or 403 saying invalidToken, is rejected', async () => {
+  const answers = (project: { status: number; body: unknown }): AdapterHttp => ({
+    request: (req: HttpRequest): Promise<HttpResponse> => {
+      const path = new URL(req.url).pathname;
+      const reply = path === '/v2/user' ? { status: 403, body: { error: { code: 'forbidden' } } } : path === '/v5/user/tokens/current' ? { status: 200, body: { token: { id: 't', projectId: 'prj_x' } } } : project;
+      return Promise.resolve({ status: reply.status, headers: {}, body: Buffer.from(JSON.stringify(reply.body)) });
+    },
+  });
+  const verify = (project: { status: number; body: unknown }): Promise<string | undefined> => world.entryOver(asHttp(answers(project))).verifier?.verify(master(), { platform: 'vercel' }) ?? Promise.resolve(undefined);
+  assert.equal(await verify({ status: 403, body: { error: { code: 'forbidden', message: 'Not authorized' } } }), 'unreachable');
+  assert.equal(await verify({ status: 401, body: {} }), 'rejected');
+  assert.equal(await verify({ status: 403, body: { error: { code: 'forbidden', invalidToken: true } } }), 'rejected');
+  assert.equal(await verify({ status: 404, body: {} }), 'rejected');
+  assert.equal(await verify({ status: 200, body: {} }), 'ok');
+});

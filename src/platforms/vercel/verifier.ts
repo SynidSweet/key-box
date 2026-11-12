@@ -32,7 +32,8 @@ async function verifyOnce(api: VercelApi, key: Lent): Promise<Verdict> {
   if (projectId === undefined) return 'ok';
   const project = await api.call({ method: 'GET', path: `/v9/projects/${segment(projectId)}` }, key);
   // A project the token cannot find is a token that does not work for it.
-  return project.status === 404 ? 'rejected' : readVerdict(project);
+  if (project.status === 404 || saysInvalid(project)) return 'rejected';
+  return isSuccess(project.status) ? 'ok' : 'unreachable';
 }
 
 export function createVercelVerifier(api: VercelApi): Verifier {
