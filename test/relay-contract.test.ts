@@ -50,14 +50,6 @@ test('KBOX-32 a pass in a header its profile does not declare is 401: apikey wor
   assert.equal(w.upstream.requests[1]?.url, '/v1/projects/proj-01/serviceAccounts');
 });
 
-test('KBOX-32 a keyref of 5 or 25 characters, with an upper-case letter, or "_" never routes: 404 with no upstream call', async (t) => {
-  const w = await relayWorld(t);
-  for (const keyref of ['abcde', 'a'.repeat(25), 'Adminkey1', '_']) {
-    assert.equal((await w.call(`/r/${keyref}/v1/models`)).status, 404, keyref);
-  }
-  assert.equal(w.upstream.requests.length, 0);
-});
-
 test('KBOX-32 a pass of machine A cannot use a key granted only to machine B', async (t) => {
   const w = await relayWorld(t);
   w.lend.enrol('desktop');

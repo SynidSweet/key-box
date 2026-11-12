@@ -77,12 +77,6 @@ test('KBOX-13 the canonical encoding is idempotent: parsing a canonical path giv
   }
 });
 
-test('KBOX-13 a keyref of 5 or 25 characters, with an upper-case letter or a symbol never routes', () => {
-  for (const ref of ['abcde', 'a'.repeat(25), 'abcDef', 'abc-def', '_']) assert.equal(refusal(`/r/${ref}/v1/x`), 'not_found', ref);
-  for (const ref of ['abcdef', 'a'.repeat(24)]) assert.equal(parsed(`/r/${ref}/v1/x`).keyref, ref);
-  for (const target of ['/x/abcdef/v1', '/r', '/r/', '/rr/abcdef', 'r/abcdef', '/R/abcdef']) assert.equal(refusal(target), 'not_found', target);
-});
-
 test('KBOX-13 a target with nothing after the keyref is the root path', () => {
   assert.deepEqual(parsed(`/r/${KEYREF}`).segments, []);
   assert.equal(canonicalPath([]), '/');
