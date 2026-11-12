@@ -211,8 +211,10 @@ export interface PlatformSource {
 /** The master chosen for a key, or why there is none to choose (KBOX-57). */
 export type MasterResult = { readonly ok: true; readonly value: Lent } | { readonly ok: false; readonly code: 'no_master' | 'master_ambiguous' };
 
-/** A candidate master row: where it is stored and its current value, lent. */
+/** A candidate master row: where it is stored, the scope items it was made with and its current value, lent. */
 export interface MasterRow {
   readonly at: KeyLocation;
+  /** The stored scope items (the `team:` item of a Vercel master names the team its operations run in, KBOX-26); a source that does not say has none. */
+  readonly items?: readonly string[];
   readonly value: Lent;
 }

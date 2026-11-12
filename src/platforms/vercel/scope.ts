@@ -24,7 +24,7 @@ function itemsOf(scope: Scope): readonly string[] {
 }
 
 /** The team of the scope's one `team:` item, if any; any other item, two teams, or a team that is not a plain id is `bad_scope`. */
-function teamOf(scope: Scope): string | undefined {
+export function teamOf(scope: Scope): string | undefined {
   const items = itemsOf(scope);
   if (!items.every((i) => i.startsWith(TEAM_ITEM)) || items.length > 1) throw new VercelError('bad_scope');
   const [item] = items;

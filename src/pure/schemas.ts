@@ -49,6 +49,11 @@ export type Infer<S extends Schema> = Flat<{ [K in RequiredKeys<S>]: ValueOf<S[K
 export const LABEL = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 /** A name the box itself chose: key reference, route, approval id, project. */
 export const NAME = /^[A-Za-z0-9/][A-Za-z0-9._:/@-]{0,127}$/;
+/**
+ * A Vercel project name as the box takes it (KBOX-26, UNVERIFIED `vercel.create-project-answer`): lower-case, so `/`, `:` and a leading dot can
+ * never reach a path. The shape of a name the box sends or builds a path from; a project id (`prj_...`) fits it too.
+ */
+export const PROJECT_NAME = /^[a-z0-9][a-z0-9._-]{0,99}$/;
 /** A code: a reason, a step, a state. */
 export const CODE = /^[a-z][a-z0-9_]{0,63}$/;
 /** The one-line title of an approval, printable ASCII only. */
@@ -209,6 +214,12 @@ export const AUDIT_SCHEMAS = {
   'key.schedule_set': { rotate_every_days: int(1), grace_hours: int() },
   /** KBOX-60: an approved demote was written; the class the key had and the one it has now. */
   'key.demoted': { from: oneOf('ordinary', 'admin', 'master'), to: oneOf('ordinary', 'admin', 'master') },
+  /** KBOX-26: an approved domain change was made at Vercel; the row's ref is the approval id. */
+  'vercel.domain_changed': { project: text(PROJECT_NAME), op: oneOf('add', 'remove', 'move'), domain: text(/^[a-z0-9][a-z0-9.-]{0,252}$/) },
+  /** KBOX-26: an approved team setting was made at Vercel; the row's ref is the approval id. The value is left out for `description`. */
+  'vercel.team_setting_changed': { setting: text(/^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$/), value: optional(text(/^[\x20-\x7e]{1,256}$/)) },
+  /** KBOX-26: a project was created at Vercel with the master; the row's ref is the project name, its actor the token label. */
+  'vercel.project_created': { name: text(PROJECT_NAME) },
   /** KBOX-55: core did not make a box-made key at start because another master row of its platform exists; the row's ref is the box key. */
   'box_key.conflict': {},
   // rotate (KBOX-51, KBOX-17, KBOX-34): the row's ref is the key reference (a delivery id for `delivery.acked`).

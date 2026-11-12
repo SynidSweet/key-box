@@ -41,6 +41,7 @@ import { createPlatformSource } from './shell/platform-source.ts';
 import { openRotation } from './shell/rotation.ts';
 import { createRotationStore, readKeyInfo } from './shell/rotation-store.ts';
 import { createKeyActions } from './shell/key-executors.ts';
+import { createVercelOps, vercelRoutes } from './shell/vercel-routes.ts';
 import { kindOfStored, kitFor } from './shell/rotation-ports.ts';
 import type { Rotation } from './shell/rotation.ts';
 import type { PlatformSource } from './shell/rotation-ports.ts';
@@ -180,6 +181,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   let rotation: Rotation | undefined;
   let grantChecks: GrantChecks | undefined;
   let identityPages: readonly Route[] = [];
+  let vercelPages: readonly Route[] = [];
   const wait = (ms: number): Promise<void> => new Promise((resolve) => void scheduler.after(ms, resolve));
   const updater = createUpdater({
     stagingDir: config.staging,
@@ -215,6 +217,14 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
     const checks = createGrantChecks({ registry, meta: parts.meta, keyInfo: storedRecord, master: (platform, at, items) => source.master(platform, at, items), audit: parts.audit, events: parts.events, clock });
     grantChecks = checks;
     const keyActions = createKeyActions({ registry, source, store: createRotationStore(parts.db, clock, parts.hub), audit: parts.audit, clock });
+    const vercelOps = createVercelOps({ registry, source, audit: parts.audit, clock });
+    // Every proposal route runs this chain before an approval opens (F2): the box key, a key's own checks, a Vercel action's typed parameters, a grant's check.
+    const precheck = async (action: Action): Promise<void> => {
+      refuseBoxKeyAction(registry, action);
+      keyActions.precheck(action);
+      vercelOps.precheck(action);
+      await checks.atProposal(action);
+    };
     approve = openApproveCore({
       parts,
       approverStore: privateStore,
@@ -226,15 +236,12 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
       wordlist,
       vet: vetAction(registry),
       refuseUnwired: true,
-      executors: { install_update: updater.executor, rotate_key: viaRotation('rotate_key'), add_key: viaRotation('add_key'), ...keyActions.executors },
+      executors: { install_update: updater.executor, rotate_key: viaRotation('rotate_key'), add_key: viaRotation('add_key'), ...keyActions.executors, ...vercelOps.executors },
       updateChanges: (action) => updater.changes(action),
       pageFacts: keyActions.pageFacts,
-      precheck: async (action) => {
-        refuseBoxKeyAction(registry, action);
-        keyActions.precheck(action);
-        await checks.atProposal(action);
-      },
+      precheck,
     });
+    vercelPages = vercelRoutes({ ops: vercelOps, approvals: approve.approvals, precheck });
     const opened = openRotation({ parts, approvals: approve.approvals, approvers: approve.approvers, push, clock, scheduler, random, audit: parts.audit, source, ...(identity === undefined ? {} : { federation: { identity, minted } }) });
     rotation = opened;
     provedNow = (keyref) => {
@@ -269,7 +276,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   });
   // A first file that cannot be written does not stop the box: the file is served as stale (503) until the next key.changed makes one.
   await shares.start().catch(() => parts.audit.append({ action: 'share.refresh_failed', subject: 'share', at: clock.now(), detail: { code: 'start_failed' } }));
-  const routes = [...coreRoutes(parts.routes, approve?.routes ?? [], approve === undefined || running === undefined ? [] : updater.routes), shareRoute(shares), ...(rotation?.routes ?? []), ...identityPages];
+  const routes = [...coreRoutes(parts.routes, approve?.routes ?? [], approve === undefined || running === undefined ? [] : updater.routes), shareRoute(shares), ...(rotation?.routes ?? []), ...vercelPages, ...identityPages];
   const server = createApiServer({
     routes,
     tokens: approve?.tokens.tokenStore ?? parts.meta,

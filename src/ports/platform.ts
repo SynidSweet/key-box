@@ -127,8 +127,33 @@ export interface PlatformEntry {
   readonly grantCheck?: GrantCheck;
   /** KBOX-55: the master this platform's keys depend on that the box makes itself; it never reads `issuer`, nor `issuer` it. */
   readonly boxKey?: BoxMadeKey;
+  /** KBOX-26: the platform's named operations (Vercel: createProject, setDomain, setTeamSetting), run with its master. */
+  readonly operations?: VercelOperations;
+  /** KBOX-26: whether a team setting and its value pass the closed list and the setting's value parser; the proposal asks it before an approval opens. */
+  readonly vetSetting?: (setting: string, value: string) => 'ok' | SettingRefusal;
   /** The probe ids (KBOX-42) that `docs/probes/<id>.md` still marks STILL UNVERIFIED. */
   readonly unverified: readonly string[];
+}
+
+/** KBOX-26: why a Vercel operation did not happen. The four names are the outcome of `setDomain` and `setTeamSetting`; names only, nothing of Vercel's answer. */
+export type VercelFailureName = 'vercel_not_found' | 'vercel_conflict' | 'vercel_forbidden' | 'unreachable';
+export type VercelOutcome = { readonly ok: true } | { readonly ok: false; readonly code: VercelFailureName };
+
+/** What `setTeamSetting` refuses before any request: a setting outside the closed list, or a value its parser does not take (KBOX-26). */
+export type SettingRefusal = 'setting_not_listed' | 'bad_value';
+
+/** The platform's one master as the operations need it: its value, lent, and the scope items it was made with (the `team:` item names the team). */
+export interface VercelMaster {
+  readonly value: Lent;
+  readonly items: readonly string[];
+}
+
+/** KBOX-26: the three named Vercel operations, run with the master and typed parameters. No other operation exists. */
+export interface VercelOperations {
+  /** `conflict`: the name exists; `unavailable`: any other failure, or an answer without the project's id. */
+  createProject(master: VercelMaster, name: string): Promise<{ readonly ok: true; readonly projectId: string; readonly name: string } | { readonly ok: false; readonly code: 'conflict' | 'unavailable' }>;
+  setDomain(master: VercelMaster, change: { readonly project: string; readonly op: 'add' | 'remove' | 'move'; readonly domain: string; readonly toProject?: string }): Promise<VercelOutcome>;
+  setTeamSetting(master: VercelMaster, setting: string, value: string): Promise<VercelOutcome | { readonly ok: false; readonly code: SettingRefusal }>;
 }
 
 /** What an adapter is handed when its entry is built: the one way to reach its platform, and time. */

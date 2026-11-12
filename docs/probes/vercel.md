@@ -38,6 +38,9 @@ All requests went to `https://api.vercel.com` with `Authorization: Bearer kbox-p
 | `vercel.create-project` | KBOX-26 | `POST /v11/projects` body `{}` | 400 `bad_request`, message names `name` as the missing property (so `name` is the required field and the path exists); remaining fields doc only | VERIFIED |
 | `vercel.set-domain` | KBOX-26 | `POST /v10/projects/p/domains` body `{}`; `DELETE /v9/projects/p/domains/example.com`; `POST /v1/projects/p/domains/example.com/move` body `{}`; sibling `.../movex` | add: 400 names `name`; remove: 403 `forbidden`; move: 400 names `projectId`; move sibling 404 | VERIFIED |
 | `vercel.team-settings` | KBOX-26 | `PATCH /v2/teams/t` body `{}`; sibling `PATCH /v2/teamsx/t` | 403 `forbidden`; sibling 404 (route exists; which settings an API call may change, and whether a Classic token may, is doc only: OpenAPI `patchTeam`) | STILL UNVERIFIED |
+| `vercel.create-project-answer` | KBOX-26 | none: needs the master | (source: OpenAPI `createProject`: the answer carries `id` and `name`; the duplicate-name answer and the name pattern are not read; the box sends only `name`, reads `id`, answers 409 as `conflict` and any other failure as `unavailable`) | STILL UNVERIFIED |
+| `vercel.set-domain-repeat` | KBOX-26 | none: needs the master | (the answers to a repeated add, a remove of an absent domain and a move to the project that already has it are not read; the box sends each approved change once and never again after a crash, KBOX-60 F3) | STILL UNVERIFIED |
+| `vercel.domain-move-target` | KBOX-26 | none: needs the master | (`POST /v1/projects/{p}/domains/{d}/move` takes `projectId`; whether it takes a project name or an id is not read: the box sends `to_project` as given, shaped like a project name) | STILL UNVERIFIED |
 
 ## Facts for the adapter
 
@@ -74,4 +77,7 @@ All requests went to `https://api.vercel.com` with `Authorization: Bearer kbox-p
 - `vercel.vcp-core-length`: create two tokens with the master token and measure the character count after `vcp_` (names and counts only, never values), including an `expiresAt` token and a `projectId` token.
 - `vercel.create-project`: `POST /v11/projects` with `{name}` on the master token, then delete it; also send an uppercase and an overlong name to see the pattern error.
 - `vercel.set-domain`: add, move and remove a throwaway domain between two throwaway projects; record the answer when the domain is on another project and when it is unverified.
+- `vercel.create-project-answer`: `POST /v11/projects` with `{name}` twice; record whether the answer carries `id` (the box reads it), the status and `error.code` of the second (a duplicate name), and that an uppercase and an overlong name are refused (the box's name shape is `^[a-z0-9][a-z0-9._-]{0,99}$`).
+- `vercel.set-domain-repeat`: add the same domain twice, remove one that is absent, and move one to the project that already has it; record each status and `error.code` (names only).
+- `vercel.domain-move-target`: `POST /v1/projects/{p}/domains/{d}/move` with `projectId` as the target project's name, then as its `prj_` id; record which is accepted.
 - `vercel.team-settings`: `PATCH /v2/teams/{id}` with each candidate setting alone, with the classic team-scoped master token, on a throwaway team; record which are accepted, and confirm `strict*` and billing-like fields.

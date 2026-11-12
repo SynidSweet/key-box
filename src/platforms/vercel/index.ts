@@ -7,6 +7,8 @@ import { VERCEL_MUST_DENY } from './deny.ts';
 import { createVercelEnvDestination } from './env-destination.ts';
 import { createVercelIssuer } from './issuer.ts';
 import { createVercelLister } from './lister.ts';
+import { createVercelOperations } from './operations.ts';
+import { vetTeamSetting } from './team-settings.ts';
 import { createVercelRedeployer } from './redeployer.ts';
 import { PLAIN_ID } from './scope.ts';
 import { createVercelVerifier } from './verifier.ts';
@@ -22,9 +24,25 @@ const realPause = (ms: number): Promise<void> => new Promise((resolve) => void s
 /**
  * The probe ids `docs/probes/vercel.md` marks STILL UNVERIFIED, and where the code leans on each:
  * cli-project-token (issuer), env-upsert, env-delete and env-list-pagination (env-destination), redeploy (redeployer), verifier-project-token (verifier),
- * vcp-core-length (shape). `env-update` is not used: the push is an upsert. `team-settings` is relied on by the KBOX-26 unit, not here.
+ * vcp-core-length (shape). `env-update` is not used: the push is an upsert. The KBOX-26 operations (operations, team-settings) lean on `team-settings`
+ * (which settings a team token may change, their value types), `create-project-answer` (the answer's id, the duplicate-name answer, the name
+ * pattern), `set-domain-repeat` (a repeated add, an absent remove, a move to the same project) and `domain-move-target` (whether the move's
+ * `projectId` takes a name or an id).
  */
-const UNVERIFIED = ['vercel.cli-project-token', 'vercel.env-upsert', 'vercel.env-update', 'vercel.env-delete', 'vercel.env-list-pagination', 'vercel.redeploy', 'vercel.verifier-project-token', 'vercel.vcp-core-length', 'vercel.team-settings'] as const;
+const UNVERIFIED = [
+  'vercel.cli-project-token',
+  'vercel.env-upsert',
+  'vercel.env-update',
+  'vercel.env-delete',
+  'vercel.env-list-pagination',
+  'vercel.redeploy',
+  'vercel.verifier-project-token',
+  'vercel.vcp-core-length',
+  'vercel.team-settings',
+  'vercel.create-project-answer',
+  'vercel.set-domain-repeat',
+  'vercel.domain-move-target',
+] as const;
 
 export function createVercelEntry(deps: VercelDeps): PlatformEntry {
   const api = createVercelApi(deps.http);
@@ -40,6 +58,8 @@ export function createVercelEntry(deps: VercelDeps): PlatformEntry {
     location: { project: { pattern: PLAIN_ID, requiredFor: [] } },
     // KBOX-57: a Vercel master serves only keys of its own team: the `team:` item decides its authority, not its stored location alone.
     masterItems: ['team:'],
+    operations: createVercelOperations(api),
+    vetSetting: vetTeamSetting,
     hosts: [VERCEL_HOST],
     unverified: UNVERIFIED,
   };

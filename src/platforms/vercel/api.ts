@@ -18,7 +18,7 @@ export interface ApiAnswer {
 }
 
 export interface ApiCall {
-  readonly method: 'GET' | 'POST' | 'DELETE';
+  readonly method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   /** Path with its segments already encoded (`segment`), starting with `/`. */
   readonly path: string;
   /** Already encoded, without the `?`. */

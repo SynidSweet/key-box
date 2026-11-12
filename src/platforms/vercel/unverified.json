@@ -20,5 +20,8 @@
   "vercel.vcp-core-length",
   "vercel.create-project",
   "vercel.set-domain",
-  "vercel.team-settings"
+  "vercel.team-settings",
+  "vercel.create-project-answer",
+  "vercel.set-domain-repeat",
+  "vercel.domain-move-target"
 ]

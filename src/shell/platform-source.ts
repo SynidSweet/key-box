@@ -85,6 +85,6 @@ export function createPlatformSource(deps: PlatformSourceDeps): PlatformSource {
       if (second !== undefined) return { ok: false, code: 'master_ambiguous' };
       return { ok: true, value: only.value };
     },
-    masters: (platform) => candidates(platform).map(({ at, value }) => ({ at, value })),
+    masters: (platform) => candidates(platform).map(({ at, items, value }) => ({ at, items, value })),
   };
 }
