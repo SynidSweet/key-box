@@ -74,12 +74,12 @@ test('KBOX-22 a subscription is stored under its approver: forgetting one approv
   store.addPushSubscription(row('a2'), 'ap-a');
   store.addPushSubscription(row('b1'), 'ap-b');
   const names = (): string[] => store.listPushSubscriptions().map((s) => s.endpoint.slice(s.endpoint.lastIndexOf('/') + 1)).sort();
-  assert.deepEqual(names(), ['a1', 'a2', 'b1', 'legacy']);
+  assert.deepEqual(names(), ['a1', 'a2', 'b1'], 'the legacy ownerless row was deleted at migration (no key box exists in the wild, so none is real)');
   store.removePushSubscriptionsOf('ap-a');
-  assert.deepEqual(names(), ['b1', 'legacy'], 'only that approver\'s rows go; an ownerless row stays');
+  assert.deepEqual(names(), ['b1'], 'only that approver\'s rows go');
   store.addPushSubscription(row('c1'), 'ap-c');
   store.retainPushSubscriptionsOf(['ap-c']);
-  assert.deepEqual(names(), ['c1'], 'a retained set keeps only its own rows, ownerless ones included in what goes');
+  assert.deepEqual(names(), ['c1'], 'a retained set keeps only its own rows');
   store.retainPushSubscriptionsOf([]);
   assert.deepEqual(names(), []);
   store.addPushSubscription(row('c1'), 'ap-c');
