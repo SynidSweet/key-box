@@ -1,16 +1,17 @@
 // KBOX-42: the `unverified` list of every registry entry is exactly the ids its probe report still marks STILL UNVERIFIED. Passes on the
 // empty registry; shown on fixtures to refuse a list that disagrees with its report in either direction.
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { REGISTRY } from '../src/platforms/registry.ts';
+import { readTextIfPresent } from './arch/tree.ts';
 import { unverifiedDisagreement } from './support/probe-status.ts';
 
 const REPORT = ['# probe', '- google.auth: POST /token with a throwaway key, 200, names only: VERIFIED', '- google.page: GET /keys, 404: STILL UNVERIFIED', '- google.rate: REFUTED'].join('\n');
 
 test('KBOX-42 every entry of the real registry lists exactly the ids its probe report marks STILL UNVERIFIED', async () => {
   for (const entry of REGISTRY) {
-    const report = await readFile(new URL(`../docs/probes/${entry.id}.md`, import.meta.url), 'utf8').catch((): undefined => undefined);
+    const report = await readTextIfPresent(fileURLToPath(new URL('..', import.meta.url)), `docs/probes/${entry.id}.md`);
     assert.equal(unverifiedDisagreement(entry, report), undefined);
   }
 });
