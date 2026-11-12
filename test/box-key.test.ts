@@ -19,7 +19,7 @@ import { startCore } from '../src/main-core.ts';
 import type { StartedCore } from '../src/main-core.ts';
 import { createGoogleEntry } from '../src/platforms/google/index.ts';
 import { SIGNING_KEY_SHAPE } from '../src/platforms/google/signing-key.ts';
-import { ensureBoxKeys } from '../src/shell/box-keys.ts';
+import { ensureBoxKeys, refuseBoxKeyAction } from '../src/shell/box-keys.ts';
 import { openCore } from '../src/shell/core.ts';
 import type { CoreParts } from '../src/shell/core.ts';
 import { createPlatformSource } from '../src/shell/platform-source.ts';
@@ -220,6 +220,8 @@ interface BoxCore {
   start(o?: { readonly domain?: boolean; readonly audience?: boolean; readonly registry?: (deps: RegistryDeps) => readonly PlatformEntry[] }): Promise<StartedCore>;
   /** A phone request (no token) or a control request to the running core. */
   call(path: string, o?: { readonly phone?: true }): Promise<{ status: number; body: string }>;
+  /** A control request with a JSON body to the running core. */
+  post(path: string, json: unknown): Promise<{ status: number; body: string }>;
   /** Stops the running core and opens the state directory for reading; closed when the test ends. */
   read(): Promise<Seeded>;
   /** Writes to the state directory before the next start. */
@@ -270,6 +272,11 @@ async function boxCore(t: TestContext): Promise<BoxCore> {
     async call(path, o = {}) {
       const headers: Record<string, string> = { 'x-kb-client-ip': '203.0.113.9', ...(o.phone === true ? {} : { authorization: `Bearer ${token}` }) };
       const reply = await driver.request({ path, method: 'GET', headers });
+      return { status: reply.status, body: reply.body };
+    },
+    async post(path, json) {
+      const headers = { 'x-kb-client-ip': '203.0.113.9', authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+      const reply = await driver.request({ path, method: 'POST', headers, body: Buffer.from(JSON.stringify(json)) });
       return { status: reply.status, body: reply.body };
     },
     async read() {
@@ -522,4 +529,50 @@ test('KBOX-55 negative control through the real orchestrator and reconcile: a ru
   // `list` is left out: reconcile lists the platform once per master row, and the box key is the platform's master for its API keys.
   const { list: _list, ...forTheBoxKey } = calls;
   assert.deepEqual(forTheBoxKey, { issue: 0, revoke: 0, listAt: 0, verify: 0, retire: 0 });
+});
+
+// --- the approval precheck refuses what the box key must never be given ---------------------------------------------------------------------
+
+const ENTRIES = [createGoogleEntry(googleDeps())];
+const GRANT_REFUSED = [
+  { kind: 'grant', keyref: BOX_REF, machine: 'ws-1' },
+  { kind: 'add_destination', keyref: BOX_REF, destination: { kind: 'workstation', target: '' } },
+  { kind: 'demote', keyref: BOX_REF },
+  { kind: 'delete_key', keyref: BOX_REF },
+  { kind: 'set_schedule', keyref: BOX_REF, rotate_every_days: 30, grace_hours: 0 },
+  { kind: 'add_key', platform: 'google', name: 'OIDC_SIGNING_KEY', projects: ['p'], scope: { items: [] } },
+] as const;
+
+test('KBOX-55 refuseBoxKeyAction rejects box_made for a grant, add_destination, demote, delete_key, set_schedule with grace 0 and an add_key naming the box key', () => {
+  for (const action of GRANT_REFUSED) {
+    assert.throws(() => refuseBoxKeyAction(ENTRIES, action), { code: 'rejected', detail: { code: 'box_made' } }, action.kind);
+  }
+});
+
+test('KBOX-55 refuseBoxKeyAction lets everything else through: rotate_key, a set_schedule with grace, a grant of another key, the same name under a project, revoke_grant', () => {
+  const fine = [
+    { kind: 'rotate_key', keyref: BOX_REF },
+    { kind: 'set_schedule', keyref: BOX_REF, rotate_every_days: 30, grace_hours: 2 },
+    { kind: 'grant', keyref: 'google/p/MAPS_KEY', machine: 'ws-1' },
+    { kind: 'add_key', platform: 'google', name: 'OIDC_SIGNING_KEY', projects: ['shop'], scope: { items: ['read'] } },
+    { kind: 'revoke_grant', keyref: BOX_REF, machine: 'ws-1' },
+  ] as const;
+  for (const action of fine) assert.doesNotThrow(() => refuseBoxKeyAction(ENTRIES, action), action.kind);
+});
+
+test('KBOX-55 through the running core, POST /api/proposals for each refused action answers box_made and opens no approval; rotate_key opens one', async (t) => {
+  const box = await boxCore(t);
+  await box.start();
+  for (const action of GRANT_REFUSED.filter((a) => a.kind !== 'add_key')) {
+    const reply = await box.post('/api/proposals', { action });
+    assert.equal(reply.status, 422, `${action.kind}: ${reply.body}`);
+    assert.match(reply.body, /box_made/, action.kind);
+  }
+  const { parts: refusedParts } = await box.read();
+  assert.deepEqual(refusedParts.meta.snapshot().approvals, []);
+  await box.start();
+  const rotate = await box.post('/api/proposals', { action: { kind: 'rotate_key', keyref: BOX_REF } });
+  assert.equal(rotate.status, 201, rotate.body);
+  const { parts } = await box.read();
+  assert.equal(parts.meta.snapshot().approvals.length, 1);
 });

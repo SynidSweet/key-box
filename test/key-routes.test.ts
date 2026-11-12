@@ -673,3 +673,137 @@ test('KBOX-57 KBOX-34 POST /api/retired for a keyref that exists records the new
   assert.deepEqual([added?.status, added?.location], ['retired', { project: REF }]);
   assert.deepEqual(w.rotation.store.keyInfo(ref)?.location, { project: REF }, 'the key\'s own record is unchanged');
 });
+
+// --- KBOX-55: the box-made key is never entered, replaced or rotated by a request or a paste ------------------------------------------------
+
+const BOX_NAME = 'BOX_SIGNING_KEY';
+const BOX_REF = `fake/p/${BOX_NAME}`;
+/** The `fake` platform as Google will be: the box makes its master (`boxKey`), and its API keys have an issuer, a lister and a verifier. */
+const boxMade =
+  (verifier: boolean = true) =>
+  (real: PlatformSource): PlatformSource => ({
+    ...real,
+    platform: (id) => {
+      const kit = real.platform(id);
+      if (id !== 'fake' || kit === undefined) return kit;
+      const boxKey = { name: BOX_NAME, shape: { prefix: '', alphabet: 'base64url', coreLength: { min: 43, max: 43 }, random: true } as const, publishLeadMs: HOUR, generate: () => new Uint8Array(32), check: () => Promise.resolve('ok' as const) };
+      const { verifier: dropped, ...rest } = kit;
+      return { ...(verifier ? kit : rest), boxKey };
+    },
+  });
+const code = (reply: { json(): unknown }): [string | undefined, string | undefined] => [errorOf(reply).code, errorOf(reply).detail?.code];
+const vaultGens = (w: RoutesWorld, keyref: string): number[] => w.rotation.store.gens(keyref).map((g) => g.gen);
+
+/** The box key as core's start leaves it: a master row, its rotation record, generation 1 current (stored through the seams, not through a route). */
+function storedBoxKey(w: RoutesWorld, rotatedAt: number): void {
+  w.parts.meta.putKey({ keyref: BOX_REF, platform: 'fake', name: BOX_NAME, projects: [], class: 'master', status: 'works', gen_current: 1, schedule: { rotate_every_days: 90, grace_hours: 1, next_due_at: null, expires_at: null }, coverage: null, last_use_at: null });
+  w.rotation.store.putKeyInfo(BOX_REF, { scopeItems: [], location: {}, rotatedAt, markAdmin: false });
+  w.parts.vault.put(BOX_REF, 1, Buffer.from('A'.repeat(43)));
+  w.rotation.store.putGen({ keyref: BOX_REF, gen: 1, status: 'current', platformKeyId: null, location: {} });
+}
+
+test('KBOX-55 POST /api/keys naming the box key is rejected box_made, whatever its scope, before and after the key exists: nothing written, opened or issued', async (t) => {
+  const w = await routesWorld(t, { source: boxMade() });
+  const named = (scope: readonly string[], projects: readonly string[] = ['p']): object => body({ name: BOX_NAME, projects, scope: { items: scope } });
+  const before = allRows(w);
+  for (const scope of [['read'], ['admin'], MASTER]) {
+    const reply = await w.api('/api/keys', { json: named(scope) });
+    assert.deepEqual([reply.status, ...code(reply)], [422, 'rejected', 'box_made'], `${scope.join()}: ${reply.body}`);
+  }
+  assert.equal(allRows(w), before);
+  assert.equal(opened(w), 0);
+  assert.deepEqual(w.issuedAt, []);
+  storedBoxKey(w, w.clock.now());
+  const after = await w.api('/api/keys', { json: named(['read']) });
+  assert.deepEqual(code(after), ['rejected', 'box_made'], 'still box_made, not key_exists, once the key exists');
+  assert.deepEqual(vaultGens(w, BOX_REF), [1]);
+  // Negative control: the same name in a project is another key, created as any ordinary key is.
+  assert.equal((await w.api('/api/keys', { json: named(['read'], ['shop']) })).status, 201);
+});
+
+test('KBOX-55 POST /api/keys with a master result on a platform whose master the box makes is rejected box_made_master, checked before no_verifier; no paste task', async (t) => {
+  for (const verifier of [true, false]) {
+    const w = await routesWorld(t, { source: boxMade(verifier) });
+    const before = allRows(w);
+    const reply = await w.api('/api/keys', { json: body({ scope: { items: MASTER } }) });
+    assert.deepEqual([reply.status, ...code(reply)], [422, 'rejected', 'box_made_master'], `verifier ${verifier}: ${reply.body}`);
+    assert.equal(allRows(w), before);
+    assert.equal(opened(w), 0, 'no paste task and no approval');
+  }
+});
+
+test('KBOX-55 negative control: a platform without a box key still opens a paste task for a master result, and an ordinary key on the box platform is still created', async (t) => {
+  const plain = await routesWorld(t);
+  const master = await plain.api('/api/keys', { json: body({ scope: { items: MASTER } }) });
+  assert.deepEqual([master.status, members(master)], [202, ['class', 'keyref', 'paste_task_id']]);
+  const w = await routesWorld(t, { source: boxMade() });
+  assert.equal((await w.api('/api/keys', { json: body() })).status, 201);
+});
+
+test('KBOX-55 POST /api/retired naming the box key is rejected box_made before it exists (no row appears) and after (no generation added, top generation unchanged)', async (t) => {
+  const w = await routesWorld(t, { source: boxMade() });
+  const path = `/api/retired?platform=fake&project=p&name=${BOX_NAME}`;
+  const value = Buffer.from('B'.repeat(43));
+  const before = await w.api(path, { bytes: value });
+  assert.deepEqual([before.status, ...code(before)], [422, 'rejected', 'box_made'], before.body);
+  assert.equal(w.rotation.store.key(BOX_REF), undefined, 'no row appears');
+  assert.deepEqual(vaultGens(w, BOX_REF), []);
+  storedBoxKey(w, w.clock.now());
+  const after = await w.api(path, { bytes: value });
+  assert.deepEqual(code(after), ['rejected', 'box_made']);
+  assert.deepEqual(vaultGens(w, BOX_REF), [1]);
+  assert.equal(w.rotation.store.topGen(BOX_REF), 1);
+  // Negative control: the same name under a project is another key and is retired as before.
+  assert.equal((await w.api(`/api/retired?platform=fake&project=shop&name=${BOX_NAME}`, { bytes: Buffer.from(`fk-${'ab'.repeat(16)}`) })).status, 201);
+});
+
+test('KBOX-55 a due box key whose current generation is unproven opens nothing and writes no notice; after markProved the next tick opens exactly one rotate_key approval', async (t) => {
+  const w = await routesWorld(t, { source: boxMade() });
+  storedBoxKey(w, w.clock.now());
+  w.clock.advance(91 * 24 * HOUR);
+  w.rotation.tick();
+  w.rotation.tick();
+  assert.equal(opened(w), 0, 'unproven: no approval');
+  assert.deepEqual(w.parts.events.after(0).filter((e) => e.kind === 'box.notice'), [], 'and no notice');
+  assert.equal(w.parts.audit.read(0).entries.filter((e) => e.action === 'rotation.refused').length, 0);
+  w.rotation.store.markProved(BOX_REF, 1, w.clock.now());
+  w.rotation.tick();
+  w.rotation.tick();
+  assert.deepEqual((await w.queue()).map((q) => q.kind), ['rotate_key'], 'exactly one');
+});
+
+test('KBOX-55 clearProved makes a due box key silent again; the owner\'s POST /api/rotations still opens an approval for an unproven one', async (t) => {
+  const w = await routesWorld(t, { source: boxMade() });
+  storedBoxKey(w, w.clock.now());
+  w.rotation.store.markProved(BOX_REF, 1, w.clock.now());
+  w.rotation.store.clearProved(BOX_REF, 1);
+  assert.equal(w.rotation.store.gen(BOX_REF, 1)?.provedAt, null);
+  w.clock.advance(91 * 24 * HOUR);
+  w.rotation.tick();
+  assert.equal(opened(w), 0);
+  const manual = await w.api('/api/rotations', { json: { keyref: BOX_REF } });
+  assert.equal(manual.status, 202, manual.body);
+  assert.deepEqual(members(manual), ['approval_id']);
+});
+
+test('KBOX-55 markProved keeps the first time: a second call, later, changes nothing; an unknown generation is not_found', async (t) => {
+  const w = await routesWorld(t, { source: boxMade() });
+  storedBoxKey(w, 1000);
+  assert.equal(w.rotation.store.gen(BOX_REF, 1)?.provedAt, null, 'null until proved');
+  w.rotation.store.markProved(BOX_REF, 1, 5000);
+  w.rotation.store.markProved(BOX_REF, 1, 9000);
+  assert.equal(w.rotation.store.gen(BOX_REF, 1)?.provedAt, 5000);
+  assert.deepEqual(w.rotation.store.gens(BOX_REF).map((g) => g.provedAt), [5000], 'gens() reports it too');
+  w.rotation.store.putGen({ keyref: BOX_REF, gen: 1, status: 'grace', platformKeyId: null, location: {} });
+  assert.equal(w.rotation.store.gen(BOX_REF, 1)?.provedAt, 5000, 'a status change keeps the mark');
+  assert.throws(() => w.rotation.store.markProved(BOX_REF, 7, 1), { code: 'not_found' });
+});
+
+test('KBOX-55 a platform without a box key: a due master still opens its paste task exactly as before, proved or not', async (t) => {
+  const w = await routesWorld(t);
+  await storedFake(w, MASTER);
+  w.clock.advance(91 * 24 * HOUR);
+  w.rotation.tick();
+  assert.equal(opened(w), 1);
+  assert.equal(statusOf(w), 'awaiting_paste');
+});
