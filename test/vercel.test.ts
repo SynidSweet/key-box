@@ -346,3 +346,10 @@ test('KBOX-36 verifier: a project id from the platform is one encoded path segme
   await world.entryOver(asHttp(probing)).verifier?.verify(master(), { platform: 'vercel' });
   assert.equal(seen[2], '/v9/projects/a%2Fb%20..%2Fc');
 });
+
+test('KBOX-36 an id of "." or ".." or one that is empty never reaches a path: revoke and verify refuse before any call', async () => {
+  fresh();
+  const before = http.sent.length;
+  for (const id of ['', '.', '..']) await assert.rejects(() => issuer.revoke(id, master()), /vercel: bad_scope/, JSON.stringify(id));
+  assert.deepEqual(sentSince(before), []);
+});

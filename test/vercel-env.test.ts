@@ -173,7 +173,9 @@ test('KBOX-36 ready says failed for a build that ends in error, and for a deploy
   fake.reset();
   fake.failNextDeploy();
   const bad = await redeployer.redeploy(target, master());
+  const pausesBefore = world.pauses.length;
   assert.equal(await redeployer.ready(bad), 'failed');
+  assert.equal(world.pauses.length - pausesBefore, 2, 'an error ends the wait at once: it does not wait out the deadline');
   const stuck = await vercelWorld({ buildPolls: 1_000_000 });
   const ref = await stuck.kit.redeployer?.redeploy(target, master());
   assert.ok(ref !== undefined);

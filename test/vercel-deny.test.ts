@@ -65,7 +65,7 @@ test('KBOX-13 each rule\'s samples include the canonicalisation variants: encode
 });
 
 test('KBOX-13 a sample that needs a query to pass the platform\'s validation keeps it on every variant', () => {
-  const integrations = denyOnly.flatMap((r) => r.samples).filter((s) => s.url.includes('/integrations/'));
+  const integrations = denyOnly.flatMap((r) => r.samples).filter((s) => s.url.includes('configurations'));
   assert.ok(integrations.length >= 10);
   for (const s of integrations) assert.match(s.url, /view=account/, s.url);
 });

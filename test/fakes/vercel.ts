@@ -4,7 +4,6 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { TestContext } from 'node:test';
 
 export interface FakeEnvVar {
   readonly id: string;
@@ -93,7 +92,7 @@ const readBody = (req: IncomingMessage): Promise<unknown> =>
 const asRecord = (value: unknown): Record<string, unknown> => (typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {});
 
 /** `t` is a test context or the file-level `node:test` hooks: anything with `after`. */
-export async function startFakeVercel(t: Pick<TestContext, 'after'>, options: FakeVercelOptions): Promise<FakeVercel> {
+export async function startFakeVercel(t: { after(fn: () => void | Promise<void>): void }, options: FakeVercelOptions): Promise<FakeVercel> {
   const tokens = new Map<string, Token>();
   const envs = new Map<string, FakeEnvVar[]>();
   const deploys = new Map<string, Deploy>();
