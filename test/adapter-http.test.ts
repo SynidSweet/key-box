@@ -24,6 +24,8 @@ import { TimedClock, adapterHttpTo, canary, fakePlatform, waitUntil } from './ki
 import { selfSignedCertificate } from './kit/tls.ts';
 
 const HOST = 'api.vendor.example';
+/** A public address for the fake resolver of the tests written for the deadline and abort rules. */
+const PUBLIC_ADDRESS = '8.8.8.8';
 const URL_OK = `https://${HOST}/v1/keys?limit=2&a=b%20c`;
 
 interface Seen {
@@ -337,7 +339,7 @@ test('KBOX-47 KBOX-23 the call deadline bounds name resolution: a lookup that ou
       resolve: () =>
         new Promise((resolve) => {
           lookups += 1;
-          clock.after(3000, () => resolve(['203.0.113.10']));
+          clock.after(3000, () => resolve([PUBLIC_ADDRESS]));
         }),
     },
   });
@@ -361,7 +363,7 @@ test('KBOX-47 an already-aborted signal stops the gate before it resolves or con
     resolver: {
       resolve: () => {
         resolves += 1;
-        return Promise.resolve(['203.0.113.10']);
+        return Promise.resolve([PUBLIC_ADDRESS]);
       },
     },
     connector: {
@@ -389,7 +391,7 @@ test('KBOX-47 a signal aborted while the lookup runs never reaches the connector
     resolver: {
       resolve: () => {
         abort.abort();
-        return Promise.resolve(['203.0.113.10']);
+        return Promise.resolve([PUBLIC_ADDRESS]);
       },
     },
     connector: {

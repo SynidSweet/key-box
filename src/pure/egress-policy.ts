@@ -1,6 +1,6 @@
 // KBOX-47: what the egress gate allows. A host is allowed when a registered adapter declares it (for relay and adapter calls)
 // or deploy/egress-hosts.json names it for exactly that caller; an address is refused when it is private, loopback,
-// link-local, unspecified, shared, multicast or reserved, including an IPv4 address inside IPv6.
+// link-local, unspecified, shared, multicast, reserved or documentation, including an IPv4 address inside IPv6 and the 6to4, Teredo and NAT64 prefixes.
 import { parseIpv4, parseIpv6 } from './address.ts';
 import { hostAllowed } from './pushsub.ts';
 import type { Parsed } from './schemas.ts';
@@ -46,8 +46,12 @@ const V4_REFUSED: readonly (readonly [readonly [number, number, number, number],
   [[169, 254, 0, 0], 16], // link-local, the metadata address included
   [[172, 16, 0, 0], 12],
   [[192, 0, 0, 0], 24],
+  [[192, 0, 2, 0], 24], // documentation (TEST-NET-1)
+  [[192, 88, 99, 0], 24], // the old 6to4 relay anycast
   [[192, 168, 0, 0], 16],
   [[198, 18, 0, 0], 15],
+  [[198, 51, 100, 0], 24], // documentation (TEST-NET-2)
+  [[203, 0, 113, 0], 24], // documentation (TEST-NET-3)
   [[224, 0, 0, 0], 4], // multicast
   [[240, 0, 0, 0], 4], // reserved and broadcast
 ];
@@ -61,7 +65,10 @@ function v6Refused(g: readonly number[]): boolean {
   const zeroTo = (n: number): boolean => g.slice(0, n).every((x) => x === 0);
   if (zeroTo(5) && g[5] === 0xffff) return v4Refused(embeddedV4(g)); // IPv4-mapped
   if (zeroTo(6)) return true; // unspecified, loopback and the old IPv4-compatible form
-  if (first === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return v4Refused(embeddedV4(g)); // NAT64
+  // Transition prefixes: each carries a v4 address the box's own network may translate, so none is connected to whatever it embeds.
+  if (first === 0x2002) return true; // 6to4 (2002::/16)
+  if (first === 0x2001 && g[1] === 0) return true; // Teredo (2001::/32)
+  if (first === 0x64 && g[1] === 0xff9b && (g.slice(2, 6).every((x) => x === 0) || g[2] === 1)) return true; // NAT64 (64:ff9b::/96 and 64:ff9b:1::/48)
   return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80 || (first & 0xff00) === 0xff00;
 }
 

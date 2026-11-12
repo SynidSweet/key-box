@@ -101,6 +101,23 @@ test('KBOX-47 every private, loopback, link-local and metadata address is refuse
   }
 });
 
+test('KBOX-47 6to4, Teredo, both NAT64 prefixes and the IPv4 documentation and 6to4-relay ranges are refused at, inside and at the edges of each prefix', () => {
+  const refused = [
+    '2002::', '2002:808:808::1', '2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff', // 6to4, a public v4 inside included
+    '2001::', '2001:0:4136:e378:8000:63bf:3fff:fdd2', '2001:0:ffff:ffff:ffff:ffff:ffff:ffff', // Teredo
+    '64:ff9b::', '64:ff9b::808:808', '64:ff9b::ffff:ffff', // NAT64 /96, a public v4 inside included
+    '64:ff9b:1::', '64:ff9b:1:ffff:ffff:ffff:ffff:ffff', // local-use NAT64 /48
+    '192.0.2.0', '192.0.2.1', '192.0.2.255', '198.51.100.0', '198.51.100.77', '198.51.100.255', '203.0.113.0', '203.0.113.10', '203.0.113.255',
+    '192.88.99.1', '::ffff:192.0.2.1', '::ffff:203.0.113.10',
+  ];
+  for (const address of refused) assert.equal(addressRefused(address), true, address);
+  const allowed = [
+    '2001:1::1', '2001:4860:4860::8888', '2003::1', '2001:db8::1', '64:ff9a:ffff:ffff:ffff:ffff:ffff:ffff', '64:ff9c::1', '64:ff9b:2::1',
+    '192.0.3.1', '192.0.1.255', '198.51.99.255', '198.51.101.0', '203.0.112.255', '203.0.114.0', '192.88.98.255', '192.88.100.0',
+  ];
+  for (const address of allowed) assert.equal(addressRefused(address), false, address);
+});
+
 test('KBOX-47 a declared host that resolves to a private or metadata address is refused before connect', async () => {
   for (const answer of [['10.0.0.5'], ['169.254.169.254'], ['::ffff:127.0.0.1'], [PUBLIC, '192.168.0.1'], []]) {
     const w = world({ answers: () => answer });

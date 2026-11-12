@@ -28,7 +28,7 @@ import type { IdleWatch } from './shell/idle-watch.ts';
 import { createShareWriter, shareRoute } from './shell/share-writer.ts';
 import { createMetaShareSource } from './shell/share-source.ts';
 import { createPush } from './shell/push.ts';
-import { createLazyEgress } from './shell/egress-system.ts';
+import { createLazyEgress, loadEgressHosts } from './shell/egress-system.ts';
 import { createHttpPushTransport } from './shell/push-transport.ts';
 import { openPrivateDatabase } from './shell/private-db.ts';
 import { systemRandom } from './shell/random.ts';
@@ -100,6 +100,8 @@ export interface CoreRuntime {
   readonly platforms?: PlatformSource;
   /** The platform registry the box runs with; production builds it with `createRegistry`, a test passes its own. */
   readonly registry?: readonly PlatformEntry[];
+  /** The egress host list core reads and checks at its start; production reads deploy/egress-hosts.json (a test passes another file). */
+  readonly egressHostsFile?: URL;
 }
 
 const systemRuntime: CoreRuntime = {
@@ -125,8 +127,8 @@ export interface StartedCore {
 export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = systemRuntime): Promise<StartedCore> {
   const { clock, scheduler, random, journal } = runtime;
   const config = readConfig(env);
-  // The adapters' client holds the gate and the gate reads the registry's hosts: the gate is built on first use.
-  const egress = createLazyEgress(() => registry);
+  // The host list is read here, so a bad one stops the start. The adapters' client holds the gate and the gate reads the registry's hosts: those are bound on first use.
+  const egress = createLazyEgress(() => registry, loadEgressHosts(runtime.egressHostsFile));
   const registry = runtime.registry ?? createRegistry({ http: createAdapterHttp({ egress, scheduler }), clock });
   assertRegistry(registry);
   const parts = openCore({ stateDir: config.stateDir, clock, scheduler, random });
