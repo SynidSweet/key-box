@@ -4,7 +4,7 @@
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type { TestContext } from 'node:test';
-import type { Issuer, IssuerCapabilities, Verifier } from '../../src/ports/issuer.ts';
+import type { Issuer, IssuerCapabilities, LocationProver, Verifier } from '../../src/ports/issuer.ts';
 import type { KeyClass, KeyLocation, KeyShape, Lent, LocationSchema, PlatformKeyId, Scope } from '../../src/ports/types.ts';
 import { deliveryRoutes } from '../../src/shell/deliveries.ts';
 import { keyRoutes } from '../../src/shell/key-routes.ts';
@@ -80,6 +80,8 @@ export interface RoutesWorldOptions {
   readonly location?: LocationSchema;
   /** The api platform's classification at a location, in place of the items-only one (a KBOX-15 floor fixture). */
   readonly classifyAt?: (scope: Scope, at: KeyLocation) => KeyClass;
+  /** The prover of a host-naming location (KBOX-57), on both the api and the paste platform; none by default. */
+  readonly locationProver?: LocationProver;
 }
 
 type RotationApprovals = RotationDeps['approvals'];
@@ -97,7 +99,7 @@ export async function routesWorld(t: TestContext, options: RoutesWorldOptions = 
   const issuedAt: KeyLocation[] = [];
   const verifiedAt: KeyLocation[] = [];
   const apiClassify = options.classifyAt ?? classify;
-  const placed = options.location === undefined ? {} : { location: options.location };
+  const placed = { ...(options.location === undefined ? {} : { location: options.location }), ...(options.locationProver === undefined ? {} : { locationProver: options.locationProver }) };
 
   const apiIssuer: Issuer = {
     platform: 'fake',
@@ -139,7 +141,8 @@ export async function routesWorld(t: TestContext, options: RoutesWorldOptions = 
       return undefined;
     },
     destination: (kind) => (kind === 'vercel_env' ? { destination, redeployer } : undefined),
-    master: () => platform.master(),
+    master: () => ({ ok: true, value: platform.master() }),
+    masters: () => [{ at: {}, value: platform.master() }],
   };
   const rotation = openRotation({
     parts: w.parts,

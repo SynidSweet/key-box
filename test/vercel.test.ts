@@ -495,3 +495,23 @@ test('KBOX-15 KBOX-57 at the route every Vercel token classes master, a project 
   assert.deepEqual(sentSince(before), []);
   assert.equal(w.parts.meta.snapshot().keys.length, 0);
 });
+
+test('KBOX-36 KBOX-57 the Vercel master of a key is the team token of the key\'s own team (masterItems team:), never another team\'s, and a project token is no master', async (t) => {
+  const w = await routesWorld(t);
+  const source = createPlatformSource({ registry: [world.entry], meta: w.parts.meta, vault: w.parts.vault, keyInfo: (keyref) => w.rotation.store.keyInfo(keyref) });
+  const put = (keyref: string, items: readonly string[], at: { readonly project?: string }, text: string): void => {
+    w.parts.vault.put(keyref, 1, Buffer.from(text));
+    w.parts.meta.putKey({ keyref, platform: 'vercel', name: 'VERCEL_TOKEN', projects: [], class: 'master', status: 'works', gen_current: 1, schedule: { rotate_every_days: 90, grace_hours: 1, next_due_at: null, expires_at: null }, coverage: null, last_use_at: null });
+    w.rotation.store.putKeyInfo(keyref, { scopeItems: items, location: at, rotatedAt: 0, markAdmin: false });
+  };
+  put('vercel/a/VERCEL_TOKEN', ['team:team_a'], {}, 'team-a-master');
+  put('vercel/b/VERCEL_TOKEN', ['team:team_b'], {}, 'team-b-master');
+  put('vercel/a-project/VERCEL_TOKEN', ['team:team_a'], { project: PROJECT }, 'project-token');
+  const pick = async (at: { readonly project?: string }, items: readonly string[]): Promise<string> => {
+    const result = source.master('vercel', at, items);
+    return result.ok ? textOf(result.value) : result.code;
+  };
+  assert.equal(await pick({ project: PROJECT }, ['team:team_a']), 'team-a-master', 'the project token of team_a (master only by the floor) is not a candidate');
+  assert.equal(await pick({}, ['team:team_b']), 'team-b-master');
+  assert.equal(await pick({}, []), 'no_master', 'a key naming no team has no team master');
+});

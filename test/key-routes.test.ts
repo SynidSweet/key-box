@@ -5,6 +5,9 @@ import { bytesOf, canary } from './kit/index.ts';
 import { ApiError } from '../src/pure/errors.ts';
 import { PASTE_PLATFORM, routesWorld } from './support/routes-world.ts';
 import type { RoutesWorld } from './support/routes-world.ts';
+import type { LocationProver } from '../src/ports/issuer.ts';
+import type { KeyLocation } from '../src/ports/types.ts';
+import type { PlatformSource } from '../src/shell/rotation-ports.ts';
 
 const HOUR = 3600_000;
 const KEYREF = 'fake/shop/OPENAI_KEY';
@@ -410,4 +413,94 @@ test('KBOX-57 the schedule skips a due key whose stored location the entry refus
   assert.equal(opened(w), 0);
   const refused = w.parts.audit.read(0).entries.filter((e) => e.action === 'rotation.refused');
   assert.deepEqual(refused.map((e) => [e.ref, e.detail['code']]), [['fake/shop/OLD_KEY', 'location_missing']], 'one record per key and code');
+});
+
+test('KBOX-57 the schedule\'s skip of a due key whose stored location the entry refuses sends exactly one box.notice "rotation skipped" naming the code across ticks, and starts no run', async (t) => {
+  const w = await routesWorld(t, { location: PROJECT_ENTRY });
+  assert.equal((await w.api(retiredPath(), { bytes: Buffer.from(`fk-${'ab'.repeat(16)}`) })).status, 201);
+  w.rotation.store.putGen({ keyref: 'fake/shop/OLD_KEY', gen: 2, status: 'current', platformKeyId: null, location: {} });
+  w.clock.advance(91 * 24 * HOUR);
+  w.rotation.tick();
+  w.rotation.tick();
+  w.rotation.tick();
+  const notices = w.parts.events.after(0).filter((e) => e.kind === 'box.notice' && e.data['text'] === 'rotation skipped');
+  assert.deepEqual(notices.map((e) => e.data['code']), ['location_missing'], 'one notice per key and code');
+  assert.equal(w.rotation.store.runs().length, 0);
+});
+
+// --- the master at proposal and the host proof (KBOX-57) --------------------------------------------------------------------------
+
+/** A fixture entry whose `project` names an upstream host (Supabase-like): a 20-letter ref, required of ordinary and admin keys. */
+const HOST_ENTRY = { project: { pattern: /[a-z]{20}/, requiredFor: ['ordinary', 'admin'], namesHost: true } } as const;
+const allRows = (w: RoutesWorld): string => JSON.stringify([w.parts.db.prepare('SELECT * FROM keys').all(), w.parts.db.prepare('SELECT * FROM rotation_keys').all()]);
+const answering = (result: ReturnType<PlatformSource['master']>) => (real: PlatformSource): PlatformSource => ({ ...real, master: () => result });
+const issuedCount = async (w: RoutesWorld): Promise<number> => (await w.platform.lister.list(w.platform.master())).length;
+
+test('KBOX-57 where a proposal needs the master (a key the issuer makes by run), none is rejected no_master and two master_ambiguous: nothing proposed, opened, issued or written', async (t) => {
+  for (const code of ['no_master', 'master_ambiguous'] as const) {
+    const w = await routesWorld(t, { source: answering({ ok: false, code }) });
+    const before = allRows(w);
+    for (const json of [body(), body({ scope: { items: ['admin'] } })]) {
+      const reply = await w.api('/api/keys', { json });
+      assert.deepEqual([reply.status, errorOf(reply).code, errorOf(reply).detail?.code], [422, 'rejected', code], `${code}: ${reply.body}`);
+    }
+    assert.equal(allRows(w), before, 'the keys and rotation_keys rows are byte-identical');
+    assert.equal(opened(w), 0, 'no approval and no paste task');
+    assert.deepEqual(w.issuedAt, [], 'the issuer was never called');
+    assert.equal(await issuedCount(w), 0);
+    // Positive control: a paste platform without a prover needs no master, so the same answer opens its paste task.
+    const paste = await w.api('/api/keys', { json: body({ platform: PASTE_PLATFORM, name: 'ANTHROPIC_KEY', scope: { items: ['admin'] } }) });
+    assert.equal(paste.status, 202, paste.body);
+  }
+});
+
+test('KBOX-57 an entry with a locationProver needs the master even for a paste key: none is rejected no_master before the prover is asked', async (t) => {
+  const asked: KeyLocation[] = [];
+  const prover: LocationProver = { prove: (at) => { asked.push(at); return Promise.resolve('seen'); } };
+  const w = await routesWorld(t, { location: HOST_ENTRY, locationProver: prover, source: answering({ ok: false, code: 'no_master' }) });
+  const before = allRows(w);
+  const reply = await w.api('/api/keys', { json: body({ platform: PASTE_PLATFORM, name: 'ANTHROPIC_KEY', scope: { items: ['admin'] }, location: { project: REF } }) });
+  assert.deepEqual([reply.status, errorOf(reply).detail?.code], [422, 'no_master'], reply.body);
+  assert.deepEqual(asked, []);
+  assert.equal(allRows(w), before);
+  assert.equal(opened(w), 0);
+});
+
+test('KBOX-57 a host-naming location is proven with the chosen master before the proposal: unseen is rejected location_unknown, a prover that throws is unavailable, and neither writes or opens anything', async (t) => {
+  const answer: { now: 'seen' | 'unseen' | 'throws' } = { now: 'unseen' };
+  const asked: { readonly at: KeyLocation; readonly master: string }[] = [];
+  const prover: LocationProver = {
+    prove: async (at, master) => {
+      asked.push({ at, master: Buffer.from(await bytesOf(master)).toString('utf8') });
+      if (answer.now === 'throws') throw new Error('platform answered 500');
+      return answer.now;
+    },
+  };
+  const masterAsks: unknown[] = [];
+  const w = await routesWorld(t, {
+    location: HOST_ENTRY,
+    locationProver: prover,
+    source: (real) => ({ ...real, master: (platform, at, items) => { masterAsks.push([platform, at, items]); return real.master(platform, at, items); } }),
+  });
+  const located = { location: { project: REF } };
+  const requests = [body(located), body({ ...located, scope: { items: ['admin'] } }), body({ ...located, platform: PASTE_PLATFORM, name: 'ANTHROPIC_KEY', scope: { items: ['admin'] } })];
+  const before = allRows(w);
+  for (const [now, status, code] of [['unseen', 422, 'location_unknown'], ['throws', 503, undefined]] as const) {
+    answer.now = now;
+    for (const json of requests) {
+      const reply = await w.api('/api/keys', { json });
+      assert.deepEqual([reply.status, errorOf(reply).detail?.code], [status, code], `${now}: ${reply.body}`);
+    }
+  }
+  assert.equal(allRows(w), before, 'the keys and rotation_keys rows are byte-identical');
+  assert.equal(opened(w), 0, 'no approval and no paste task');
+  assert.deepEqual(w.issuedAt, []);
+  const masterText = Buffer.from(w.platform.masterBytes).toString('utf8');
+  assert.deepEqual(new Set(asked.map((a) => JSON.stringify(a))), new Set([JSON.stringify({ at: { project: REF }, master: masterText })]), 'every proof asked about the key\'s place with the chosen master');
+  assert.deepEqual(masterAsks[0], ['fake', { project: REF }, ['read']], 'the master was chosen by the key\'s platform, location and scope items');
+  answer.now = 'seen';
+  const created = await w.api('/api/keys', { json: requests[0] });
+  assert.equal(created.status, 201, created.body);
+  assert.deepEqual(w.issuedAt, [{ project: REF }], 'the issuer made the key at the proven place');
+  assert.equal((await w.api('/api/keys', { json: requests[2] })).status, 202, 'a proven paste key opens its paste task');
 });
