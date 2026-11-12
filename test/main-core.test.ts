@@ -38,6 +38,8 @@ interface Options {
   readonly lend?: boolean;
   /** The platform adapters rotation is given in place of the (empty) registry's. */
   readonly platforms?: PlatformSource;
+  /** The egress host list core reads at its start, in place of deploy/egress-hosts.json. */
+  readonly egressHostsFile?: URL;
 }
 
 /** Starts core in this process over a fresh state directory, with a control token enrolled before the start. */
@@ -63,7 +65,7 @@ async function started(t: TestContext, options: Options = {}): Promise<World> {
     ...(options.domain === undefined ? {} : { KB_DOMAIN: options.domain }),
     ...(options.lend === true ? { KB_LEND_SOCKET: lendSocket } : {}),
   };
-  const core = await startCore(env, { clock, scheduler: clock, random, journal: (code) => void journal.push(code), ...(options.platforms === undefined ? {} : { platforms: options.platforms }) });
+  const core = await startCore(env, { clock, scheduler: clock, random, journal: (code) => void journal.push(code), ...(options.platforms === undefined ? {} : { platforms: options.platforms }), ...(options.egressHostsFile === undefined ? {} : { egressHostsFile: options.egressHostsFile }) });
   t.after(() => core.stop());
   const driver = drive(socket);
   const call = async (path: string, body?: unknown): Promise<{ status: number; body: string }> => {
@@ -311,4 +313,21 @@ test('KBOX-28 KBOX-6 a first sweep and settle at start that throw, with a failin
   assert.ok(w.journal.includes('audit_failed:approvals.sweep_failed'), 'the first sweep failed, could not be audited, and core still started');
   w.clock.advance(HOUR);
   assert.equal(w.journal.filter((c) => c === 'audit_failed:approvals.sweep_failed').length, 2, 'the schedule went on');
+});
+
+async function hostsFile(t: TestContext, text: string): Promise<URL> {
+  const file = join(await tempDir(t), 'egress-hosts.json');
+  writeFileSync(file, text);
+  return new URL(`file://${file}`);
+}
+
+test('KBOX-47 a deploy/egress-hosts.json that does not parse stops core\'s start, whether it is not JSON, not the closed shape or names a bad host', async (t) => {
+  for (const text of ['not json', '{"hosts":[{"host":"a.example.com"}]}', '{"hosts":[{"host":"*","purpose":"x","caller":"push"}]}', '{"hosts":[],"extra":1}', '']) {
+    await assert.rejects(started(t, { egressHostsFile: await hostsFile(t, text) }), Error, text);
+  }
+});
+
+test('KBOX-47 a list that parses starts core, and the list file is read at the start, not on the first call', async (t) => {
+  const w = await started(t, { egressHostsFile: await hostsFile(t, '{"hosts":[{"host":"push.example.com","purpose":"a test push host","caller":"push"}]}') });
+  assert.ok(w.core.routes.length > 0);
 });

@@ -621,7 +621,9 @@ without a view session is refused and stores nothing; an action replaced between
 
 **`KBOX-34` Key issue, rotations, retired generations and deliveries: the routes mission control and `hand-off` call.** Source: design §6.3, §6.6, §6.7 (AKEY-3, AKEY-4); shapes decided here. All scope `control`.
 - `POST /api/keys` body `{platform, name, projects, scope, label?, destinations?, rotate_every_days?}`: an ordinary key on a platform with an issuer is created at once (`201 {keyref, class, status}`);
-  an admin or master class result opens an `add_key` approval (`202 {keyref, class, approval_id}`); a paste-source platform with an admin or master result (the adapter's `classify` or the owner's mark) opens a paste task (`202 {keyref, class, paste_task_id}`, no link); an ordinary key on a paste-source platform is `rejected` (reason `no_issuer`): design §5.3 leaves it to mission control's desk card, the box holds no such key. The key's env `name` is
+  an admin class result opens an `add_key` approval (`202 {keyref, class, approval_id}`); a master class result on ANY platform opens a paste task, because no
+  platform can issue its own first master (the owner pastes it once, `KBOX-36`; revision 2026-11-12: the code refused a master outright with `master_not_issuable`, so no
+  master could enter the box); a paste-source platform with an admin or master result (the adapter's `classify` or the owner's mark) opens a paste task (`202 {keyref, class, paste_task_id}`, no link); an ordinary key on a paste-source platform is `rejected` (reason `no_issuer`): design §5.3 leaves it to mission control's desk card, the box holds no such key. The key's env `name` is
   `[A-Z][A-Z0-9_]*`.
 - `POST /api/rotations` body `{keyref}`: ordinary starts a run (`201 {run_id}`), admin or master opens a `rotate_key` proposal or paste task (`202 {approval_id | paste_task_id}`); a run already exists gives `conflict`.
 - `POST /api/retired?platform=<id>&project=<p>&name=<NAME>` with `Content-Type: application/octet-stream` and the old value as the body (the `hand-off` stream; no phone approval, because a retired value grants no use and is
