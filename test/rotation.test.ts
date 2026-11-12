@@ -7,7 +7,8 @@ import { bytesOf, lent, seededRandom } from './kit/index.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
 import { newKeyOf } from '../src/shell/new-key.ts';
 import type { PlatformSource } from '../src/shell/rotation-ports.ts';
-import type { Lent } from '../src/ports/types.ts';
+import type { Retirer } from '../src/ports/issuer.ts';
+import type { KeyLocation, Lent } from '../src/ports/types.ts';
 import { ApiError } from '../src/pure/errors.ts';
 import { HOUR, MINUTE, rotationWorld } from './support/rotation-world.ts';
 import type { RotationWorld, WorldOptions } from './support/rotation-world.ts';
@@ -1272,4 +1273,180 @@ test('KBOX-51 KBOX-57 reconcile lists the platform once per master row: a listin
   const audit = w.parts.audit.read(0).entries;
   assert.equal(audit.filter((e) => e.detail['code'] === 'list_failed').length, 1, 'the master the platform refuses: one row');
   assert.equal(audit.filter((e) => e.action === 'rotation.orphan_revoked').length, 1, 'the working master\'s listing found the orphan');
+});
+
+// --- step 10 of a pasted generation: the entry's retirer, else the owner (KBOX-51, KBOX-17) ---------------------------------------
+
+const OWNER_ENDS = 'End the old key on fake; the box watches for it to stop working.';
+const OLD_VALUE = `fk-${'ab'.repeat(16)}`;
+
+interface RetireAsk {
+  readonly old: string;
+  readonly master: string;
+  readonly at: KeyLocation;
+}
+
+/** A source whose `fake` entry declares this retirer. */
+const withRetirer =
+  (retirer: Retirer) =>
+  (real: PlatformSource): PlatformSource => ({ ...real, platform: (id) => { const kit = real.platform(id); return kit === undefined ? undefined : { ...kit, retirer }; } });
+
+/** A retirer that records what it was asked and answers `how`: `ends` ends the platform's one pasted credential, `absent` finds nothing, `throws` is ambiguous. */
+function recordingRetirer(box: { w?: RotationWorld }, asks: RetireAsk[], how: 'ends' | 'absent' | 'throws'): Retirer {
+  return {
+    retire: async (old, at, master) => {
+      const world = box.w;
+      assert.ok(world !== undefined);
+      world.trace.push('retire');
+      asks.push({ old: Buffer.from(await bytesOf(old)).toString('utf8'), master: Buffer.from(await bytesOf(master)).toString('utf8'), at });
+      if (how === 'throws') throw new Error(`ambiguous: two live keys look like ${OLD_VALUE}`);
+      if (how === 'absent') return 'absent';
+      await world.platform.issuer.revoke('pk-set', master);
+      return 'retired';
+    },
+  };
+}
+
+/** A key whose generation 1 was pasted (no platform key id): its value is the platform's live credential `pk-set`. Then a rotation by run, up to the grace. */
+async function pastedThenRotated(t: TestContext, options: WorldOptions = {}, box: { w?: RotationWorld } = {}): Promise<{ w: RotationWorld; keyref: string }> {
+  const w = await rotationWorld(t, options);
+  box.w = w;
+  const pasted = Buffer.from(OLD_VALUE);
+  await w.platform.set(lent(pasted, 'paste:1'), w.platform.master());
+  const key = w.newKey();
+  await w.orch.create(key, pasted);
+  assert.equal(genOf(w, key.keyref, 1)?.platformKeyId, null, 'the pasted generation has no platform key id');
+  w.orch.start({ keyref: key.keyref, origin: 'owner' });
+  await w.orch.idle();
+  assert.equal(genOf(w, key.keyref, 1)?.status, 'grace');
+  return { w, keyref: key.keyref };
+}
+
+test('KBOX-51 step 10: a pasted old generation on an entry with a retirer is ended by it, with the old value and the master, and is retired only once the verifier rejects it', async (t) => {
+  const asks: RetireAsk[] = [];
+  const box: { w?: RotationWorld } = {};
+  const { w, keyref } = await pastedThenRotated(t, { source: withRetirer(recordingRetirer(box, asks, 'ends')) }, box);
+  assert.deepEqual(asks, [], 'nothing is ended while the grace runs');
+  w.trace.length = 0;
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  assert.deepEqual(asks, [{ old: OLD_VALUE, master: Buffer.from(w.platform.masterBytes).toString('utf8'), at: { region: 'eu' } }], 'the retirer is handed the old value, the key\'s location and the master');
+  assert.deepEqual(w.trace, ['retire', 'verify'], 'the verifier checks after the retirer, and Issuer.revoke is never used for a key with no id');
+  assert.equal(genOf(w, keyref, 1)?.status, 'retired');
+  assert.throws(() => w.parts.vault.lend(keyref, 1), 'the old value is never lent again');
+  assert.ok(!(await w.live()).includes('pk-set'));
+  assert.equal(w.events('rotation.old_key_still_on').length, 0);
+});
+
+test('KBOX-51 KBOX-17 step 10: a retirer answering absent while the verifier still accepts the old value leaves it in grace with one notice, retried until the old value is rejected', async (t) => {
+  const asks: RetireAsk[] = [];
+  const box: { w?: RotationWorld } = {};
+  const { w, keyref } = await pastedThenRotated(t, { source: withRetirer(recordingRetirer(box, asks, 'absent')) }, box);
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  for (const minutes of [1, 2, 4]) {
+    w.clock.advance(minutes * MINUTE);
+    await w.orch.idle();
+  }
+  assert.equal(genOf(w, keyref, 1)?.status, 'grace', 'absent is not proof of death');
+  assert.ok(asks.length >= 4, 'the retirer is asked again at each retry');
+  assert.equal(w.events('rotation.old_key_still_on').length, 1, 'one notice across the retries');
+  assert.ok((await w.live()).includes('pk-set'));
+  await w.platform.issuer.revoke('pk-set', w.platform.master());
+  await w.settle(HOUR);
+  assert.equal(genOf(w, keyref, 1)?.status, 'retired', 'once the verifier rejects it');
+  assert.equal(w.events('rotation.old_key_still_on').length, 1);
+});
+
+test('KBOX-51 KBOX-17 step 10: a retirer that throws (ambiguous) leaves the old generation in grace with one notice, and the failure text reaches no surface', async (t) => {
+  const asks: RetireAsk[] = [];
+  const box: { w?: RotationWorld } = {};
+  const { w, keyref } = await pastedThenRotated(t, { source: withRetirer(recordingRetirer(box, asks, 'throws')) }, box);
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  w.clock.advance(MINUTE);
+  await w.orch.idle();
+  assert.equal(genOf(w, keyref, 1)?.status, 'grace');
+  assert.equal(w.events('rotation.old_key_still_on').length, 1);
+  assert.ok((await w.live()).includes('pk-set'), 'nothing was changed');
+  assert.equal(everySurface(w).includes(OLD_VALUE), false);
+  assert.equal(everySurface(w).includes('ambiguous'), false, 'what the adapter threw is dropped');
+});
+
+test('KBOX-51 KBOX-17 step 10: with neither a platform key id nor a retirer the owner ends it: one owner_ends notice in the box\'s words, and retired once the verifier rejects', async (t) => {
+  const { w, keyref } = await pastedThenRotated(t, { klass: 'admin' });
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  for (const minutes of [1, 2]) {
+    w.clock.advance(minutes * MINUTE);
+    await w.orch.idle();
+  }
+  assert.equal(genOf(w, keyref, 1)?.status, 'grace');
+  assert.equal(w.events('rotation.old_key_still_on').length, 1, 'one notice');
+  assert.deepEqual(w.push.sent.filter((p) => p.title === OWNER_ENDS).map((p) => p.kind), ['rotation_owner_ends'], 'the words go to the phone once');
+  const audited = w.parts.audit.read(0).entries.filter((e) => e.action === 'rotation.revoke_unconfirmed');
+  assert.ok(audited.length >= 3 && audited.every((e) => e.detail['reason'] === 'owner_ends'), 'every unconfirmed attempt names the reason');
+  assert.ok(!w.trace.includes('revoke'), 'the box ends nothing');
+  await w.platform.issuer.revoke('pk-set', w.platform.master());
+  await w.settle(HOUR);
+  assert.equal(genOf(w, keyref, 1)?.status, 'retired');
+  assert.equal(w.events('rotation.old_key_still_on').length, 1, 'still one notice');
+});
+
+test('KBOX-51 step 10: an old pasted key the owner already ended is retired at the first attempt, with no notice', async (t) => {
+  const { w, keyref } = await pastedThenRotated(t, { klass: 'admin' });
+  await w.platform.issuer.revoke('pk-set', w.platform.master());
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  assert.equal(genOf(w, keyref, 1)?.status, 'retired');
+  assert.equal(w.events('rotation.old_key_still_on').length, 0);
+  assert.deepEqual(w.push.sent.filter((p) => p.title === OWNER_ENDS), []);
+});
+
+test('KBOX-51 step 10: an entry with a retirer but no verifier never reaches retired, and keeps its one notice', async (t) => {
+  const asks: RetireAsk[] = [];
+  const box: { w?: RotationWorld } = {};
+  const { w, keyref } = await pastedThenRotated(t, { verifier: false, source: withRetirer(recordingRetirer(box, asks, 'ends')) }, box);
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  for (const minutes of [1, 2, 4]) {
+    w.clock.advance(minutes * MINUTE);
+    await w.orch.idle();
+  }
+  assert.ok(asks.length >= 1, 'the retirer ended it');
+  assert.ok(!(await w.live()).includes('pk-set'));
+  assert.equal(genOf(w, keyref, 1)?.status, 'grace', 'only a verifier rejecting the old value marks it retired');
+  assert.equal(w.events('rotation.old_key_still_on').length, 1);
+});
+
+test('KBOX-51 step 10: a generation the box made is ended by Issuer.revoke and the retirer is never asked', async (t) => {
+  const asks: RetireAsk[] = [];
+  const box: { w?: RotationWorld } = {};
+  const { w, keyref } = await seeded(t, { source: withRetirer(recordingRetirer(box, asks, 'ends')) });
+  box.w = w;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.trace.length = 0;
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  assert.equal(genOf(w, keyref, 1)?.status, 'retired');
+  assert.ok(w.trace.includes('revoke'));
+  assert.deepEqual(asks, []);
+});
+
+test('KBOX-57 KBOX-51 reconcile\'s retake of an issuing run that stored nothing is refused by a placement the entry now declines, before the run is marked abandoned: the run stays as it was', async (t) => {
+  const strict = { on: false };
+  const { w, keyref } = await seeded(t, {
+    source: (real) => ({ ...real, platform: (id) => { const kit = real.platform(id); return kit === undefined || !strict.on ? kit : { ...kit, location: { project: { pattern: /[a-z]+/, requiredFor: ['ordinary'] } } }; } }),
+  });
+  const runsBefore = w.store.runs().length;
+  w.checkpoints.arm('issued');
+  const run = w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.checkpoints.crashAt = undefined;
+  w.build();
+  strict.on = true;
+  assert.throws(() => w.orch.retake(run.runId), (e: unknown) => e instanceof ApiError && e.code === 'rejected' && JSON.stringify(e.detail) === JSON.stringify({ code: 'location_field_unknown' }));
+  assert.equal(w.store.run(run.runId)?.state, 'issuing', 'not abandoned');
+  assert.equal(w.store.runs().length, runsBefore + 1, 'no second run: only the interrupted one was added');
 });

@@ -1,7 +1,7 @@
 // What the rotation shell is given: the adapters of a platform and of a destination kind, the master key and the one seam where a
 // test stops the process. Adapters register these when they are built (the adapter units).
 import type { DestinationKit } from '../ports/destination.ts';
-import type { Issuer, KeyLister, LocationProver, Verifier } from '../ports/issuer.ts';
+import type { Issuer, KeyLister, LocationProver, Retirer, Verifier } from '../ports/issuer.ts';
 import type { KeyClass, KeyLocation, KeyShape, Lent, LocationSchema, PlatformId, Scope } from '../ports/types.ts';
 import type { Vault } from '../ports/vault.ts';
 import type { Step } from '../pure/rotation-machine.ts';
@@ -26,6 +26,8 @@ export interface PlatformKit {
   readonly location?: LocationSchema;
   /** Proves a host-naming location with the key's master before the key is proposed (KBOX-57). */
   readonly locationProver?: LocationProver;
+  /** Ends the live key of a pasted generation at step 10 (KBOX-51); none: the owner ends it. */
+  readonly retirer?: Retirer;
 }
 
 /** A registered platform whose keys are made on the phone (KBOX-12, KBOX-34), one with no issuer or an issuer that says `paste`: the box cannot issue one, so it never runs an api run for it. */
@@ -44,6 +46,38 @@ export const storedPlacement = (
   info: { readonly location: KeyLocation; readonly scopeItems: readonly string[] },
 ): 'ok' | LocationRefusal => checkLocation(source.platform(head.platform)?.location, info.location, head.class, info.scopeItems);
 
+
+/**
+ * KBOX-34: whether a stored key's next value comes by paste, never by a run: a platform whose keys are made on the phone, or a master key
+ * whose issuer is not `selfRotate` (no issuer can make another kind's master). The scheduler, `POST /api/rotations`, the `rotate_key`
+ * executor and a run's start all ask this one function.
+ */
+export function rotatesByPaste(source: Pick<PlatformSource, 'platform'>, head: { readonly platform: PlatformId; readonly class: KeyClass }): boolean {
+  if (isPasteSource(source, head.platform)) return true;
+  const kit = source.platform(head.platform);
+  return kit !== undefined && head.class === 'master' && kit.issuer?.capabilities().selfRotate !== true;
+}
+
+/** Why a rotation cannot be proposed, opened or started now: a placement refusal (KBOX-57) or, where a run makes the key, no master or two. */
+export type RotationRefusal = LocationRefusal | Extract<MasterResult, { ok: false }>['code'];
+
+/**
+ * KBOX-57: what a proposal of a rotation of a stored key must clear before anything is proposed or opened: the stored location against the
+ * entry as it is now, then, for an admin or master key a run makes (an approval, not a paste), the platform's master chosen by the key's
+ * stored location and scope items. `ok` when it may go on. One function for `POST /api/rotations` and the schedule.
+ */
+export function proposalRefusal(
+  source: Pick<PlatformSource, 'platform' | 'master'>,
+  head: { readonly platform: PlatformId; readonly class: KeyClass },
+  info: { readonly location: KeyLocation; readonly scopeItems: readonly string[] },
+): 'ok' | RotationRefusal {
+  const placed = storedPlacement(source, head, info);
+  if (placed !== 'ok') return placed;
+  // Only an issuer makes a key by run: a platform with none registered has no master to ask for.
+  if (head.class === 'ordinary' || rotatesByPaste(source, head) || source.platform(head.platform)?.issuer === undefined) return 'ok';
+  const master = source.master(head.platform, info.location, info.scopeItems);
+  return master.ok ? 'ok' : master.code;
+}
 /** Whether the platform can hold two valid keys at once (true when it says nothing: there is then no one-credential order to follow). */
 export const overlapOf = (kit: PlatformKit | undefined): boolean => kit?.issuer?.capabilities().overlap ?? true;
 

@@ -211,7 +211,8 @@ export const AUDIT_SCHEMAS = {
   'rotation.completed': { run_id: text(NAME), gen: int(1) },
   'rotation.orphan_revoked': { run_id: text(NAME) },
   'rotation.restarted': { old_run: text(NAME), new_run: text(NAME) },
-  'rotation.revoke_unconfirmed': { run_id: text(NAME), gen: int(0), attempt: int(1) },
+  /** KBOX-51 step 10: not proven dead yet; `reason` is `owner_ends` when nobody but the owner can end the old key (no platform key id, no retirer). */
+  'rotation.revoke_unconfirmed': { run_id: text(NAME), gen: int(0), attempt: int(1), reason: optional(oneOf('owner_ends')) },
   'rotation.drive_failed': { run_id: text(NAME), code: text(CODE) },
   /** KBOX-57: the schedule skipped a due key whose stored location its entry now refuses; the refusal code, once per key and code. */
   'rotation.refused': { code: text(CODE) },

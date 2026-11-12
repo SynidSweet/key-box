@@ -3,15 +3,10 @@
 // LIVE keys: one match is retired, none is `absent`, two or more is refused (`ambiguous`) and nothing is changed. The caller then confirms
 // through the verifier that the old value is rejected before it marks the generation `retired`.
 import type { AdapterHttp } from '../../ports/http.ts';
-import type { Lent } from '../../ports/types.ts';
+import type { Retirer } from '../../ports/issuer.ts';
 import { call, failureOf, segment } from './call.ts';
 import { AnthropicError } from './errors.ts';
 import { DEFAULT_PAGE_SIZE, readKeys } from './keys.ts';
-
-export interface AnthropicRetirer {
-  /** Sets the live key matching `old` to `inactive` with the admin key. 'absent' when no live key matches or the update is answered 404. */
-  retire(old: Lent, admin: Lent): Promise<'retired' | 'absent'>;
-}
 
 /**
  * Whether a list `hint` fits a key value: the hint is the start and the end of the value around `...`.
@@ -26,10 +21,14 @@ export function hintMatches(hint: string | undefined, value: string): boolean {
   return tail.length > 0 && value.length >= head.length + tail.length && value.startsWith(head) && value.endsWith(tail);
 }
 
-export function createAnthropicRetirer(deps: { readonly http: AdapterHttp }): AnthropicRetirer {
+/**
+ * The entry's retirer: sets the live key matching `old` to `inactive` with the admin key (the master). 'absent' when no live key matches or the
+ * update is answered 404. The platform's keys live in one organisation, so the key's location is not read.
+ */
+export function createAnthropicRetirer(deps: { readonly http: AdapterHttp }): Retirer {
   const { http } = deps;
   return {
-    async retire(old, admin) {
+    async retire(old, _at, admin) {
       const pages = await readKeys(http, admin, { status: 'active', pageSize: DEFAULT_PAGE_SIZE });
       // an unread page could hold a second match: a partial list cannot say the match is unique
       if (!pages.complete) throw new AnthropicError('http_error');

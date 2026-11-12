@@ -25,8 +25,8 @@ import { createReconciler } from './reconcile.ts';
 import type { Reconciler } from './reconcile.ts';
 import { createRotationStore } from './rotation-store.ts';
 import type { KeyHead, RotationStore } from './rotation-store.ts';
-import { isPasteSource as pasteSource, overlapOf, storedPlacement } from './rotation-ports.ts';
-import type { LocationRefusal } from '../pure/location.ts';
+import { isPasteSource as pasteSource, overlapOf, proposalRefusal, rotatesByPaste as pasteRotation } from './rotation-ports.ts';
+import type { RotationRefusal } from './rotation-ports.ts';
 import type { PlatformSource, Point } from './rotation-ports.ts';
 
 const HOUR_MS = 3600_000;
@@ -89,6 +89,8 @@ export function openRotation(deps: RotationDeps): Rotation {
     ...pasteRoutes(paste),
   ];
   const isPasteSource = (platform: string): boolean => pasteSource(deps.source, platform);
+  /** KBOX-34: this stored key's next value comes by paste (a paste-source platform, or a master whose issuer is not selfRotate). */
+  const rotatesByPaste = (key: Pick<KeyHead, 'platform' | 'class'>): boolean => pasteRotation(deps.source, key);
 
   const executors: Rotation['executors'] = {
     add_key: async (a) => {
@@ -108,7 +110,7 @@ export function openRotation(deps: RotationDeps): Rotation {
       const head = store.key(action.keyref);
       if (head === undefined) return Promise.resolve({ result: 'failed', reason: 'unknown_key' });
       // A paste-source key is rotated by the paste, which is its approval (KBOX-12); an approval alone has no new value to store.
-      if (isPasteSource(head.platform)) return Promise.resolve({ result: 'failed', reason: 'paste_required' });
+      if (rotatesByPaste(head)) return Promise.resolve({ result: 'failed', reason: 'paste_required' });
       try {
         orchestrator.start({ keyref: action.keyref, origin: 'approval' });
         return Promise.resolve({ result: 'done' });
@@ -119,9 +121,10 @@ export function openRotation(deps: RotationDeps): Rotation {
     },
   };
 
-  const openRequest = (keyref: string, platform: string): void => {
+  const openRequest = (key: KeyHead): void => {
+    const { keyref } = key;
     const action: RotateKey = { kind: 'rotate_key', keyref };
-    if (isPasteSource(platform)) {
+    if (rotatesByPaste(key)) {
       paste.open({ action, requester: { kind: 'box' } });
       store.setStatus(keyref, 'awaiting_paste');
     } else {
@@ -144,8 +147,8 @@ export function openRotation(deps: RotationDeps): Rotation {
   const faultOf = (subject: string, code: ScheduleFault): AuditEvent => ({ action: 'rotation.drive_failed', subject, at: deps.clock.now(), detail: { run_id: PART_OF[code], code } });
 
   /** KBOX-52: whether the scheduler's last request for this slot was refused or expired and its wait still runs. A manual rotation never asks this. */
-  const requestWaits = (slot: string, platform: string, now: number): boolean => {
-    if (isPasteSource(platform)) {
+  const requestWaits = (slot: string, key: KeyHead, now: number): boolean => {
+    if (rotatesByPaste(key)) {
       const expired = paste.lastExpiredAt(slot);
       return expired !== undefined && now - expired < AFTER_EXPIRY_MS;
     }
@@ -155,7 +158,7 @@ export function openRotation(deps: RotationDeps): Rotation {
 
   /** The key and code pairs this process already skipped (KBOX-57: one notice and one audit row per key and code while core runs). */
   const refused = new Set<string>();
-  const refusedOnce = (keyref: string, code: LocationRefusal): void => {
+  const refusedOnce = (keyref: string, code: RotationRefusal): void => {
     const pair = `${keyref} ${code}`;
     if (refused.has(pair)) return;
     deps.audit.append({ action: 'rotation.refused', subject: keyref, at: deps.clock.now(), detail: { code } });
@@ -173,18 +176,18 @@ export function openRotation(deps: RotationDeps): Rotation {
     const last = store.runs().filter((r) => r.keyref === key.keyref).at(-1);
     // KBOX-52: no sooner than 24 hours after the failure itself (the schema refuses a failed run without its failure time).
     if (last?.state === 'failed' && now - (last.failedAt ?? last.openedAt) < AFTER_FAILURE_MS) return;
-    if (key.class !== 'ordinary' && requestWaits(slot, key.platform, now)) return;
+    if (key.class !== 'ordinary' && requestWaits(slot, key, now)) return;
     // KBOX-34: an ordinary key on a paste-source platform has no issuer; the box holds no such key and never runs it as an api run.
     if (key.class === 'ordinary' && isPasteSource(key.platform)) return;
-    // KBOX-57: a stored location the entry now refuses is skipped, recorded once per key and code; nothing is rewritten.
+    // KBOX-57: a stored location the entry now refuses, or no master (or two) where a run makes the key, is skipped: recorded once per key and code; nothing is rewritten.
     const info = store.keyInfo(key.keyref);
-    const placed = info === undefined ? 'ok' : storedPlacement(deps.source, key, info);
+    const placed = info === undefined ? 'ok' : proposalRefusal(deps.source, key, info);
     if (placed !== 'ok') {
       refusedOnce(key.keyref, placed);
       return;
     }
     if (key.class === 'ordinary') orchestrator.start({ keyref: key.keyref, origin: 'schedule' });
-    else openRequest(key.keyref, key.platform);
+    else openRequest(key);
   };
 
   const tick = (): void => {

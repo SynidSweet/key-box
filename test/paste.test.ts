@@ -345,3 +345,30 @@ test('KBOX-57 a settling add_key paste for a keyref that exists by then is key_e
   assert.equal((await w.call(`/p/${id}`, { cookie })).status, 404, 'the task is settled failed, not left for a retry');
   assert.ok(w.parts.events.after(0).some((e) => e.kind === 'approval.executed' && e.data['approval_id'] === id && e.data['result'] === 'failed' && e.data['reason_code'] === 'key_exists'));
 });
+
+test('KBOX-57 KBOX-12 a settling rotate_key paste whose key\'s stored location the entry now refuses fails with that code before the verifier sees the value: the task is failed and no run starts', async (t) => {
+  const strict = { on: false };
+  const w = await routesWorld(t, {
+    source: (real) => ({ ...real, platform: (id) => { const kit = real.platform(id); return kit === undefined || !strict.on ? kit : { ...kit, location: PROJECT_ENTRY }; } }),
+  });
+  const first = pasteValue('1'.repeat(32));
+  w.accepted.add(first);
+  const addId = await openTask(w);
+  const a = await render(w, addId);
+  assert.equal((await submit(w, addId, a.cookie, first, w.pasteProof(a.view))).status, 201);
+  const rotation = await w.api('/api/rotations', { json: { keyref: KEYREF } });
+  assert.equal(rotation.status, 202, rotation.body);
+  const rotId = (rotation.json() as { paste_task_id: string }).paste_task_id;
+  const r = await render(w, rotId, a.cookie);
+  strict.on = true;
+  const second = pasteValue('2'.repeat(32));
+  w.accepted.add(second);
+  const verifiedBefore = w.verifiedAt.length;
+  const runsBefore = w.rotation.store.runs().length;
+  const reply = await submit(w, rotId, a.cookie, second, w.pasteProof(r.view));
+  assert.deepEqual([reply.status, (reply.json() as { error: { code: string; detail?: { code?: string } } }).error.detail?.code], [422, 'location_missing'], reply.body);
+  assert.equal(w.verifiedAt.length, verifiedBefore, 'the value never reached the verifier');
+  assert.equal(w.rotation.store.runs().length, runsBefore, 'no run started');
+  assert.equal((await w.call(`/p/${rotId}`, { cookie: a.cookie })).status, 404, 'the task is settled failed');
+  assert.ok(w.parts.events.after(0).some((e) => e.kind === 'approval.executed' && e.data['approval_id'] === rotId && e.data['result'] === 'failed' && e.data['reason_code'] === 'location_missing'));
+});
