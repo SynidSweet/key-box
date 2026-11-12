@@ -769,7 +769,7 @@ test('KBOX-34 KBOX-55 POST /api/keys and POST /api/retired naming the box key by
   assert.equal(w.rotation.store.key(`fake/shop/${BOX_NAME}`), undefined);
   // Negative control: another name on the same platform is an ordinary key.
   const other = await w.api('/api/keys', { json: body({ name: 'MAPS_KEY', projects: ['shop'] }) });
-  assert.notEqual(code(other)[1], 'box_made', other.body);
+  assert.doesNotMatch(other.body, /box_made/);
 });
 
 test('KBOX-55 a due box key whose current generation is unproven opens nothing and writes no notice; after markProved the next tick opens exactly one rotate_key approval', async (t) => {
