@@ -35,6 +35,8 @@ export type ViolationCode =
   | 'layer-import'
   | 'import-cycle'
   | 'silent-catch'
+  // KBOX-56
+  | 'migration-not-additive'
   // KBOX-35
   | 'kit-shares-verifier'
   // KBOX-42

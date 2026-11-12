@@ -12,6 +12,7 @@ import {
   checkErasable,
   checkKitIndependence,
   checkLayers,
+  checkMigrations,
   checkProbes,
   checkPure,
   checkSourceImports,
@@ -495,6 +496,7 @@ const REPO_CHECKS: [string, string, Check][] = [
   ['KBOX-28', 'catches', checkCatches],
   ['KBOX-35', 'kit independence', checkKitIndependence],
   ['KBOX-42', 'probe reports', checkProbes],
+  ['KBOX-56', 'migrations', checkMigrations],
   ['KBOX-27', 'tsc --noEmit', checkTypecheck],
 ];
 
@@ -610,4 +612,36 @@ test('KBOX-6 kb-install writing under the spec\'s paths, through a held director
 
 test('KBOX-6 the repo\'s own kb-install writes only under releases/, current, trust.json, /etc/keybox/codes, /var/lib/keybox-install and staging', async () => {
   assert.deepEqual(await checkInstallWrites(REPO_ROOT), []);
+});
+
+// ---------------------------------------------------------------- KBOX-56 (migrations are additive only)
+
+const withMigrations = (statements: readonly string[]): Tree =>
+  withChanges({ 'src/shell/migrations.ts': `export const META_MIGRATIONS: readonly (readonly string[])[] = [${JSON.stringify(statements)}];\nexport const MESSAGE = 'DROP is only text here';\n` });
+
+test('KBOX-56 a migration statement with DROP, RENAME, ALTER TABLE ... ALTER or a NOT NULL column without DEFAULT is refused', async (t) => {
+  const refused = [
+    'DROP TABLE keys',
+    'drop index approvals_one_pending_per_slot',
+    'ALTER TABLE keys RENAME COLUMN name TO label',
+    'ALTER TABLE keys RENAME TO keys2',
+    'ALTER TABLE keys DROP COLUMN name',
+    'ALTER TABLE keys ALTER COLUMN name SET NOT NULL',
+    'ALTER TABLE keys ADD COLUMN hint TEXT NOT NULL',
+    'ALTER TABLE keys ADD COLUMN hint INTEGER not  null CHECK (hint > 0)',
+  ];
+  for (const statement of refused) await refuses(t, withMigrations([statement]), checkMigrations, 'migration-not-additive');
+});
+
+test('KBOX-56 an additive migration (new nullable column, new NOT NULL column with a default, new table, new index) is accepted, and text outside the lists is not judged', async (t) => {
+  await accepts(
+    t,
+    withMigrations([
+      'ALTER TABLE rotation_keys ADD COLUMN verify_hint TEXT',
+      'ALTER TABLE keys ADD COLUMN note TEXT NOT NULL DEFAULT 0',
+      'CREATE TABLE IF NOT EXISTS extra (id TEXT PRIMARY KEY) STRICT',
+      'CREATE INDEX IF NOT EXISTS extra_id ON extra (id)',
+    ]),
+    checkMigrations,
+  );
 });
