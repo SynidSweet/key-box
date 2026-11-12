@@ -59,3 +59,9 @@ export async function signAssertion(identity: BoxIdentity, key: Lent, nowMs: num
   const claims = { iss: identity.issuer, sub: BOX_SUBJECT, aud: `https:${provider}`, iat, exp: iat + ASSERTION_LIFETIME_S };
   return signCompact(key, (kid) => `${segment({ alg: 'ES256', typ: 'JWT', kid })}.${segment(claims)}`);
 }
+
+/**
+ * KBOX-55: how long a new signing key is published in the JWKS before the box proves Google has taken it. 24 hours, UNVERIFIED
+ * (`google.jwks-cache-duration`: Google documents no cache time); the proof makes a lead too short a later switch, never a broken identity.
+ */
+export const JWKS_PUBLISH_LEAD_MS = 24 * 3600_000;

@@ -205,6 +205,8 @@ export const AUDIT_SCHEMAS = {
   'token.revoked': {},
   'key.issued': {},
   'key.revoked': {},
+  /** KBOX-55: core did not make a box-made key at start because another master row of its platform exists; the row's ref is the box key. */
+  'box_key.conflict': {},
   // rotate (KBOX-51, KBOX-17, KBOX-34): the row's ref is the key reference (a delivery id for `delivery.acked`).
   'rotation.started': { run_id: text(NAME), origin: oneOf('schedule', 'owner', 'agent', 'approval', 'paste', 'create', 'reconcile'), gen: int(1) },
   'rotation.step_failed': { run_id: text(NAME), step: text(CODE), code: text(CODE) },

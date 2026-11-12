@@ -21,7 +21,7 @@ import { intentName, nextStep, retryDelayMs } from '../pure/rotation-machine.ts'
 import type { Step } from '../pure/rotation-machine.ts';
 import { enderOf, revokeAndConfirm } from './revoke-confirm.ts';
 import type { Ender } from './revoke-confirm.ts';
-import { isPasteSource, kindOfStored, overlapOf, setterOf, storedPlacement, tryLend, verifierFor } from './rotation-ports.ts';
+import { isPasteSource, kindOfStored, kitFor, overlapOf, setterOf, storedPlacement, tryLend, verifierFor } from './rotation-ports.ts';
 import type { MasterResult, PlatformKit, PlatformSource, Point } from './rotation-ports.ts';
 import type { DestinationRow, KeyHead, KeyInfo, Receipt, RotationStore, RunOrigin, RunRow } from './rotation-store.ts';
 
@@ -233,13 +233,13 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
   const kitOf = (keyref: string): PlatformKit | undefined => {
     const head = store.key(keyref);
-    return head === undefined ? undefined : deps.platform(head.platform);
+    return head === undefined ? undefined : kitFor(deps, head);
   };
 
   async function step(run: RunRow): Promise<Next> {
     const head = store.key(run.keyref);
     const info = store.keyInfo(run.keyref);
-    const kit = head === undefined ? undefined : deps.platform(head.platform);
+    const kit = head === undefined ? undefined : kitFor(deps, head);
     if (head === undefined || info === undefined || kit === undefined) return fail(run, run.state === 'rolling_back' ? 'rollback' : run.state, 'no_adapter');
     switch (run.state) {
       case 'issuing':
@@ -427,7 +427,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
   // --- steps 6 and 7: push and redeploy ---------------------------------------------------------------------------------------------
 
-  const kitFor = (row: DestinationRow): DestinationKit | undefined => deps.destination(row.kind);
+  const destinationKitOf = (row: DestinationRow): DestinationKit | undefined => deps.destination(row.kind);
 
   async function pushAll(run: RunRow, head: KeyHead): Promise<Next> {
     const chosen = masterFor(head);
@@ -439,14 +439,14 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     // KBOX-16: every destination is admitted again before anything is pushed, because its properties can change at runtime. The workstation is
     // a delivery that a control token fetches through the API, so it is `api`-readable: an ordinary key only (KBOX-34).
     for (const row of rows) {
-      const readableBy = row.kind === WORKSTATION ? 'api' : kitFor(row)?.destination.properties().readableBy;
+      const readableBy = row.kind === WORKSTATION ? 'api' : destinationKitOf(row)?.destination.properties().readableBy;
       if (readableBy === undefined) return fail(run, 'pushing', 'push_failed');
       if (!admitDestination(head.class, readableBy)) return fail(run, 'pushing', 'destination_not_allowed');
     }
     for (const row of rows) {
       // The workstation is offered at promote (deliver), never a generation that may still be rolled back.
       if (row.kind === WORKSTATION) continue;
-      const kit = kitFor(row);
+      const kit = destinationKitOf(row);
       if (kit === undefined) return fail(run, 'pushing', 'push_failed');
       const target = { kind: kit.destination.kind, id: row.target };
       // The intent first: from here the destination may hold the new value, whether the push answers, throws or the process dies.
@@ -480,7 +480,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     if (!chosen.ok) return fail(run, 'redeploying', chosen.code);
     const master = chosen.value;
     for (const row of store.destinationsOf(run.keyref)) {
-      const kit = row.kind === WORKSTATION ? undefined : kitFor(row);
+      const kit = row.kind === WORKSTATION ? undefined : destinationKitOf(row);
       if (kit?.redeployer === undefined || !kit.destination.properties().needsRedeploy) continue;
       const redeployer = kit.redeployer;
       const target = { kind: kit.destination.kind, id: row.target };
@@ -637,7 +637,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     if (receipt.kind === PLATFORM_SET) {
       // overlap:false: the platform took the new value and dropped the old one; it takes the old one back, which the vault still holds. A
       // first generation has no old value to set, so the platform keeps the new one and the run holds (the value stays in the vault).
-      const set = setterOf(deps.platform(head.platform)?.issuer);
+      const set = setterOf(kitFor(deps, head)?.issuer);
       if (set === undefined || old === undefined) return false;
       return (await attempt(run, 'rollback', () => set(old, store.keyInfo(run.keyref)?.location ?? {}, master), 'reset_refused')).ok;
     }
@@ -740,11 +740,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   function start(input: StartInput): RunRow {
     const { head, info } = placedKeyOf(input.keyref);
     // KBOX-34: a paste-source platform cannot issue; its keys change only by a paste (a value), never by an api run.
-    if (input.value === undefined && isPasteSource(deps, head.platform)) throw new ApiError('rejected', 'no_issuer');
+    if (input.value === undefined && isPasteSource(deps, head)) throw new ApiError('rejected', 'no_issuer');
     const genOld = store.gens(input.keyref).find((g) => g.status === 'current')?.gen ?? 0;
     // overlap:false (review N6): the platform's one credential is set to a value the box chose, and a failure sets the current one back; with
     // no current generation there is nothing to set back, and the box would overwrite a credential it never held.
-    if (input.value === undefined && genOld === 0 && !overlapOf(deps.platform(head.platform))) throw new ApiError('rejected', 'no_current_generation');
+    if (input.value === undefined && genOld === 0 && !overlapOf(kitFor(deps, head))) throw new ApiError('rejected', 'no_current_generation');
     const genNew = store.topGen(input.keyref) + 1;
     const runId = `run_${hex(deps.random.bytes(8))}`;
     const withValue = input.value !== undefined;

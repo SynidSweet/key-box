@@ -41,9 +41,9 @@ test('KBOX-23 a destination kind has the kit of the entry that registered it, sp
 test('KBOX-40 a paste-only entry (no issuer) is a registered paste source with the shape it states; a platform that issues is not one', () => {
   const w = world();
   const source = sourceOf([pasteOnlyEntry(w, SHAPE), fakeEntry(w)]);
-  assert.equal(isPasteSource(source, 'pasteonly'), true);
-  assert.equal(isPasteSource(source, 'fake'), false);
-  assert.equal(isPasteSource(source, 'unknown'), false, 'an unregistered platform is no paste source');
+  assert.equal(isPasteSource(source, { platform: 'pasteonly', keyref: 'pasteonly/p/KEY' }), true);
+  assert.equal(isPasteSource(source, { platform: 'fake', keyref: 'fake/p/KEY' }), false);
+  assert.equal(isPasteSource(source, { platform: 'unknown', keyref: 'unknown/p/KEY' }), false, 'an unregistered platform is no paste source');
   assert.deepEqual(source.platform('pasteonly')?.shape, SHAPE);
 });
 

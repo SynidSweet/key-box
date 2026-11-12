@@ -8,7 +8,7 @@ import type { Vault } from '../ports/vault.ts';
 import { adapterKindOf } from '../pure/destination-kind.ts';
 import { covers } from '../pure/location.ts';
 import { classifierOf } from '../pure/platform-shape.ts';
-import { tryLend } from './rotation-ports.ts';
+import { kitFor, tryLend } from './rotation-ports.ts';
 import type { MasterResult, MasterRow, PlatformKit, PlatformSource } from './rotation-ports.ts';
 import type { KeyInfo } from './rotation-store.ts';
 
@@ -31,6 +31,7 @@ const kitOf = (entry: PlatformEntry): PlatformKit => ({
   ...(entry.locationProver === undefined ? {} : { locationProver: entry.locationProver }),
   ...(entry.retirer === undefined ? {} : { retirer: entry.retirer }),
   ...(entry.verifyHints === undefined ? {} : { verifyHints: entry.verifyHints }),
+  ...(entry.boxKey === undefined ? {} : { boxKey: entry.boxKey }),
 });
 
 /** A candidate master row with the scope items its authority is read from. */
@@ -45,31 +46,31 @@ const sameItems = (a: readonly string[], b: readonly string[]): boolean => a.len
 export function createPlatformSource(deps: PlatformSourceDeps): PlatformSource {
   const entryOf = (id: PlatformId): PlatformEntry | undefined => deps.registry.find((e) => e.id === id);
 
+  const platformKit = (id: PlatformId): PlatformKit | undefined => {
+    const entry = entryOf(id);
+    return entry === undefined ? undefined : kitOf(entry);
+  };
+
   /**
-   * KBOX-57: the platform's master rows that can serve at all: master class; master by the entry's own classification of the row's stored
-   * scope at its stored location (a row raised to master only by the KBOX-15 floor, a Vercel project token, is none); a current generation the
-   * vault lends (a failed create leaves its row). A row without a stored record, or a platform without a registered classification, has none.
+   * KBOX-57: the platform's master rows that can serve at all: master class; master by its own kit's classification (`kitFor`, KBOX-55: the
+   * box-made key is master by its kit) of the row's stored scope at its stored location (a row raised to master only by the KBOX-15 floor, a
+   * Vercel project token, is none); a current generation the vault lends (a failed create leaves its row). A row without a stored record, or
+   * whose kit has no registered classification, has none.
    */
-  const candidates = (platform: PlatformId): readonly Candidate[] => {
-    const entry = entryOf(platform);
-    const classify = entry === undefined ? undefined : classifierOf(kitOf(entry));
-    if (classify === undefined) return [];
-    return deps.meta
+  const candidates = (platform: PlatformId): readonly Candidate[] =>
+    deps.meta
       .snapshot()
       .keys.filter((k) => k.class === 'master' && k.platform === platform)
       .flatMap((row) => {
+        const classify = classifierOf(kitFor({ platform: platformKit }, { platform, keyref: row.keyref }));
         const info = deps.keyInfo(row.keyref);
-        if (info === undefined || classify({ items: info.scopeItems }, info.location) !== 'master') return [];
+        if (classify === undefined || info === undefined || classify({ items: info.scopeItems }, info.location) !== 'master') return [];
         const lent = tryLend(deps.vault, row.keyref, row.gen_current);
         return lent.ok ? [{ at: info.location, items: info.scopeItems, value: lent.value }] : [];
       });
-  };
 
   return {
-    platform: (id) => {
-      const entry = entryOf(id);
-      return entry === undefined ? undefined : kitOf(entry);
-    },
+    platform: platformKit,
     // The kit of the one entry that registered this kind (the registry check refuses two); the workstation and unknown text have none.
     destination: (kind) => {
       const adapterKind = adapterKindOf(kind);

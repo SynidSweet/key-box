@@ -1,12 +1,12 @@
-// KBOX-41 (identity half), KBOX-24: the `google` registry entry. This unit registers the box's own identity toward Google Cloud: the OIDC
-// documents core serves, the grant check, and the box's signing key as the platform's one key class and shape. The API-key issuer, its
-// lister and verifier, the Secret Manager destination and the relay profile are added by the next Google unit (google-b, KBOX-59), which then
-// takes the class and shape from its issuer.
-import type { PlatformEntry, RegistryDeps } from '../../ports/platform.ts';
+// KBOX-41 (identity half), KBOX-24, KBOX-55: the `google` registry entry. This unit registers the box's own identity toward Google Cloud: the
+// OIDC documents core serves, the grant check, and the box's signing key, which the box makes itself (`boxKey`), as the platform's one key class
+// and shape. The API-key issuer, its lister and verifier, the Secret Manager destination and the relay profile are added by the next Google unit
+// (google-b, KBOX-59), which then takes the class and shape from its issuer.
+import type { BoxMadeKey, PlatformEntry, RegistryDeps } from '../../ports/platform.ts';
 import { createGrantCheck, RESOURCE_MANAGER_HOST } from './grant-check.ts';
 import { createMinter, IAM_CREDENTIALS_HOST, STS_HOST } from './minter.ts';
-import { discoveryDocument, jwksDocument } from './oidc.ts';
-import { SIGNING_KEY_SHAPE } from './signing-key.ts';
+import { JWKS_PUBLISH_LEAD_MS, discoveryDocument, jwksDocument } from './oidc.ts';
+import { SIGNING_KEY_SHAPE, checkSigningKey, generateSigningKey } from './signing-key.ts';
 
 /** The ids docs/probes/google.md still marks STILL UNVERIFIED (KBOX-42). */
 const UNVERIFIED = [
@@ -18,6 +18,15 @@ const UNVERIFIED = [
   'google.must-deny-discovery',
   'google.apikeys-admin-scope',
 ] as const;
+
+/** KBOX-55: the box's signing key, `google/p/OIDC_SIGNING_KEY`. Its proof at STS (`prove`) comes with its rotation (google-key-c). */
+const SIGNING_KEY: BoxMadeKey = {
+  name: 'OIDC_SIGNING_KEY',
+  shape: SIGNING_KEY_SHAPE,
+  publishLeadMs: JWKS_PUBLISH_LEAD_MS,
+  generate: generateSigningKey,
+  check: checkSigningKey,
+};
 
 export function createGoogleEntry(deps: RegistryDeps): PlatformEntry {
   // The minter takes the deps whole: the stored-record reader is read there and nowhere else (the arch check `key info reads`).
@@ -31,5 +40,6 @@ export function createGoogleEntry(deps: RegistryDeps): PlatformEntry {
     classify: () => 'master',
     identity: { discovery: discoveryDocument, jwks: jwksDocument },
     grantCheck: createGrantCheck({ http: deps.http, minter }),
+    boxKey: SIGNING_KEY,
   };
 }

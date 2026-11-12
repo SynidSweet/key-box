@@ -6,7 +6,25 @@ import type { Clock } from './clock.ts';
 import type { AdapterHttp } from './http.ts';
 import type { MintedSink } from './minted.ts';
 import type { DenyRule, RelayProfile } from './relay-profile.ts';
+import type { Random } from './random.ts';
 import type { KeyClass, KeyLocation, KeyShape, Lent, LocationSchema, PlatformId, Scope } from './types.ts';
+
+/**
+ * KBOX-55: a master the box makes itself (Google's signing key), at core start and by its own rotation. Not an Issuer: no platform call makes,
+ * lists or revokes it, so its kit (`PlatformSource.kitFor`) carries none of the platform's issuer, lister, verifier or retirer. Its keyref is
+ * `keyrefOf(entry.id, [], name)`.
+ */
+export interface BoxMadeKey {
+  /** The key's env name (`OIDC_SIGNING_KEY`). */
+  readonly name: string;
+  readonly shape: KeyShape;
+  /** How long a new generation is published before the box proves the platform has taken it (`JWKS_PUBLISH_LEAD_MS`). */
+  readonly publishLeadMs: number;
+  /** A new value: random bytes drawn until they form a valid key, stored exactly as drawn (for Google, 32 bytes as 43 base64url characters). */
+  generate(random: Random): Uint8Array;
+  /** Whether a stored value opens as a key of this kind. */
+  check(value: Lent): Promise<'ok' | 'rejected'>;
+}
 
 /**
  * KBOX-41: the box's own OIDC identity, from core's configuration: who it says it is (`https://keys.<domain>`) and the audience its
@@ -101,6 +119,8 @@ export interface PlatformEntry {
   readonly identity?: IdentityDocuments;
   /** KBOX-24: the check core runs when a grant of one of this platform's keys is proposed, and daily on granted keys. */
   readonly grantCheck?: GrantCheck;
+  /** KBOX-55: the master this platform's keys depend on that the box makes itself; it never reads `issuer`, nor `issuer` it. */
+  readonly boxKey?: BoxMadeKey;
   /** The probe ids (KBOX-42) that `docs/probes/<id>.md` still marks STILL UNVERIFIED. */
   readonly unverified: readonly string[];
 }

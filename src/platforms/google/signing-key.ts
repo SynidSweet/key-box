@@ -3,6 +3,7 @@
 // signature leave, the scalar and the KeyObject built from it never do.
 import { createECDH, createHash, createPrivateKey, sign } from 'node:crypto';
 import type { KeyObject } from 'node:crypto';
+import type { Random } from '../../ports/random.ts';
 import type { KeyShape, Lent } from '../../ports/types.ts';
 import { GoogleError } from './errors.ts';
 
@@ -61,3 +62,36 @@ export const signCompact = (key: Lent, signingInput: (kid: string) => string): P
     const input = signingInput(jwk.kid);
     return Promise.resolve(`${input}.${sign('sha256', Buffer.from(input, 'utf8'), { key: privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url')}`);
   });
+
+/** The order n of the P-256 group (SEC 2): a private scalar d is valid when 0 < d < n. */
+const P256_ORDER = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n;
+const SCALAR_BYTES = 32;
+
+/**
+ * KBOX-55: a new signing key: 32 random bytes, drawn again until they are a valid P-256 scalar, stored as exactly those bytes in 43 base64url
+ * characters (a leading zero byte is kept). Every draw is zeroed once read.
+ */
+export function generateSigningKey(random: Random): Uint8Array {
+  for (;;) {
+    const raw = random.bytes(SCALAR_BYTES);
+    const draw = Buffer.from(raw);
+    raw.fill(0);
+    try {
+      const d = BigInt(`0x${draw.toString('hex')}`);
+      if (d > 0n && d < P256_ORDER) return Buffer.from(draw.toString('base64url'), 'latin1');
+    } finally {
+      draw.fill(0);
+    }
+  }
+}
+
+/** KBOX-55: whether a stored value opens as a signing key; anything that is not one is `rejected`, any other failure is passed on. */
+export async function checkSigningKey(key: Lent): Promise<'ok' | 'rejected'> {
+  try {
+    await publicJwkOf(key);
+    return 'ok';
+  } catch (error) {
+    if (error instanceof GoogleError && error.code === 'signing_key_unreadable') return 'rejected';
+    throw error;
+  }
+}

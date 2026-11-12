@@ -31,8 +31,8 @@ import type { KeyKind, Verifier } from '../ports/issuer.ts';
 import type { KeyLocation, KeyShape } from '../ports/types.ts';
 import type { PasteAction } from './new-key.ts';
 import type { Orchestrator } from './orchestrator.ts';
-import { kindOfStored, storedPlacement, verifierFor } from './rotation-ports.ts';
-import type { PlatformSource } from './rotation-ports.ts';
+import { kindOfStored, kitFor, storedPlacement, verifierFor } from './rotation-ports.ts';
+import type { PlatformKit, PlatformSource } from './rotation-ports.ts';
 
 export const PASTE_TTL_MS = 14 * 24 * 3600_000;
 /** The core length floor of KBOX-12 (open point 2: one constant). */
@@ -152,6 +152,12 @@ export function createPaste(deps: PasteDeps): Paste {
     if (placed !== 'ok') refuse(id, rejected(placed), placed);
   };
 
+  /** The platform a task's key is on: the action's for a new key, the stored key's for a rotation ('' for a key no longer stored). */
+  const platformOf = (action: PasteAction): string =>
+    action.kind === 'add_key' ? action.platform : (deps.meta.snapshot().keys.find((k) => k.keyref === action.keyref)?.platform ?? '');
+  /** The adapters a task is judged with: its platform's for a new key, the stored key's own kit for a rotation (KBOX-55). */
+  const kitOfTask = (action: PasteAction): PlatformKit | undefined =>
+    action.kind === 'add_key' ? deps.source.platform(action.platform) : kitFor(deps.source, { platform: platformOf(action), keyref: action.keyref });
   /** The key a task is for, as KBOX-58 judges it: the action's scope and location for a new key, the stored ones for a rotation. */
   const kindOf = (action: PasteAction): KeyKind =>
     action.kind === 'add_key' ? { scopeItems: action.scope.items, at: locationOf(action) } : kindOfStored(deps.store.keyInfo(action.keyref));
@@ -227,7 +233,7 @@ export function createPaste(deps: PasteDeps): Paste {
       const reason = r.reason_json === null ? undefined : (JSON.parse(r.reason_json) as Reason);
       const coverage = action.kind === 'rotate_key' ? deps.meta.coverageOf(action.keyref) : undefined;
       const page = renderPage(action, { requester, ...(reason === undefined ? {} : { reason }), ...(coverage === undefined ? {} : { coverage }) });
-      const kit = deps.source.platform(action.kind === 'add_key' ? action.platform : (deps.meta.snapshot().keys.find((k) => k.keyref === action.keyref)?.platform ?? ''));
+      const kit = kitOfTask(action);
       const link = kit?.keyPageUrl;
       // KBOX-40, KBOX-58: a hint is a choice of the verifier's calls, so it is offered only where a verifier applies to the task's key.
       const hints = verifierFor(kit, kindOf(action)) === undefined ? [] : (kit?.verifyHints ?? []);
@@ -275,15 +281,15 @@ export function createPaste(deps: PasteDeps): Paste {
       const verdict = deps.approvers.check({ kind: 'decide', approvalId: id, revision: r.revision }, (nonce) => pasteChallenge(id, digest, nonce), proof);
       if (!verdict.ok) throw new ApiError('forbidden', 'proof_refused');
       const action = actionOf(r);
-      const platform = action.kind === 'add_key' ? action.platform : (deps.meta.snapshot().keys.find((k) => k.keyref === action.keyref)?.platform ?? '');
+      const platform = platformOf(action);
+      const kit = kitOfTask(action);
       // KBOX-40: a hint outside the entry's list is refused before anything is stored, and the task stays for the retry.
-      if (verifyHint !== undefined && !(deps.source.platform(platform)?.verifyHints ?? []).includes(verifyHint)) throw rejected('bad_verify_hint');
+      if (verifyHint !== undefined && !(kit?.verifyHints ?? []).includes(verifyHint)) throw rejected('bad_verify_hint');
       // KBOX-57: a reference taken while the task waited settles it failed, before the verifier sees the value; a key elsewhere is a new key.
       if (action.kind === 'add_key' && deps.store.keyExists(keyrefOf(action.platform, action.projects, action.name))) refuseTaken(id);
       // KBOX-57: a stored location the entry now refuses fails the task with that code, so the value never reaches the verifier.
       if (action.kind === 'rotate_key') refuseUnplaced(id, action.keyref);
       const at = action.kind === 'add_key' ? locationOf(action) : (deps.store.keyInfo(action.keyref)?.location ?? {});
-      const kit = deps.source.platform(platform);
       const kind = kindOf(action);
       const shape = shapeOfKey(kit, kind);
       if (kit === undefined || shape === undefined) throw rejected('unknown_platform');

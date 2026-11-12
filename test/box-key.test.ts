@@ -22,7 +22,7 @@ import { ensureBoxKeys } from '../src/shell/box-keys.ts';
 import { openCore } from '../src/shell/core.ts';
 import type { CoreParts } from '../src/shell/core.ts';
 import { createPlatformSource } from '../src/shell/platform-source.ts';
-import { isPasteSource, rotatesByPaste, verifierFor } from '../src/shell/rotation-ports.ts';
+import { isPasteSource, kitFor, rotatesByPaste, verifierFor } from '../src/shell/rotation-ports.ts';
 import type { PlatformSource } from '../src/shell/rotation-ports.ts';
 import { createRotationStore } from '../src/shell/rotation-store.ts';
 import type { GenRow, RotationStore } from '../src/shell/rotation-store.ts';
@@ -96,9 +96,9 @@ test('KBOX-55 a draw with a leading zero byte keeps all 32 bytes (the 7bf8e11 le
 
 test('KBOX-55 check: a generated value opens as a P-256 key (ok); the order itself, a short value and text that is not base64url are rejected', async () => {
   const box = boxKeyOf(createGoogleEntry(googleDeps()));
-  assert.equal(await box.check(lent(box.generate(seededRandom(11)))), 'ok');
+  assert.equal(await box.check(lent(box.generate(seededRandom(11)), 'generated')), 'ok');
   for (const bad of [ORDER.toString('base64url'), scalarText('short').slice(0, 42), `${scalarText('star').slice(0, 42)}*`]) {
-    assert.equal(await box.check(lent(Buffer.from(bad, 'latin1'))), 'rejected', bad);
+    assert.equal(await box.check(lent(Buffer.from(bad, 'latin1'), 'bad')), 'rejected', bad);
   }
 });
 
@@ -164,7 +164,7 @@ function googleWithApiKeys(world: FakePlatformWorld, deps: RegistryDeps = google
 
 test('KBOX-55 kitFor gives the box keyref only its box key, its shape and master class: no issuer, lister, verifier or retirer even where the platform has them', () => {
   const { entry } = googleWithApiKeys(new FakePlatformWorld(seededRandom(4)));
-  const kit = sourceOf([entry]).kitFor({ platform: 'google', keyref: BOX_REF });
+  const kit = kitFor(sourceOf([entry]), { platform: 'google', keyref: BOX_REF });
   assert.ok(kit !== undefined);
   assert.deepEqual(Object.keys(kit).sort(), ['boxKey', 'classify', 'shape']);
   assert.equal(kit.boxKey, entry.boxKey);
@@ -177,7 +177,7 @@ test('KBOX-55 kitFor gives any other Google keyref the platform kit without the 
   const { entry } = googleWithApiKeys(new FakePlatformWorld(seededRandom(4)));
   const source = sourceOf([entry]);
   for (const keyref of ['google/shop/OIDC_SIGNING_KEY', 'google/p/MAPS_KEY']) {
-    const kit = source.kitFor({ platform: 'google', keyref });
+    const kit = kitFor(source, { platform: 'google', keyref });
     assert.ok(kit !== undefined, keyref);
     assert.equal(kit.boxKey, undefined, keyref);
     assert.equal(kit.issuer, entry.issuer, keyref);
@@ -186,7 +186,7 @@ test('KBOX-55 kitFor gives any other Google keyref the platform kit without the 
     assert.equal(verifierFor(kit, { scopeItems: [], at: {} }), entry.verifier, keyref);
   }
   assert.equal(source.platform('google')?.boxKey, entry.boxKey, 'the platform view (add_key, POST /api/keys) still sees that the box makes a master here');
-  assert.equal(source.kitFor({ platform: 'nosuch', keyref: 'nosuch/p/OIDC_SIGNING_KEY' }), undefined, 'an unregistered platform has no kit');
+  assert.equal(kitFor(source, { platform: 'nosuch', keyref: 'nosuch/p/OIDC_SIGNING_KEY' }), undefined, 'an unregistered platform has no kit');
 });
 
 test('KBOX-55 a key whose kit makes it by box is never a paste source, and rotates by approval: isPasteSource and rotatesByPaste are asked per key', () => {
@@ -312,7 +312,7 @@ test('KBOX-55 a first start with domain and audience makes the signing key: one 
   assert.equal(actions(parts, 'key.issued', BOX_REF), 1);
   assert.equal(keyChanged(parts, BOX_REF), 1);
   assert.deepEqual(parts.meta.snapshot().approvals, []);
-  assert.deepEqual(parts.db.prepare('SELECT count(*) AS n FROM paste_tasks').get(), { n: 0 });
+  assert.equal((parts.db.prepare('SELECT count(*) AS n FROM paste_tasks').get() as { n: number }).n, 0);
 });
 
 test('KBOX-55 a restart reuses the key: the same vault bytes and kid, no new generation, no second key.issued', async (t) => {
@@ -392,14 +392,18 @@ test('KBOX-55 negative control: an admin google row, or a master row of another 
 test('KBOX-55 KBOX-52 the rotation record makes the fresh key due on schedule: no rotate_key request before 90 days, exactly one approval (never a paste task) after', async (t) => {
   const box = await boxCore(t);
   await box.start();
-  box.clock.advance(90 * DAY - HOUR);
-  const before = (await box.read()).parts.meta.snapshot().approvals.length;
-  assert.equal(before, 0, 'not due before 90 days');
+  await box.read();
+  // The days pass with core stopped; each start runs one hourly tick of its own: at 90 days less an hour, then at 90 days and an hour.
+  box.clock.advance(90 * DAY - 2 * HOUR);
   await box.start();
-  box.clock.advance(2 * HOUR);
+  box.clock.advance(HOUR);
+  assert.deepEqual((await box.read()).parts.meta.snapshot().approvals, [], 'not due before 90 days');
+  box.clock.advance(HOUR);
+  await box.start();
+  box.clock.advance(HOUR);
   const { parts } = await box.read();
   assert.deepEqual(parts.meta.snapshot().approvals.map((a) => a.slot), [`rotate_key:${BOX_REF}`]);
-  assert.deepEqual(parts.db.prepare('SELECT count(*) AS n FROM paste_tasks').get(), { n: 0 });
+  assert.equal((parts.db.prepare('SELECT count(*) AS n FROM paste_tasks').get() as { n: number }).n, 0);
 });
 
 // --- the JWKS ------------------------------------------------------------------------------------------------------------------------
@@ -471,15 +475,15 @@ test('KBOX-55 KBOX-33 the share file watches a box key\'s pending generation (no
   const share = createMetaShareSource({
     meta: parts.meta,
     values: parts.share.values,
-    shapeOf: (platform, keyref) => source.kitFor({ platform, keyref })?.shape,
-    boxMade: (platform, keyref) => source.kitFor({ platform, keyref })?.boxKey !== undefined,
+    shapeOf: (platform, keyref) => kitFor(source, { platform, keyref })?.shape,
+    boxMade: (platform, keyref) => kitFor(source, { platform, keyref })?.boxKey !== undefined,
     generations: (keyref) => store.gens(keyref),
   });
   const listed = (await share.keys()).map((k) => ({ name: k.name, gen: k.gen, retired: k.retired, watched: k.value !== '' }));
   assert.deepEqual(listed, [
+    { name: 'MAPS_KEY', gen: 1, retired: false, watched: true },
     { name: 'OIDC_SIGNING_KEY', gen: 1, retired: false, watched: true },
     { name: 'OIDC_SIGNING_KEY', gen: 2, retired: false, watched: true },
-    { name: 'MAPS_KEY', gen: 1, retired: false, watched: true },
   ]);
 });
 
@@ -496,7 +500,6 @@ test('KBOX-55 negative control through the real orchestrator and reconcile: a ru
   const w = await rotationWorld(t, {
     source: () => ({
       platform: (id) => now().platform(id),
-      kitFor: (key) => now().kitFor(key),
       destination: (kind) => now().destination(kind),
       master: (platform, at, items) => now().master(platform, at, items),
       masters: (platform) => now().masters(platform),

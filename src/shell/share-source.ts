@@ -3,7 +3,8 @@
 // adapter registered), no stored value, or a value that is not UTF-8 text is listed with no value and so is not watched. The
 // generations a rotation retired follow the current one with `retired: true` (what rotate records, through `generations`): one in
 // grace still has its value in the vault and is watched; one the rotation has revoked has none (the vault retires the value with
-// the key), so it is listed and not watched. "Box generated" is not yet known: every value is `pasted`, which holds it to the strict
+// the key), so it is listed and not watched. A box-made key's `pending` generation (KBOX-55) is published in the JWKS from the moment it is
+// drawn, so it is watched too, and not as retired. "Box generated" is not yet known: every value is `pasted`, which holds it to the strict
 // shape check.
 import type { MetaStore } from '../ports/meta.ts';
 import type { ShareSource, ShareValues } from '../ports/share.ts';
@@ -18,6 +19,8 @@ export interface MetaShareSourceDeps {
   shapeOf(platform: string, keyref: string): KeyShape | undefined;
   /** The generations the rotation store holds for a key. Absent where nothing rotates: only current generations are listed. */
   readonly generations?: (keyref: string) => readonly Pick<GenRow, 'gen' | 'status'>[];
+  /** Whether the box makes this key itself (KBOX-55: its kit has `boxKey`). Absent where no platform registers one: none is. */
+  readonly boxMade?: (platform: string, keyref: string) => boolean;
 }
 
 /** The project a key with no project is listed under. */
@@ -31,6 +34,14 @@ function retiredGenerations(rows: readonly Pick<GenRow, 'gen' | 'status'>[], cur
     .sort((a, b) => a - b);
 }
 
+/** KBOX-55: a box-made key's generations that are published before they are current. */
+function pendingGenerations(rows: readonly Pick<GenRow, 'gen' | 'status'>[], current: number): number[] {
+  return rows
+    .filter((row) => row.gen !== current && row.status === 'pending')
+    .map((row) => row.gen)
+    .sort((a, b) => a - b);
+}
+
 export function createMetaShareSource(deps: MetaShareSourceDeps): ShareSource {
   return {
     async keys() {
@@ -38,7 +49,13 @@ export function createMetaShareSource(deps: MetaShareSourceDeps): ShareSource {
       for (const key of deps.meta.snapshot().keys) {
         if (key.class === 'ordinary') continue;
         const shape = deps.shapeOf(key.platform, key.keyref);
-        const gens = [{ gen: key.gen_current, retired: false }, ...retiredGenerations(deps.generations?.(key.keyref) ?? [], key.gen_current).map((gen) => ({ gen, retired: true }))];
+        const rows = deps.generations?.(key.keyref) ?? [];
+        const pending = deps.boxMade?.(key.platform, key.keyref) === true ? pendingGenerations(rows, key.gen_current) : [];
+        const gens = [
+          { gen: key.gen_current, retired: false },
+          ...pending.map((gen) => ({ gen, retired: false })),
+          ...retiredGenerations(rows, key.gen_current).map((gen) => ({ gen, retired: true })),
+        ];
         // A row may list a project twice; the file holds one entry set per project, name and generation.
         const projects = key.projects.length === 0 ? [NO_PROJECT] : [...new Set(key.projects)];
         for (const { gen, retired } of gens) {

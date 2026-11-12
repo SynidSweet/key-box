@@ -11,7 +11,7 @@ import { DOMAIN_NAME } from './pure/actions.ts';
 import type { Action, ActionKind } from './pure/actions.ts';
 import { parseWordlist } from './pure/codes.ts';
 import { RegistryRefused, assertRegistry } from './pure/profile.ts';
-import { shapeOfRegistryKey } from './pure/platform-shape.ts';
+import { shapeOfKey } from './pure/platform-shape.ts';
 import { vetAction } from './pure/proposal-vet.ts';
 import { osErrorCode } from './pure/errors.ts';
 import { decodeJsonBody } from './pure/schemas.ts';
@@ -40,12 +40,13 @@ import type { Executor } from './shell/approvals.ts';
 import { createPlatformSource } from './shell/platform-source.ts';
 import { openRotation } from './shell/rotation.ts';
 import { readKeyInfo } from './shell/rotation-store.ts';
-import { kindOfStored } from './shell/rotation-ports.ts';
+import { kindOfStored, kitFor } from './shell/rotation-ports.ts';
 import type { Rotation } from './shell/rotation.ts';
 import type { PlatformSource } from './shell/rotation-ports.ts';
 import { createGrantChecks } from './shell/grant-checks.ts';
 import type { GrantChecks } from './shell/grant-checks.ts';
 import { identityRoutes } from './shell/identity-routes.ts';
+import { ensureBoxKeys } from './shell/box-keys.ts';
 
 interface Config {
   readonly stateDir: string;
@@ -160,6 +161,9 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   const storedRecord = (keyref: string): StoredKey | undefined => readKeyInfo(parts.db, keyref);
   storedOf = storedRecord;
   const privateStore = openPrivateDatabase(join(config.stateDir, 'private.db'), journal);
+  // The registry's view for each stored key (KBOX-55: the box-made key's kit is its own): the share file reads it; rotation is handed the
+  // runtime's source when a test passes one.
+  const registrySource = createPlatformSource({ registry, meta: parts.meta, vault: parts.vault, keyInfo: storedRecord });
   let approve: ReturnType<typeof openApproveCore> | undefined;
   let idle: IdleWatch | undefined;
   let rotation: Rotation | undefined;
@@ -196,10 +200,9 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
       if (executor === undefined) throw new RangeError('rotation is not open');
       return executor(approval);
     };
-    const source = runtime.platforms ?? createPlatformSource({ registry, meta: parts.meta, vault: parts.vault, keyInfo: storedRecord });
+    const source = runtime.platforms ?? registrySource;
     const checks = createGrantChecks({ registry, meta: parts.meta, keyInfo: storedRecord, master: (platform, at, items) => source.master(platform, at, items), audit: parts.audit, events: parts.events, clock });
     grantChecks = checks;
-    identityPages = identityRoutes({ registry, meta: parts.meta, vault: parts.vault, issuer: `https://keys.${config.domain}` });
     approve = openApproveCore({
       parts,
       approverStore: privateStore,
@@ -215,14 +218,27 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
       updateChanges: (action) => updater.changes(action),
       precheck: (action) => checks.atProposal(action),
     });
-    rotation = openRotation({ parts, approvals: approve.approvals, approvers: approve.approvers, push, clock, scheduler, random, audit: parts.audit, source });
+    const opened = openRotation({ parts, approvals: approve.approvals, approvers: approve.approvers, push, clock, scheduler, random, audit: parts.audit, source });
+    rotation = opened;
+    // KBOX-41, KBOX-55: with the box's identity (domain and audience), its own signing key is made once, before anything is served, and its
+    // documents are served; the JWKS reads the key's generations by status. Without it there is no key and nothing to publish.
+    if (identity !== undefined) {
+      ensureBoxKeys({ registry, meta: parts.meta, vault: parts.vault, store: opened.store, random, clock, audit: parts.audit });
+      identityPages = identityRoutes({ registry, source: registrySource, meta: parts.meta, vault: parts.vault, generations: (keyref) => opened.store.gens(keyref), issuer: identity.issuer });
+    }
   }
   const rotationStore = rotation?.store;
   const shares = createShareWriter({
     dir: join(config.stateDir, 'share'),
     meta: parts.meta,
     signingKey: parts.share.signingKey,
-    source: createMetaShareSource({ meta: parts.meta, values: parts.share.values, shapeOf: (platform, keyref) => shapeOfRegistryKey(registry, platform, kindOfStored(readKeyInfo(parts.db, keyref))), ...(rotationStore === undefined ? {} : { generations: (keyref: string) => rotationStore.gens(keyref) }) }),
+    source: createMetaShareSource({
+      meta: parts.meta,
+      values: parts.share.values,
+      shapeOf: (platform, keyref) => shapeOfKey(kitFor(registrySource, { platform, keyref }), kindOfStored(readKeyInfo(parts.db, keyref))),
+      boxMade: (platform, keyref) => kitFor(registrySource, { platform, keyref })?.boxKey !== undefined,
+      ...(rotationStore === undefined ? {} : { generations: (keyref: string) => rotationStore.gens(keyref) }),
+    }),
     events: parts.events,
     hub: parts.hub,
     clock,

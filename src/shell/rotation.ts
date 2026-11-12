@@ -25,7 +25,7 @@ import { createReconciler } from './reconcile.ts';
 import type { Reconciler } from './reconcile.ts';
 import { createRotationStore } from './rotation-store.ts';
 import type { KeyHead, RotationStore } from './rotation-store.ts';
-import { isPasteSource as pasteSource, overlapOf, proposalRefusal, rotatesByPaste as pasteRotation } from './rotation-ports.ts';
+import { createsByPaste, isPasteSource as pasteSource, overlapOf, proposalRefusal, rotatesByPaste as pasteRotation } from './rotation-ports.ts';
 import type { RotationRefusal } from './rotation-ports.ts';
 import type { PlatformSource, Point } from './rotation-ports.ts';
 
@@ -88,15 +88,17 @@ export function openRotation(deps: RotationDeps): Rotation {
     ...deliveryRoutes(delivery),
     ...pasteRoutes(paste),
   ];
-  const isPasteSource = (platform: string): boolean => pasteSource(deps.source, platform);
+  /** KBOX-34: this stored key's next value is made on the phone (asked of its own kit, KBOX-55). */
+  const isPasteSource = (key: Pick<KeyHead, 'platform' | 'keyref'>): boolean => pasteSource(deps.source, key);
   /** KBOX-34: this stored key's next value comes by paste (a paste-source platform, or a master whose issuer is not selfRotate). */
-  const rotatesByPaste = (key: Pick<KeyHead, 'platform' | 'class'>): boolean => pasteRotation(deps.source, key);
+  const rotatesByPaste = (key: Pick<KeyHead, 'platform' | 'keyref' | 'class'>): boolean => pasteRotation(deps.source, key);
 
   const executors: Rotation['executors'] = {
     add_key: async (a) => {
       const action = a.action;
       if (action.kind !== 'add_key') return { result: 'failed', reason: 'wrong_kind' };
-      if (isPasteSource(action.platform)) return { result: 'failed', reason: 'paste_required' };
+      // A new key is asked of its platform (KBOX-55: never of a stored key's own kit).
+      if (createsByPaste(deps.source.platform(action.platform))) return { result: 'failed', reason: 'paste_required' };
       if (!overlapOf(deps.source.platform(action.platform))) return { result: 'failed', reason: 'overlap_needs_paste' };
       const key = newKeyOf(action, deps.source);
       if (store.keyExists(key.keyref)) return { result: 'failed', reason: 'key_exists' };
@@ -178,7 +180,7 @@ export function openRotation(deps: RotationDeps): Rotation {
     if (last?.state === 'failed' && now - (last.failedAt ?? last.openedAt) < AFTER_FAILURE_MS) return;
     if (key.class !== 'ordinary' && requestWaits(slot, key, now)) return;
     // KBOX-34: an ordinary key on a paste-source platform has no issuer; the box holds no such key and never runs it as an api run.
-    if (key.class === 'ordinary' && isPasteSource(key.platform)) return;
+    if (key.class === 'ordinary' && isPasteSource(key)) return;
     // KBOX-57, KBOX-58: a stored location the entry now refuses, no master (or two) where a run makes the key, or no verifier that applies to it
     // where a paste would, is skipped: recorded once per key and code; nothing is rewritten.
     const info = store.keyInfo(key.keyref);

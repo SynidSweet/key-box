@@ -5,7 +5,6 @@ import type { Issuer, KeyKind } from '../ports/issuer.ts';
 import type { KeyClass, KeyLocation, KeyShape, Scope } from '../ports/types.ts';
 
 export interface ShapeSource {
-  readonly id?: string;
   readonly issuer?: Issuer;
   readonly shape?: KeyShape;
 }
@@ -15,9 +14,6 @@ export const shapeOf = (source: Pick<ShapeSource, 'issuer' | 'shape'> | undefine
 /** KBOX-58: the shape of one key, by its stored scope items and location: the issuer's `shapeFor` when it names one, else the platform's shape. */
 export const shapeOfKey = (source: Pick<ShapeSource, 'issuer' | 'shape'> | undefined, key: KeyKind): KeyShape | undefined =>
   source?.issuer?.capabilities().shapeFor?.({ items: key.scopeItems }, key.at) ?? shapeOf(source);
-
-/** The shape of one key of the registered platform with this id (KBOX-58), or undefined for a platform that is not registered. */
-export const shapeOfRegistryKey = (registry: readonly ShapeSource[], platform: string, key: KeyKind): KeyShape | undefined => shapeOfKey(registry.find((e) => e.id === platform), key);
 
 export interface ClassSource {
   readonly issuer?: Issuer;

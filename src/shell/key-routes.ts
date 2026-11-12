@@ -18,7 +18,7 @@ import type { AddKey, RotateKey } from './new-key.ts';
 import type { Orchestrator } from './orchestrator.ts';
 import type { Paste } from './paste.ts';
 import { isRecord, only } from './routes-approve.ts';
-import { overlapOf, proposalRefusal, rotatesByPaste, verifierFor } from './rotation-ports.ts';
+import { kitFor, overlapOf, proposalRefusal, rotatesByPaste, verifierFor } from './rotation-ports.ts';
 import type { PlatformSource } from './rotation-ports.ts';
 import type { DestinationRow, RotationStore } from './rotation-store.ts';
 import type { Vault } from '../ports/vault.ts';
@@ -226,11 +226,12 @@ async function provenPlacement(source: PlatformSource, action: AddKey, at: KeyLo
 
 /** Stores a retired value as a retired generation: never lent, never pushed; fingerprinted only when it passes the shape check (KBOX-34). */
 function retire(deps: KeyRouteDeps, q: { readonly platform: string; readonly project: string; readonly name: string }, bytes: Uint8Array): { readonly status: number; readonly json: unknown } {
-  const kit = deps.source.platform(q.platform);
+  const keyref = keyrefOf(q.platform, [q.project], q.name);
+  // KBOX-55: the retired value is of this key, so its class and shape are its own kit's.
+  const kit = kitFor(deps.source, { platform: q.platform, keyref });
   const classify = classifierOf(kit);
   const shape = shapeOf(kit);
   if (classify === undefined || shape === undefined) throw rejected('unknown_platform');
-  const keyref = keyrefOf(q.platform, [q.project], q.name);
   const { store } = deps;
   if (store.key(keyref) === undefined) {
     deps.meta.putKey({

@@ -11,6 +11,7 @@ import type { PlatformId } from '../ports/types.ts';
 import type { Orchestrator } from './orchestrator.ts';
 import { intentAbsent } from '../pure/rotation-machine.ts';
 import { revokeAndConfirm } from './revoke-confirm.ts';
+import { kitFor } from './rotation-ports.ts';
 import type { MasterResult, PlatformSource } from './rotation-ports.ts';
 import type { RotationStore, RunRow } from './rotation-store.ts';
 
@@ -60,8 +61,6 @@ export function createReconciler(deps: ReconcileDeps): Reconciler {
   };
 
   async function sweepPlatform(platform: PlatformId, keys: readonly PlatformKeyInfo[]): Promise<void> {
-    const kit = deps.platform(platform);
-    if (kit === undefined) return;
     for (const key of keys) {
       if (!key.name.startsWith(INTENT_PREFIX) || store.generationIdKnown(key.platformKeyId)) continue;
       const run = store.runs().find((r) => r.intentName === key.name);
@@ -70,6 +69,9 @@ export function createReconciler(deps: ReconcileDeps): Reconciler {
         continue;
       }
       if (orchestrator.isLeased(run.keyref)) continue;
+      // KBOX-55: the orphan is revoked with the kit of the key its run is for, never another key's.
+      const kit = kitFor(deps, { platform, keyref: run.keyref });
+      if (kit === undefined) continue;
       const master = masterOfKey(platform, run.keyref);
       if (!master.ok) {
         auditFailed(run.keyref, run.runId, master.code);
@@ -91,7 +93,7 @@ export function createReconciler(deps: ReconcileDeps): Reconciler {
     if (store.gen(run.keyref, run.genNew) !== undefined) return true;
     const head = store.key(run.keyref);
     const info = store.keyInfo(run.keyref);
-    const lister = head === undefined ? undefined : deps.platform(head.platform)?.lister;
+    const lister = head === undefined ? undefined : kitFor(deps, head)?.lister;
     if (head === undefined || info === undefined) return false;
     // No lister: the platform has nothing to list, so no orphan can be found by listing and there is nothing to wait for.
     if (lister === undefined) return true;
