@@ -25,7 +25,7 @@ test('KBOX-14 a master the platform refuses, quoted back in the 403 message, is 
   const target = { kind: 'vercel-env', id: PROJECT } as const;
   const dest = world.kit.destination;
   const runs: Record<string, () => Promise<unknown>> = {
-    issue: () => world.issuer.issue({ scope: { projectId: PROJECT } }, 'kbox_a', bad),
+    issue: () => world.issuer.issue({ scope: {}, at: { project: PROJECT } }, 'kbox_a', bad),
     revoke: () => world.issuer.revoke('t', bad),
     list: () => world.lister.list(bad),
     listAt: () => world.lister.listAt({ project: PROJECT }, bad),
@@ -41,7 +41,7 @@ test('KBOX-14 a master the platform refuses, quoted back in the 403 message, is 
     }
   }
   world.fake.forceStatus(undefined);
-  const verdict = await world.verifier.verify(bad, { platform: 'vercel' });
+  const verdict = await world.verifier.verify(bad, { platform: 'vercel', at: {} });
   c.assertAbsent({ verdict });
   const outcome = await dest.push(target, 'K', lentText('vcp_KboxTestFakeV'), 'admin', bad);
   c.assertAbsent({ outcome: JSON.stringify(outcome) });
@@ -50,17 +50,17 @@ test('KBOX-14 a master the platform refuses, quoted back in the 403 message, is 
 test('KBOX-14 a create response carrying the canary gives a Lent that prints as its label, a key id that is not the value, and no error holds it afterwards', async () => {
   const c = canary(24);
   const world = await vercelWorld({ mint: () => tokenOf(c) });
-  const made = await world.issuer.issue({ scope: { projectId: PROJECT } }, 'kbox_a', lentLabelled());
+  const made = await world.issuer.issue({ scope: {}, at: { project: PROJECT } }, 'kbox_a', lentLabelled());
   c.assertAbsent({ printed: String(made.value), json: JSON.stringify(made), inspected: inspect(made, { depth: 10 }), id: made.platformKeyId });
   assert.equal(Buffer.from(await bytesOf(made.value)).toString('utf8'), tokenOf(c), 'the value is still usable inside use()');
   // The new token, used as a master and refused (the platform quotes it), leaks nowhere either.
   world.fake.forceStatus(403);
-  for (const run of [() => world.lister.list(made.value), () => world.issuer.revoke('t', made.value), () => world.issuer.issue({ scope: {} }, 'kbox_b', made.value)]) {
+  for (const run of [() => world.lister.list(made.value), () => world.issuer.revoke('t', made.value), () => world.issuer.issue({ scope: {}, at: {} }, 'kbox_b', made.value)]) {
     c.assertAbsent(surfacesOf(await failure(run)));
   }
   world.fake.forceStatus(undefined);
   world.fake.cutAnswers(true);
-  c.assertAbsent(surfacesOf(await failure(() => world.issuer.issue({ scope: {} }, 'kbox_c', lentLabelled()))));
+  c.assertAbsent(surfacesOf(await failure(() => world.issuer.issue({ scope: {}, at: {} }, 'kbox_c', lentLabelled()))));
 });
 
 function lentLabelled() {

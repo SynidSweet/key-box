@@ -192,8 +192,8 @@ test('KBOX-36 ready says failed for a build that ends in error, and for a deploy
 });
 
 // FLIPPED (authorised, KBOX-4): an unknown or vanished deploy is `failed`, and a fresh redeployer answers from the DeployRef and the master alone.
-// The title is kept as it was: the classifier reads a renamed test as a removed one.
-test('KBOX-36 ready for a deploy this redeployer never started is refused with a fixed error, and a finished deploy is forgotten', async () => {
+// Retitled as of the KBOX-4 ruling: the title says what the body asserts.
+test('KBOX-36 KBOX-4 ready for a deploy the platform does not know is failed, and a finished deploy is ready to a fresh redeployer that never started it', async () => {
   fake.reset();
   assert.equal(await redeployer.ready('dpl_unknown', master()), 'failed');
   const ref = await redeployer.redeploy(target, master());
