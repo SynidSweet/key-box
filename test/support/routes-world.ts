@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type { TestContext } from 'node:test';
 import type { Issuer, IssuerCapabilities, Verifier } from '../../src/ports/issuer.ts';
-import type { KeyClass, KeyLocation, Lent, PlatformKeyId, Scope } from '../../src/ports/types.ts';
+import type { KeyClass, KeyLocation, KeyShape, Lent, PlatformKeyId, Scope } from '../../src/ports/types.ts';
 import { deliveryRoutes } from '../../src/shell/deliveries.ts';
 import { keyRoutes } from '../../src/shell/key-routes.ts';
 import type { Route } from '../../src/shell/http.ts';
@@ -38,6 +38,7 @@ const classify = (scope: Scope): KeyClass => {
 };
 
 export const PASTE_PLATFORM = 'pasteco';
+const PASTE_SHAPE: KeyShape = { prefix: 'pk-', alphabet: 'hex', coreLength: { min: 32, max: 32 }, random: true };
 /** A value the paste platform's strict shape accepts: `pk-` and 32 hex characters. */
 export const pasteValue = (hex32: string): string => `pk-${hex32}`;
 
@@ -65,6 +66,8 @@ export interface RoutesWorldOptions {
   readonly checkpoint?: (point: Point) => void | Promise<void>;
   /** false: the api platform holds one credential at a time (it can take a chosen value, so its configuration is accepted). */
   readonly overlap?: boolean;
+  /** true: the paste platform has no issuer; its entry states the shape and the class (KBOX-40), as Anthropic and Stripe do. */
+  readonly pasteOnly?: boolean;
   /** Wraps the approvals rotation is given: a fault planted at the port (a sweep or a proposal that throws). */
   readonly approvals?: (real: RotationApprovals) => RotationApprovals;
   /** Wraps the platform source rotation is given: a fault planted at the port. */
@@ -101,7 +104,7 @@ export async function routesWorld(t: TestContext, options: RoutesWorldOptions = 
       set: 'none',
       revealOnce: false,
       scopeSchema: { fields: ['items'] },
-      shape: { prefix: 'pk-', alphabet: 'hex', coreLength: { min: 32, max: 32 }, random: true },
+      shape: PASTE_SHAPE,
       classify,
     }),
     issue: () => Promise.reject(new Error('a paste platform cannot issue')),
@@ -113,6 +116,7 @@ export async function routesWorld(t: TestContext, options: RoutesWorldOptions = 
   const source: PlatformSource = {
     platform: (id) => {
       if (id === 'fake') return { issuer: apiIssuer, lister: platform.lister, verifier: platform.verifier };
+      if (id === PASTE_PLATFORM && options.pasteOnly === true) return { shape: PASTE_SHAPE, classify, verifier: pasteVerifier, keyPageUrl: 'https://platform.example/keys' };
       if (id === PASTE_PLATFORM) return { issuer: pasteIssuer, verifier: pasteVerifier, keyPageUrl: 'https://platform.example/keys' };
       return undefined;
     },

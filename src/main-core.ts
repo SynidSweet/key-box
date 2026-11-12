@@ -8,7 +8,7 @@ import type { Clock, Scheduler } from './ports/clock.ts';
 import type { PlatformEntry } from './ports/platform.ts';
 import type { Random } from './ports/random.ts';
 import { DOMAIN_NAME } from './pure/actions.ts';
-import type { Action } from './pure/actions.ts';
+import type { Action, ActionKind } from './pure/actions.ts';
 import { parseWordlist } from './pure/codes.ts';
 import { RegistryRefused, assertRegistry } from './pure/profile.ts';
 import { shapeOfPlatform } from './pure/platform-shape.ts';
@@ -114,6 +114,8 @@ const systemRuntime: CoreRuntime = {
 export interface StartedCore {
   /** The route table the server answers from. */
   readonly routes: readonly Route[];
+  /** The kinds core has an executor for (none without the approval half): a proposal of any other kind is refused up front. */
+  readonly executorKinds: ReadonlySet<ActionKind>;
   /**
    * Cancels every timer core set and closes the sockets; resolves then. A rotation run waiting on a platform or destination call is not waited
    * for (review N4): every run is persisted step by step, so the process may end there and the next start resumes it.
@@ -177,6 +179,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
       domain: config.domain,
       wordlist,
       vet: vetAction(registry),
+      refuseUnwired: true,
       executors: { install_update: updater.executor, rotate_key: viaRotation('rotate_key'), add_key: viaRotation('add_key') },
       updateChanges: (action) => updater.changes(action),
     });
@@ -282,7 +285,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
     );
   };
   let stopping: Promise<void> | undefined;
-  return { routes, stop: () => (stopping ??= shutDown()), closed };
+  return { routes, executorKinds: approve?.executorKinds ?? new Set(), stop: () => (stopping ??= shutDown()), closed };
 }
 
 async function main(): Promise<void> {

@@ -1,12 +1,16 @@
 // KBOX-23: the registry checks that concern an entry as a whole rather than its relay profile.
 import type { PlatformEntry } from '../ports/platform.ts';
 
-export type EntryFailure = 'shape_twice' | 'shape_missing' | 'destination_twice' | 'bad_host';
+export type EntryFailure = 'shape_twice' | 'shape_missing' | 'classify_twice' | 'classify_missing' | 'destination_twice' | 'bad_host';
 
-/** One source of a shape: an entry with an issuer takes it from the issuer, one without states it (KBOX-40). */
+/** One source of a shape and one of a class: an entry with an issuer takes each from the issuer, one without states them (KBOX-40). */
 export function checkShapeSource(entry: PlatformEntry): EntryFailure | undefined {
-  if (entry.issuer !== undefined) return entry.shape === undefined ? undefined : 'shape_twice';
-  return entry.shape === undefined ? 'shape_missing' : undefined;
+  if (entry.issuer !== undefined) {
+    if (entry.shape !== undefined) return 'shape_twice';
+    return entry.classify === undefined ? undefined : 'classify_twice';
+  }
+  if (entry.shape === undefined) return 'shape_missing';
+  return entry.classify === undefined ? 'classify_missing' : undefined;
 }
 
 /** A destination kind is provided by at most one entry, and once within an entry; returns the first platform that repeats one. */

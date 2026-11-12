@@ -11,7 +11,8 @@ import type { Parsed } from '../pure/schemas.ts';
 import type { Approvals } from './approvals.ts';
 import { parsedRoute, route } from './http.ts';
 import type { Route } from './http.ts';
-import { capabilitiesFor, newKeyOf } from './new-key.ts';
+import { classifierOf, shapeOf } from '../pure/platform-shape.ts';
+import { keyConfigFor, newKeyOf } from './new-key.ts';
 import type { RotateKey } from './new-key.ts';
 import type { Orchestrator } from './orchestrator.ts';
 import type { Paste } from './paste.ts';
@@ -83,8 +84,8 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
 
   /** The adapters and the class of a request, or the reason it cannot be issued. */
   const classify = (platform: string, items: readonly string[]): { readonly klass: KeyClass; readonly create: 'api' | 'paste' } => {
-    const caps = capabilitiesFor(deps.source, platform);
-    return { klass: classOf(caps.classify({ items }), undefined), create: caps.create };
+    const config = keyConfigFor(deps.source, platform);
+    return { klass: classOf(config.classify({ items }), undefined), create: config.create };
   };
 
   const rowOf = (d: Destination): DestinationRow => {
@@ -169,8 +170,10 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
 
 /** Stores a retired value as a retired generation: never lent, never pushed; fingerprinted only when it passes the shape check (KBOX-34). */
 function retire(deps: KeyRouteDeps, q: { readonly platform: string; readonly project: string; readonly name: string }, bytes: Uint8Array): { readonly status: number; readonly json: unknown } {
-  const caps = deps.source.platform(q.platform)?.issuer?.capabilities();
-  if (caps === undefined) throw rejected('unknown_platform');
+  const kit = deps.source.platform(q.platform);
+  const classify = classifierOf(kit);
+  const shape = shapeOf(kit);
+  if (classify === undefined || shape === undefined) throw rejected('unknown_platform');
   const keyref = keyrefOf(q.platform, [q.project], q.name);
   const { store } = deps;
   if (store.key(keyref) === undefined) {
@@ -179,7 +182,7 @@ function retire(deps: KeyRouteDeps, q: { readonly platform: string; readonly pro
       platform: q.platform,
       name: q.name,
       projects: [q.project],
-      class: classOf(caps.classify({ items: [] }), undefined),
+      class: classOf(classify({ items: [] }), undefined),
       status: 'works',
       gen_current: 1,
       schedule: { rotate_every_days: 90, grace_hours: 1, next_due_at: null, expires_at: null },
@@ -192,7 +195,7 @@ function retire(deps: KeyRouteDeps, q: { readonly platform: string; readonly pro
   deps.vault.put(keyref, gen, bytes);
   store.putGen({ keyref, gen, status: 'retired', platformKeyId: null, location: {} });
   deps.vault.retire(keyref, gen);
-  const fits = matchesShape(caps.shape, Buffer.from(bytes).toString('utf8'));
+  const fits = matchesShape(shape, Buffer.from(bytes).toString('utf8'));
   deps.audit.append({ action: 'key.issued', subject: keyref, at: deps.clock.now() });
   deps.events.append('key.changed', { keyref });
   return { status: 201, json: { keyref, gen, coverage: fits ? null : 'none' } };

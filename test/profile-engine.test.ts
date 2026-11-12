@@ -8,7 +8,7 @@ import { checkRegistry, compileProfile, refuseWidening } from '../src/pure/profi
 import type { ProfileEngine } from '../src/pure/profile.ts';
 import { parseRelayTarget } from '../src/pure/target-parse.ts';
 import { IAM_HOST, PATH_HOST, STORAGE_HOST, hostProfile, leakyProfile, pathProfile } from './fixtures/profiles.ts';
-import { NO_ISSUER_SHAPE, TEST_REGISTRY } from './fixtures/profiles.ts';
+import { NO_ISSUER_CLASSIFY, NO_ISSUER_SHAPE, TEST_REGISTRY } from './fixtures/profiles.ts';
 import { relayWorld } from './support/relay-world.ts';
 
 const engineOf = (profile: RelayProfile): ProfileEngine => {
@@ -147,7 +147,7 @@ function relayTargetOf(profile: RelayProfile, url: string): string {
  * returns each sample that got anything but 400 or 403, or reached upstream.
  */
 async function leaks(t: TestContext, profile: RelayProfile, samples: readonly DenyRule[] = profile.mustDeny): Promise<string[]> {
-  const registry = TEST_REGISTRY.map((e) => (e.id === profile.platform ? { id: e.id, relay: profile, shape: NO_ISSUER_SHAPE, unverified: [] } : e));
+  const registry = TEST_REGISTRY.map((e) => (e.id === profile.platform ? { id: e.id, relay: profile, shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] } : e));
   const w = await relayWorld(t, { registry });
   const through: string[] = [];
   for (const rule of samples) {
@@ -177,7 +177,7 @@ function widened(profile: RelayProfile): RelayProfile {
     }
   }
   const wide = { ...profile, allow: [...profile.allow, ...added], tailRules: [...profile.tailRules, ...added.map((r) => r.id)] };
-  assert.equal(checkRegistry([{ id: wide.platform, relay: wide, shape: NO_ISSUER_SHAPE, unverified: [] }]).ok, true, 'the widened profile passes the registry check');
+  assert.equal(checkRegistry([{ id: wide.platform, relay: wide, shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] }]).ok, true, 'the widened profile passes the registry check');
   assert.ok(added.length > 0, 'the widening added rules');
   return wide;
 }

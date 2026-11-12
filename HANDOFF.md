@@ -31,7 +31,7 @@ adversary: `/home/petter/.local/share/lanes/key-box/<unit>.verdict.md`.
   - Update: `tar`, `release-hash`, `runtime-lock`, `install-request` (core's request and root's answer, one home), `kept-proof`.
   - Relay: `target-parse`, `rule-match`, `profile` (engine and registry checks), `registry-entry` (one shape source, destination kinds),
     `platform-shape` (`shapeOf`: the one shape of an entry or kit), `destination-kind` (the one mapping from the metadata kind
-    `vercel_env` to the adapter kind `vercel-env`), `proposal-vet` (`vetAction(registry)`; the one list of kinds with no executor), `scanner`, `forms` (the one forms library for
+    `vercel_env` to the adapter kind `vercel-env`), `proposal-vet` (`vetAction(registry)`: the adapter condition of each kind; `vetWired`: a kind with no wired executor is refused, derived from `ApproveCore.executorKinds`), `scanner`, `forms` (the one forms library for
     the scanner and the share writer), `lend-protocol`, `relay-errors`, `egress-policy`.
   - Rotation: `rotation-machine` (steps, intent name, retry delay), `scheduler` (due dates, staggering), `class` (class never
     lowered, KBOX-16).
@@ -77,9 +77,9 @@ adversary: `/home/petter/.local/share/lanes/key-box/<unit>.verdict.md`.
    is `destination.kind`), `shape` (only with no issuer; else the issuer's own), `unverified` (ids its probe report marks STILL
    UNVERIFIED; `test/unverified-probes.test.ts` checks it against `docs/probes/<id>.md`). `platform-source`, `main-core` (shapes,
    proposal vet, egress, lend) and the paste flow read the entry; nothing shared changes. `startCore` takes `runtime.registry` for tests.
-   OPEN: `key-routes` (`classify`), `new-key` (`capabilitiesFor`) and `retire` still need an ISSUER (`issuer.capabilities().classify`),
-   so `POST /api/keys` and `/api/retired` for a paste-only (issuer-less) platform answer `unknown_platform`; the `paste` unit must
-   decide how such a platform classifies a scope. Fixture entries in older tests (see Recent) lack `unverified`/`shape`.
+   An entry with no issuer (paste-only) also states `classify(scope)` (its one class source, like `shape`; the registry check refuses both and
+   neither: `classify_twice`, `classify_missing`). `classifierOf` (`src/pure/platform-shape.ts`) reads the one source; `keyConfigFor`
+   (`new-key`) serves classify, paste, `newKeyOf` and `retire`. A paste-only key is never `ordinary` through `POST /api/keys` (`no_issuer`).
 2. Journeys J1 (setup, then approve a rotation of an admin key), J3 as two real processes (J3 runs in one process today) and J4
    (an update bundle approved and installed, then a bad bundle rolled back). J1 and J3 need the registry; J4 needs the real
    kb-install on a box. J2, J5 and J6 exist.
@@ -88,6 +88,7 @@ adversary: `/home/petter/.local/share/lanes/key-box/<unit>.verdict.md`.
 4. Make the trust request's `deadline` required at root (`src/pure/install-request.ts` still parses it as optional).
 5. On the real instance, read `GET /api/bootstrap-facts` once: it shows where the Oracle agent keeps its plugins. The Run Command
    check (a sudoers grant to `ocarun`, a running `runcommand` program) and the firewall step were tested on fixture trees only.
+5b. Executors for `delete_key`, `demote`, `set_schedule` (rejected at proposal until built).
 6. The `set_allow_rules` executor's widening refusal comes with the adapters (it is `rejected` until one registers, and no code
    reads a key's own allow set but the relay profile narrowing); wire it in the unit that builds that executor, with a test
    through the proposal route.
@@ -151,6 +152,12 @@ tick and reconcile, stop), `Orchestrator.stop`, retired generations in the share
 every generation status change, and this file. Before it: `rotate` (two adversary fix rounds; verdict "declared not done" named
 the wiring and J1/J3), `update` (verdict UNSOUND, fixes merged incl. spec revision 4: approver_add binds the new approver's key
 hashes), `relay` and `share` (SOUND WITH FIXES, fixes merged). Detail of those units is in their verdict files and git history.
+
+`platforms-2` (unit/platforms-2): the three `platforms` verdict findings: an issuer-less entry states its own `classify` (one class source,
+`classify_twice`/`classify_missing`), the proposal check refuses every kind with no wired executor (`vetWired`, `ApproveCore.executorKinds`), the
+probe comparison reads table rows by id cell and checks folders against registry entries. The shape-only fixture entries in `test/registry.test.ts`
+and `test/profile-engine.test.ts` gained `classify: NO_ISSUER_CLASSIFY` (orchestrator ruling); the probe-report fixture `REPORT` in
+`test/unverified-probes.test.ts` became table rows.
 
 ## Adapter HTTP (unit `adapter-http`)
 

@@ -8,6 +8,7 @@ import type { Random } from '../ports/random.ts';
 import type { TrustPort } from '../ports/trust.ts';
 import type { Action, ActionKind, Destination } from '../pure/actions.ts';
 import { ApiError } from '../pure/errors.ts';
+import { vetWired } from '../pure/proposal-vet.ts';
 import { createApprovals } from './approvals.ts';
 import type { Approvals, ApprovalsDeps, ExecuteResult, Executor } from './approvals.ts';
 import { createApprovers } from './approvers.ts';
@@ -29,6 +30,8 @@ export interface ApproveCoreDeps {
   readonly wordlist: readonly string[];
   /** Proposal-time checks that need an adapter's profile. With no adapter registered, every kind that needs one is refused. */
   readonly vet: (action: Action) => 'ok' | 'rejected';
+  /** true: a kind with no executor in the wiring below (this unit's own and `executors`) is refused at proposal time, whatever `vet` says. */
+  readonly refuseUnwired?: true;
   /** Executors of kinds other units own (rotation, update, Vercel). */
   readonly executors?: Partial<Readonly<Record<ActionKind, Executor>>>;
   /** What an install_update changes, for its page (the update unit counts it). */
@@ -39,6 +42,8 @@ export interface ApproveCore {
   readonly approvals: Approvals;
   readonly approvers: Approvers;
   readonly tokens: MachineTokens;
+  /** The kinds that have an executor here: what an approval of that kind can do when it is decided. */
+  readonly executorKinds: ReadonlySet<ActionKind>;
   readonly routes: readonly Route[];
 }
 
@@ -102,6 +107,8 @@ export function openApproveCore(deps: ApproveCoreDeps): ApproveCore {
       return (await approvers.remove(action.approver_id, a.proof)) === 'done' ? { result: 'done' } : { result: 'failed', reason: 'root_refused' };
     },
   };
+  const executors: Partial<Record<ActionKind, Executor>> = { ...deps.executors, ...own };
+  const executorKinds = new Set(Object.keys(executors) as ActionKind[]);
   const approvals = createApprovals({
     db: parts.db,
     hub: parts.hub,
@@ -111,10 +118,10 @@ export function openApproveCore(deps: ApproveCoreDeps): ApproveCore {
     push: deps.push,
     meta: parts.meta,
     approvers,
-    vet: deps.vet,
-    executors: { ...deps.executors, ...own },
+    vet: deps.refuseUnwired === true ? vetWired(executorKinds, deps.vet) : deps.vet,
+    executors,
     ...(deps.updateChanges === undefined ? {} : { updateChanges: deps.updateChanges }),
   });
   const tokens = createMachineTokens({ meta: parts.meta, events: parts.events, approvals, push: deps.push, audit: parts.audit, clock: deps.clock });
-  return { approvals, approvers, tokens, routes: approveRoutes({ approvals, approvers, tokens, meta: parts.meta, push: deps.push }) };
+  return { approvals, approvers, tokens, executorKinds, routes: approveRoutes({ approvals, approvers, tokens, meta: parts.meta, push: deps.push }) };
 }

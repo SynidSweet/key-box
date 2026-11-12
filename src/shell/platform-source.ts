@@ -21,6 +21,7 @@ const kitOf = (entry: PlatformEntry): PlatformKit => ({
   ...(entry.verifier === undefined ? {} : { verifier: entry.verifier }),
   ...(entry.keyPageUrl === undefined ? {} : { keyPageUrl: entry.keyPageUrl }),
   ...(entry.shape === undefined ? {} : { shape: entry.shape }),
+  ...(entry.classify === undefined ? {} : { classify: entry.classify }),
 });
 
 export function createPlatformSource(deps: PlatformSourceDeps): PlatformSource {

@@ -3,7 +3,7 @@
 import type { DestinationKit } from './destination.ts';
 import type { Issuer, KeyLister, Verifier } from './issuer.ts';
 import type { DenyRule, RelayProfile } from './relay-profile.ts';
-import type { KeyShape, PlatformId } from './types.ts';
+import type { KeyClass, KeyShape, PlatformId, Scope } from './types.ts';
 
 export interface PlatformEntry {
   readonly id: PlatformId;
@@ -21,6 +21,12 @@ export interface PlatformEntry {
    * `issuer.capabilities().shape` and leaves this out; the registry check refuses both and neither.
    */
   readonly shape?: KeyShape;
+  /**
+   * The class of a key of a platform with no issuer, from the scope it was asked with (KBOX-40: a key that can create keys is `master`,
+   * an ordinary key is not the box's business). One source, like `shape`: an entry with an issuer leaves this out; the registry check
+   * refuses both and neither.
+   */
+  readonly classify?: (scope: Scope) => KeyClass;
   /** The destination adapters this platform provides; the kind of each is its `destination.kind`. A kind has at most one provider. */
   readonly destinations?: readonly DestinationKit[];
   /**

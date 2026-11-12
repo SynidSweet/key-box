@@ -258,3 +258,16 @@ test('KBOX-51 an approved add_key on an overlap:false platform fails with overla
   assert.deepEqual(await execute({ approvalId: 'apr_x', revision: 1, action, requester: { kind: 'box' }, proof: undefined }), { result: 'failed', reason: 'overlap_needs_paste' });
   assert.equal(w.parts.meta.snapshot().keys.length, 0);
 });
+
+test('KBOX-34 KBOX-40 a retired value for a paste-only platform (no issuer) is stored retired with the entry\'s class and its stated shape', async (t) => {
+  const w = await routesWorld(t, { pasteOnly: true });
+  const path = (name: string): string => `/api/retired?platform=pasteco&project=shop&name=${name}`;
+  const fits = await w.api(path('OLD_KEY'), { bytes: Buffer.from(`pk-${'ab'.repeat(16)}`) });
+  assert.equal(fits.status, 201, fits.body);
+  assert.deepEqual(fits.json(), { keyref: 'pasteco/shop/OLD_KEY', gen: 1, coverage: null });
+  assert.equal(w.rotation.store.gen('pasteco/shop/OLD_KEY', 1)?.status, 'retired');
+  assert.equal(w.parts.meta.snapshot().keys.find((k) => k.keyref === 'pasteco/shop/OLD_KEY')?.class, 'ordinary');
+  const misses = await w.api(path('OTHER_KEY'), { bytes: Buffer.from('not-a-key-shape') });
+  assert.equal((misses.json() as { coverage: string }).coverage, 'none');
+  assert.equal((await w.api('/api/retired?platform=nobody&project=shop&name=X_KEY', { bytes: Buffer.from('x') })).status, 422);
+});

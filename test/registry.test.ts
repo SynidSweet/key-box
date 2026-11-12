@@ -10,18 +10,18 @@ import { REGISTRY } from '../src/platforms/registry.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
 import { seededRandom } from './kit/index.ts';
 import { hostProfile, leakyProfile, pathProfile } from './fixtures/profiles.ts';
-import { NO_ISSUER_SHAPE, PATH_HOST, variants } from './fixtures/profiles.ts';
+import { NO_ISSUER_CLASSIFY, NO_ISSUER_SHAPE, PATH_HOST, variants } from './fixtures/profiles.ts';
 
 const failure = (entries: readonly PlatformEntry[]): string => {
   const result = checkRegistry(entries);
   return result.ok ? 'passed' : `${result.code} ${result.platform}`;
 };
 
-const relayWith = (patch: Partial<RelayProfile>): PlatformEntry => ({ id: 'broken', relay: { ...pathProfile, platform: 'broken', ...patch }, shape: NO_ISSUER_SHAPE, unverified: [] });
+const relayWith = (patch: Partial<RelayProfile>): PlatformEntry => ({ id: 'broken', relay: { ...pathProfile, platform: 'broken', ...patch }, shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] });
 
 test('KBOX-23 the real registry passes, and so do the two test profiles', () => {
   assert.equal(failure(REGISTRY), 'passed');
-  assert.equal(failure([...REGISTRY, { id: 'pathplat', relay: pathProfile, shape: NO_ISSUER_SHAPE, unverified: [] }, { id: 'hostplat', relay: hostProfile, shape: NO_ISSUER_SHAPE, unverified: [] }]), 'passed');
+  assert.equal(failure([...REGISTRY, { id: 'pathplat', relay: pathProfile, shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] }, { id: 'hostplat', relay: hostProfile, shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] }]), 'passed');
 });
 
 test('KBOX-23 a relay profile with an empty mustDeny fails, naming the platform', () => {
@@ -30,7 +30,7 @@ test('KBOX-23 a relay profile with an empty mustDeny fails, naming the platform'
 });
 
 test('KBOX-23 an allow rule that matches a mustDeny sample fails', () => {
-  assert.equal(failure([{ id: 'leaky', relay: leakyProfile, shape: NO_ISSUER_SHAPE, unverified: [] }]), 'allow_matches_must_deny leaky');
+  assert.equal(failure([{ id: 'leaky', relay: leakyProfile, shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] }]), 'allow_matches_must_deny leaky');
 });
 
 const leakyAllow = { id: 'org-anything', method: 'POST', host: PATH_HOST, pathTemplate: '/v1/organization/{rest:**}', query: {} } as const;
@@ -38,7 +38,7 @@ const leakyAllow = { id: 'org-anything', method: 'POST', host: PATH_HOST, pathTe
 const leakWith = (samples: readonly SampleRequest[]): PlatformEntry => ({
   id: 'leaky',
   relay: { ...pathProfile, platform: 'leaky', allow: [...pathProfile.allow, leakyAllow], tailRules: [...pathProfile.tailRules, 'org-anything'], mustDeny: [{ id: 'admin-key-create', samples }] },
-  shape: NO_ISSUER_SHAPE,
+  shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY,
   unverified: [],
 });
 
@@ -62,7 +62,7 @@ test('KBOX-23 a mustDeny sample with a typo host, an http scheme or a lower-case
 
 test('KBOX-23 a denyOnly list is held to the same rule: a sample with an http scheme, a lower-case method or no host fails', () => {
   const good = variants('POST', 'api.vercel.example', '/v1/tokens');
-  const deny = (samples: readonly SampleRequest[]): PlatformEntry => ({ id: 'vercel', denyOnly: [{ id: 't', samples }], shape: NO_ISSUER_SHAPE, unverified: [] });
+  const deny = (samples: readonly SampleRequest[]): PlatformEntry => ({ id: 'vercel', denyOnly: [{ id: 't', samples }], shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] });
   assert.equal(failure([deny(good)]), 'passed');
   assert.equal(failure([deny(good.map((s) => ({ ...s, url: s.url.replace('https://', 'http://') })))]), 'must_deny_sample_unparsed vercel');
   assert.equal(failure([deny(good.map((s) => ({ ...s, method: 'post' })))]), 'must_deny_sample_unparsed vercel');
@@ -98,7 +98,7 @@ test('KBOX-23 a malformed template or an unnamed tail fails with its compile cod
 });
 
 test('KBOX-23 a platform in relayDenyOnly must export a mustDeny list and no relay profile', () => {
-  assert.equal(failure([{ id: 'vercel', denyOnly: pathProfile.mustDeny, shape: NO_ISSUER_SHAPE, unverified: [] }]), 'passed');
+  assert.equal(failure([{ id: 'vercel', denyOnly: pathProfile.mustDeny, shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] }]), 'passed');
   assert.equal(failure([{ id: 'vercel', relay: { ...pathProfile, platform: 'vercel' }, denyOnly: pathProfile.mustDeny, unverified: [] }]), 'deny_only_with_relay vercel');
   assert.equal(failure([{ id: 'elevenlabs', unverified: [] }]), 'deny_only_without_must_deny elevenlabs');
   assert.equal(failure([{ id: 'elevenlabs', denyOnly: [], unverified: [] }]), 'deny_only_without_must_deny elevenlabs');
@@ -112,8 +112,8 @@ test('KBOX-23 an issuer with revealOnce exports a lister', () => {
 });
 
 test('KBOX-23 two entries with the same id, or an entry whose relay profile names another platform, fail', () => {
-  assert.equal(failure([{ id: 'pathplat', relay: pathProfile, shape: NO_ISSUER_SHAPE, unverified: [] }, { id: 'pathplat', relay: pathProfile, shape: NO_ISSUER_SHAPE, unverified: [] }]), 'duplicate_platform pathplat');
-  assert.equal(failure([{ id: 'other', relay: pathProfile, shape: NO_ISSUER_SHAPE, unverified: [] }]), 'platform_mismatch other');
+  assert.equal(failure([{ id: 'pathplat', relay: pathProfile, shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] }, { id: 'pathplat', relay: pathProfile, shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] }]), 'duplicate_platform pathplat');
+  assert.equal(failure([{ id: 'other', relay: pathProfile, shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] }]), 'platform_mismatch other');
 });
 
 test('KBOX-23 startup refuses a failing registry with a fixed message naming the code and the platform', () => {
