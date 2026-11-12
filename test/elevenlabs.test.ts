@@ -29,7 +29,7 @@ let world: ElevenLabsWorld;
 let entry: PlatformEntry;
 before(async () => {
   world = await startElevenLabsWorld();
-  entry = createElevenLabsEntry({ http: world.http, clock: { now: () => 0 } });
+  entry = createElevenLabsEntry({ http: world.http });
 });
 after(() => world.close());
 
