@@ -374,7 +374,7 @@ test('KBOX-52 a due admin key whose approval expires unanswered gets none for 24
   await addAdminKey(w);
   w.clock.advance(91 * DAY);
   w.rotation.tick();
-  w.clock.advance(15 * DAY);
+  w.clock.advance(14 * DAY); // the approval's lifetime: this tick finds it expired at once
   w.rotation.tick();
   assert.equal(countOf(w, 'approvals'), 1, 'the tick that expires the request does not ask again in the same breath');
   hourlyTicks(w, EXPIRY_WAIT - HOUR);
@@ -421,4 +421,15 @@ test('KBOX-52 a due admin key on a paste-source platform whose task expires gets
   w.clock.advance(1);
   w.rotation.tick();
   assert.equal(countOf(w, 'paste_tasks'), 2, 'the first tick 24 hours after the expiry opens a new task');
+});
+
+test('KBOX-52 the wait after an expiry is counted from when the request expired, not from the later tick that swept it: a tick 3 days after the expiry asks again at once', async (t) => {
+  const w = await routesWorld(t);
+  await addAdminKey(w);
+  w.clock.advance(91 * DAY);
+  w.rotation.tick();
+  const expiresAt = (w.parts.db.prepare("SELECT expires_at AS at FROM approvals WHERE kind = 'rotate_key'").get() as { at: number }).at;
+  w.clock.advance(expiresAt + 3 * DAY - w.clock.now());
+  w.rotation.tick();
+  assert.equal(countOf(w, 'approvals'), 2);
 });
