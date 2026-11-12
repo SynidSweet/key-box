@@ -94,17 +94,28 @@ const SCHEMA = `
   ) STRICT;
 `;
 
-const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString('hex');
+/** Core and relay share meta.db, so a wait for the write lock is not a failure; the box runs on one small CPU and a writer can wait a while. */
+export const BUSY_TIMEOUT_MS = 30000;
+
+const hex =(bytes: Uint8Array): string => Buffer.from(bytes).toString('hex');
 
 /** Opens (and on first use creates) meta.db. The epoch is drawn once, when the file is created, and kept after that. */
 export function openMetaDatabase(path: string, random: Random): DatabaseSync {
   const db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA busy_timeout = 5000');
+  db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
   db.exec('PRAGMA foreign_keys = ON');
   db.exec(SCHEMA);
-  db.prepare("INSERT OR IGNORE INTO box_info (id, release, share_version, epoch) VALUES (1, 'unreleased', 0, ?)").run(hex(random.bytes(4)));
+  seedBoxInfo(db, random);
   return db;
+}
+
+/** The box_info row is written only when missing, so opening a file that is already set up takes no write lock. OR IGNORE keeps two first opens at once at one row and one epoch. */
+function seedBoxInfo(db: DatabaseSync, random: Random): void {
+  if (db.prepare('SELECT 1 FROM box_info WHERE id = 1').get() !== undefined) return;
+  inTransaction(db, () => {
+    db.prepare("INSERT OR IGNORE INTO box_info (id, release, share_version, epoch) VALUES (1, 'unreleased', 0, ?)").run(hex(random.bytes(4)));
+  });
 }
 
 /** One write transaction: it takes the write lock at once, so two processes on the file queue behind each other. */
