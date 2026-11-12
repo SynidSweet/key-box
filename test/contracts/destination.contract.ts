@@ -33,10 +33,11 @@ export function destinationContract(name: string, make: () => DestinationSubject
     assert.deepEqual(again, first);
   });
 
-  test(`KBOX-2 KBOX-35 destination contract (${name}): the receipt names the object and carries no part and no digest of either value`, async () => {
+  test(`KBOX-2 KBOX-35 destination contract (${name}): pushing a different value gives a receipt that, as of the KBOX-2 ruling, carries no part and no digest of either value`, async () => {
     const { destination, target, master, valueOne, valueTwo } = make();
     const first = await destination.push(target, 'API_KEY', valueOne, master);
     const second = await destination.push(target, 'API_KEY', valueTwo, master);
+    // as of the KBOX-2 ruling the receipt names the object, so it no longer differs per value; it must hold nothing of either value
     const seen = JSON.stringify([first, second]);
     for (const lent of [valueOne, valueTwo]) {
       const bytes = Buffer.from(await bytesOf(lent));

@@ -279,7 +279,7 @@ test('KBOX-36 verifier: a project token cannot read its user, so it reads itself
   assert.equal(await verifier.verify(made.value, { platform: 'vercel' }), 'rejected');
 });
 
-test('KBOX-36 verifier: a stranger is rejected on 403 with invalidToken, and on 401; a bare 403 (no invalidToken) is no verdict', async () => {
+test('KBOX-36 verifier: a stranger is rejected on 403 with invalidToken, and on 401', async () => {
   fresh();
   assert.equal(await verifier.verify(lentText(WRONG_TEXT), { platform: 'vercel' }), 'rejected');
   fake.forceStatus(401);
