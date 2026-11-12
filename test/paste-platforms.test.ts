@@ -504,3 +504,52 @@ test('KBOX-40 the paste page of each platform offers that platform\'s own key pa
     assert.equal((page.json() as { platform_link?: string }).platform_link, link);
   }
 });
+
+// --- review fixes (adapters batch 1) --------------------------------------------------------------------------------------------------
+
+/** An Anthropic key list whose pages follow `next` (page id to the id its `last_id` names), over a plain port; every request is kept. */
+function pagedList(pages: Readonly<Record<string, string>>, keysOf: (after: string | null) => { id: string; hint: string }[]): { http: { request: (req: { method: string; url: string }) => Promise<HttpResponse> }; asked: string[] } {
+  const asked: string[] = [];
+  return {
+    asked,
+    http: {
+      request: (req) => {
+        asked.push(`${req.method} ${req.url}`);
+        if (asked.length > 20) throw new RangeError('the page loop did not stop');
+        const after = new URL(req.url).searchParams.get('after_id');
+        const data = keysOf(after).map((k) => ({ id: k.id, name: 'n', status: 'active', partial_key_hint: k.hint }));
+        const next = pages[after ?? ''];
+        const body = { data, has_more: next !== undefined, last_id: next ?? null };
+        return Promise.resolve({ status: 200, headers: {}, body: Buffer.from(JSON.stringify(body)) });
+      },
+    },
+  };
+}
+
+test('KBOX-40 KBOX-51 Anthropic lister: the plain list is a failure, not a shorter list, when a later page could not be read', async (t) => {
+  const { api, http } = await anthropic(t);
+  const lister = createAnthropicLister(http, { pageSize: 1 });
+  api.add(ordinary('0001'), 'one');
+  api.add(ordinary('0002'), 'two');
+  api.failPagesFrom(2);
+  await assert.rejects(() => lister.list(L(ADMIN)), /anthropic: http_error/);
+  api.failPagesFrom(100);
+  assert.deepEqual((await lister.list(L(ADMIN))).map((k) => k.name), ['one', 'two']);
+});
+
+test('KBOX-40 Anthropic lister: a cursor seen twice (A, B, A) ends the listing as incomplete instead of looping', async () => {
+  const stub = pagedList({ '': 'A', A: 'B', B: 'A' }, (after) => [{ id: `k-${after ?? 'first'}`, hint: 'x...y' }]);
+  const listing = await createAnthropicLister(stub.http, { pageSize: 1 }).listAt({}, L(ADMIN));
+  assert.equal(listing.complete, false);
+  assert.ok(stub.asked.length <= 4, `read ${stub.asked.length} pages`);
+});
+
+test('KBOX-14 KBOX-40 a key id of "." or ".." in the list never reaches the retire path: refused, no update sent', async () => {
+  const value = ordinary('OLD3');
+  for (const id of ['..', '.']) {
+    const stub = pagedList({}, () => [{ id, hint: `${value.slice(0, 14)}...${value.slice(-4)}` }]);
+    const asked: string[] = stub.asked;
+    await assert.rejects(() => createAnthropicRetirer({ http: stub.http }).retire(L(value), L(ADMIN)), /anthropic: bad_answer/, id);
+    assert.equal(asked.some((a) => a.startsWith('POST')), false);
+  }
+});

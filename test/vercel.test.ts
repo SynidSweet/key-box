@@ -8,6 +8,7 @@ import type { AdapterHttp, HttpRequest, HttpResponse } from '../src/ports/http.t
 import { HttpTransportError } from '../src/ports/http.ts';
 import type { KeyListing } from '../src/ports/issuer.ts';
 import { matchesShape } from '../src/pure/class.ts';
+import { confirmDead } from '../src/pure/rotation-machine.ts';
 import { shapeOf } from '../src/pure/platform-shape.ts';
 import { createRegistry } from '../src/platforms/registry.ts';
 import { assertRegistry } from '../src/pure/profile.ts';
@@ -352,4 +353,49 @@ test('KBOX-36 an id of "." or ".." or one that is empty never reaches a path: re
   const before = http.sent.length;
   for (const id of ['', '.', '..']) await assert.rejects(() => issuer.revoke(id, master()), /vercel: bad_scope/, JSON.stringify(id));
   assert.deepEqual(sentSince(before), []);
+});
+
+// ---------------------------------------------------------------- review fixes (adapters batch 1)
+
+test('KBOX-36 KBOX-51 verifier: a live project token refused on its own record (a plain 403) is no verdict, and never confirms a revoke', async () => {
+  fresh();
+  const made = await issuer.issue({ scope: { projectId: PROJECT } }, 'kbox_proj', master());
+  fake.restrictSelfRead(true);
+  const verdict = await verifier.verify(made.value, { platform: 'vercel' });
+  assert.notEqual(verdict, 'rejected');
+  assert.equal(confirmDead({ by: 'verifier', verdict }), false);
+  fake.restrictSelfRead(false);
+  assert.equal(await verifier.verify(made.value, { platform: 'vercel' }), 'ok', 'the switch is the only difference');
+});
+
+test('KBOX-36 KBOX-51 verifier: its own record answered 401, or 403 saying invalidToken, is the platform saying the token is invalid: rejected', async () => {
+  const answers = (self: { status: number; body: unknown }): AdapterHttp => ({
+    request: (req: HttpRequest): Promise<HttpResponse> => {
+      const path = new URL(req.url).pathname;
+      const reply = path === '/v2/user' ? { status: 403, body: { error: { code: 'forbidden' } } } : self;
+      return Promise.resolve({ status: reply.status, headers: {}, body: Buffer.from(JSON.stringify(reply.body)) });
+    },
+  });
+  const verify = (self: { status: number; body: unknown }): Promise<string | undefined> => world.entryOver(asHttp(answers(self))).verifier?.verify(master(), { platform: 'vercel' }) ?? Promise.resolve(undefined);
+  assert.equal(await verify({ status: 401, body: {} }), 'rejected');
+  assert.equal(await verify({ status: 403, body: { error: { code: 'forbidden', invalidToken: true } } }), 'rejected');
+  assert.equal(await verify({ status: 403, body: { error: { code: 'forbidden', message: 'Not authorized' } } }), 'unreachable');
+  assert.equal(await verify({ status: 403, body: { error: { code: 'forbidden', invalidToken: 'yes' } } }), 'unreachable', 'only the boolean true says invalid');
+});
+
+test('KBOX-14 KBOX-36 a key that cannot be a header value is refused with no call: the verifier says rejected, any other call a fixed bad_key', async () => {
+  fresh();
+  const before = http.sent.length;
+  for (const bad of ['vcp_a\nb', 'vcp_a b', 'vcp_\u0001x', 'vcp_é', '']) {
+    assert.equal(await verifier.verify(lentText(bad), { platform: 'vercel' }), 'rejected', JSON.stringify(bad));
+    await assert.rejects(() => lister.list(lentText(bad)), /vercel: bad_key/);
+    await assert.rejects(() => issuer.revoke('tok_x', lentText(bad)), /vercel: bad_key/);
+  }
+  assert.deepEqual(sentSince(before), []);
+});
+
+test('KBOX-42 the entry and unverified.json list the paging of the variable list that remove relies on', async () => {
+  const listed = JSON.parse(await readFile(new URL('../src/platforms/vercel/unverified.json', import.meta.url), 'utf8')) as string[];
+  assert.ok(world.entry.unverified.includes('vercel.env-list-pagination'));
+  assert.ok(listed.includes('vercel.env-list-pagination'));
 });

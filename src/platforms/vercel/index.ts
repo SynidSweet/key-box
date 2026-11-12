@@ -23,10 +23,10 @@ const realPause = (ms: number): Promise<void> => new Promise((resolve) => void s
 
 /**
  * The probe ids `docs/probes/vercel.md` marks STILL UNVERIFIED, and where the code leans on each:
- * cli-project-token (issuer), env-upsert and env-delete (env-destination), redeploy (redeployer), verifier-project-token (verifier),
+ * cli-project-token (issuer), env-upsert, env-delete and env-list-pagination (env-destination), redeploy (redeployer), verifier-project-token (verifier),
  * vcp-core-length (shape). `env-update` is not used: the push is an upsert. `team-settings` is relied on by the KBOX-26 unit, not here.
  */
-const UNVERIFIED = ['vercel.cli-project-token', 'vercel.env-upsert', 'vercel.env-update', 'vercel.env-delete', 'vercel.redeploy', 'vercel.verifier-project-token', 'vercel.vcp-core-length', 'vercel.team-settings'] as const;
+const UNVERIFIED = ['vercel.cli-project-token', 'vercel.env-upsert', 'vercel.env-update', 'vercel.env-delete', 'vercel.env-list-pagination', 'vercel.redeploy', 'vercel.verifier-project-token', 'vercel.vcp-core-length', 'vercel.team-settings'] as const;
 
 export function createVercelEntry(deps: VercelDeps): PlatformEntry {
   const api = createVercelApi(deps.http);

@@ -2,12 +2,14 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
+import type { AdapterHttp, HttpRequest, HttpResponse } from '../src/ports/http.ts';
 import type { PlatformEntry } from '../src/ports/platform.ts';
 import type { Issuer, KeyLister, Verifier } from '../src/ports/issuer.ts';
 import type { AllowRule, RelayProfile } from '../src/ports/relay-profile.ts';
 import type { Lent } from '../src/ports/types.ts';
 import { createElevenLabsEntry } from '../src/platforms/elevenlabs/index.ts';
 import { matchesShape } from '../src/pure/class.ts';
+import { confirmDead } from '../src/pure/rotation-machine.ts';
 import { checkRegistry, compileProfile, refuseWidening } from '../src/pure/profile.ts';
 import { parseRelayTarget } from '../src/pure/target-parse.ts';
 import { issuerContract } from './contracts/issuer.contract.ts';
@@ -359,4 +361,93 @@ test('KBOX-39 positive control: with the deny list emptied the same wide profile
 test('KBOX-39 the regions of the world are the two the entry knows', () => {
   const regions: Region[] = ['global', 'us'];
   assert.deepEqual(regions.map((r) => HOST_OF[r]).sort(), [...(entry.hosts ?? [])].sort());
+});
+
+// ---------------------------------------------------------------- review fixes (adapters batch 1)
+
+/** An `AdapterHttp` that answers every request with `answer` and keeps what it was asked. */
+function answeringWith(answer: (req: HttpRequest) => { status: number; body: unknown }): { http: AdapterHttp; asked: HttpRequest[] } {
+  const asked: HttpRequest[] = [];
+  return {
+    asked,
+    http: {
+      request(req: HttpRequest): Promise<HttpResponse> {
+        asked.push(req);
+        const a = answer(req);
+        return Promise.resolve({ status: a.status, headers: {}, body: Buffer.from(JSON.stringify(a.body)) });
+      },
+    },
+  };
+}
+const directoryOf = (accountId: string, keyId: string): { 'service-accounts': unknown[] } => ({ 'service-accounts': [{ service_account_user_id: accountId, name: 'n', 'api-keys': [{ key_id: keyId, name: 'k', is_disabled: false }] }] });
+
+test('KBOX-39 KBOX-51 verifier: a live key refused 403 for a missing permission is not rejected, and its verdict never confirms a revoke', async () => {
+  world.reset();
+  const issued = await issuerOf().issue({ scope: { items: ['text_to_speech'] } }, 'k', world.master());
+  world.regions.global.restricted.add(await textOf(issued.value));
+  world.regions.us.restricted.add(await textOf(issued.value));
+  const verdict = await verifierOf().verify(issued.value, { platform: 'elevenlabs' });
+  assert.notEqual(verdict, 'rejected');
+  assert.equal(confirmDead({ by: 'verifier', verdict }), false);
+});
+
+test('KBOX-39 KBOX-51 verifier: only a 401 is rejected; a 403 in one region and a 401 in the other is no verdict either', async () => {
+  world.reset();
+  world.regions.global.failWith = 401;
+  world.regions.us.failWith = 401;
+  assert.equal(await verifierOf().verify(world.stranger(), { platform: 'elevenlabs' }), 'rejected');
+  world.regions.us.failWith = 403;
+  assert.equal(await verifierOf().verify(world.stranger(), { platform: 'elevenlabs' }), 'unreachable');
+});
+
+test('KBOX-39 KBOX-51 listAt: a region that refused the master for a permission (403) makes the listing incomplete; one that does not know the master (401) holds nothing of its workspace', async () => {
+  world.reset();
+  await issuerOf().issue({ scope: { items: [] } }, 'k', world.master());
+  const one = await listerOf().listAt({}, world.master());
+  assert.equal(one.complete, true, 'the us region does not know a master of the global workspace (401)');
+  assert.equal(one.keys.length, 1);
+  world.regions.us.masters.add('sk_kbox-test-master-global-fake');
+  assert.equal((await listerOf().listAt({}, world.master())).complete, true);
+  world.regions.us.failWith = 403;
+  assert.equal((await listerOf().listAt({}, world.master())).complete, false, '403 in a region');
+  assert.equal((await listerOf().listAt({ region: 'global' }, world.master())).complete, true, 'the region asked for answered');
+});
+
+test('KBOX-39 KBOX-51 revoke never answers absent when a region refused the master: the key may be in it', async () => {
+  world.reset();
+  world.regions.us.masters.add('sk_kbox-test-master-global-fake');
+  world.regions.us.failWith = 403;
+  await assert.rejects(() => issuerOf().revoke('key-not-anywhere', world.master()), /elevenlabs: rejected/);
+  world.regions.us.failWith = undefined;
+  assert.equal(await issuerOf().revoke('key-not-anywhere', world.master()), 'absent');
+});
+
+test('KBOX-14 KBOX-39 a service-account id or key id of "." or ".." from the platform never reaches a path', async () => {
+  for (const [account, key] of [['..', 'k1'], ['.', 'k1'], ['sa', '..']] as const) {
+    const stub = answeringWith(() => ({ status: 200, body: directoryOf(account, key) }));
+    const e = createElevenLabsEntry({ http: stub.http });
+    await assert.rejects(() => e.issuer?.revoke(key, world.master()) ?? Promise.resolve('absent'), /elevenlabs: bad_scope/, `${account}/${key}`);
+    assert.equal(stub.asked.some((r) => r.method === 'DELETE'), false);
+  }
+  const stub = answeringWith(() => ({ status: 200, body: directoryOf('..', 'k1') }));
+  await assert.rejects(() => createElevenLabsEntry({ http: stub.http }).issuer?.issue({ scope: { items: [] } }, 'n', world.master()) ?? Promise.resolve(undefined), /elevenlabs: bad_scope/);
+  assert.equal(stub.asked.some((r) => r.method === 'POST'), false);
+});
+
+test('KBOX-14 KBOX-39 a key that cannot be a header value (newline, space, control, non-ASCII) is refused with no call: the verifier says rejected, any other call a fixed bad_key', async () => {
+  for (const bad of ['sk_a\nb', 'sk_a b', 'sk_\u0001x', 'sk_é', '']) {
+    const stub = answeringWith(() => ({ status: 200, body: {} }));
+    const e = createElevenLabsEntry({ http: stub.http });
+    assert.equal(await e.verifier?.verify(lent(Buffer.from(bad), 'bad:1'), { platform: 'elevenlabs' }), 'rejected', JSON.stringify(bad));
+    await assert.rejects(() => e.issuer?.issue({ scope: { items: [] } }, 'n', lent(Buffer.from(bad), 'bad:2')) ?? Promise.resolve(undefined), /elevenlabs: bad_key/);
+    assert.equal(stub.asked.length, 0);
+  }
+});
+
+test('KBOX-42 the entry lists the unverified reliance of the review: the service-account list shape and what an empty permission list means', async () => {
+  const listed = JSON.parse(readFileSync(new URL('../src/platforms/elevenlabs/unverified.json', import.meta.url), 'utf8')) as string[];
+  for (const id of ['elevenlabs.service-account-list', 'elevenlabs.empty-permissions']) {
+    assert.ok(entry.unverified.includes(id), `entry: ${id}`);
+    assert.ok(listed.includes(id), `unverified.json: ${id}`);
+  }
 });

@@ -53,6 +53,8 @@ export function parseScope(scope: Scope): ParsedScope {
   const [region = 'global'] = regions;
   const [serviceAccount] = accounts;
   if (regions.length > 1 || accounts.length > 1 || !isRegion(region) || (serviceAccount !== undefined && !ACCOUNT_ID.test(serviceAccount))) throw new ElevenLabsError('bad_scope');
+  // UNVERIFIED (elevenlabs.empty-permissions): what the platform does with `permissions: []` (no scope named). Read as a key with no permission
+  // (class ordinary); if it means all, the key is wider than its class says.
   const names = items.filter((i) => !isPlacement(i));
   return { permissions: names.includes('all') ? 'all' : names, region, serviceAccount };
 }

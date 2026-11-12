@@ -1,5 +1,6 @@
 // KBOX-36, KBOX-16: the Vercel destination `vercel-env` (sensitive environment variables) and its redeployer, over the fake of api.vercel.com.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import type { DestinationTarget } from '../src/ports/destination.ts';
 import type { AdapterHttp, HttpRequest, HttpResponse } from '../src/ports/http.ts';
@@ -225,3 +226,19 @@ test('KBOX-36 a transport failure is a HttpTransportError at the port and nothin
   assert.equal(failure.cause, undefined);
 });
 
+
+// ---------------------------------------------------------------- review fixes (adapters batch 1)
+
+test('KBOX-2 KBOX-36 the receipt of a push is the variable id and nothing derived from the value: no digest, no part of it, the same id for a repeated push of the same variable', async () => {
+  fake.reset();
+  const valueText = 'vcp_KboxTestFakeReceiptValue';
+  const first = await destination.push(target, 'K', lentText(valueText), master());
+  const again = await destination.push(target, 'K', lentText('vcp_KboxTestFakeOther'), master());
+  assert.ok(first.outcome === 'applied' && again.outcome === 'applied');
+  const id = fake.envs.get(PROJECT)?.find((e) => e.key === 'K')?.id;
+  assert.equal(first.version, id, 'the receipt is the variable id, which finds the push again');
+  assert.equal(again.version, id);
+  const digest = createHash('sha256').update(valueText).digest('hex');
+  assert.equal(first.version.includes(digest.slice(0, 8)), false);
+  assert.doesNotMatch(first.version, /[0-9a-f]{16}/);
+});

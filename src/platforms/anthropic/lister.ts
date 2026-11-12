@@ -2,6 +2,7 @@
 // expired) is `disabled`: KBOX-51 counts it as dead.
 import type { AdapterHttp } from '../../ports/http.ts';
 import type { KeyLister, PlatformKeyInfo } from '../../ports/issuer.ts';
+import { AnthropicError } from './errors.ts';
 import { DEFAULT_PAGE_SIZE, readKeys } from './keys.ts';
 import type { ListedKey } from './keys.ts';
 
@@ -15,7 +16,10 @@ export function createAnthropicLister(http: AdapterHttp, options: ListerOptions 
   const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE;
   return {
     async list(master) {
-      return (await this.listAt({}, master)).keys.filter((k) => k.disabled !== true);
+      const listing = await this.listAt({}, master);
+      // The plain list has no completeness to report: a cut-short list is a failure (as the Vercel lister), never a shorter list taken for the whole.
+      if (!listing.complete) throw new AnthropicError('http_error');
+      return listing.keys.filter((k) => k.disabled !== true);
     },
     async listAt(at, master) {
       const pages = await readKeys(http, master, { pageSize });

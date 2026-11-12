@@ -4,7 +4,7 @@
 // through the verifier that the old value is rejected before it marks the generation `retired`.
 import type { AdapterHttp } from '../../ports/http.ts';
 import type { Lent } from '../../ports/types.ts';
-import { call, failureOf } from './call.ts';
+import { call, failureOf, segment } from './call.ts';
 import { AnthropicError } from './errors.ts';
 import { DEFAULT_PAGE_SIZE, readKeys } from './keys.ts';
 
@@ -41,7 +41,7 @@ export function createAnthropicRetirer(deps: { readonly http: AdapterHttp }): An
       if (only === undefined) return 'absent';
       if (rest.length > 0) throw new AnthropicError('ambiguous');
       // UNVERIFIED (anthropic.key-retire-statuses): `inactive` is a status the update accepts (SDK documentation); no live answer seen.
-      const answer = await call(http, admin, 'POST', `/v1/organizations/api_keys/${encodeURIComponent(only.id)}`, { status: 'inactive' });
+      const answer = await call(http, admin, 'POST', `/v1/organizations/api_keys/${segment(only.id)}`, { status: 'inactive' });
       if (answer === undefined) throw new AnthropicError('rejected');
       if (answer.status === 200) return 'retired';
       if (answer.status === 404) return 'absent';
