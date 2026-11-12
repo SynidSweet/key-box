@@ -15,6 +15,8 @@ import { RegistryRefused } from '../src/pure/profile.ts';
 import { vetAction } from '../src/pure/proposal-vet.ts';
 import { startCore } from '../src/main-core.ts';
 import { openCore } from '../src/shell/core.ts';
+import type { CoreParts } from '../src/shell/core.ts';
+import { createRotationStore } from '../src/shell/rotation-store.ts';
 import { hashToken, newToken } from '../src/pure/tokens.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
 import { fakeEntry, issuerWith, pasteOnlyEntry } from './fakes/platform-entry.ts';
@@ -38,7 +40,8 @@ const adminRow: KeyRow = {
   last_use_at: null,
 };
 
-async function started(t: TestContext, registry: readonly PlatformEntry[], seed = false) {
+/** `prepare`: more rows written into the state before core starts. */
+async function started(t: TestContext, registry: readonly PlatformEntry[], seed = false, prepare?: (parts: CoreParts, clock: TimedClock) => void) {
   const dir = await tempDir(t);
   const stateDir = join(dir, 'state');
   mkdirSync(join(dir, 'results'));
@@ -51,6 +54,7 @@ async function started(t: TestContext, registry: readonly PlatformEntry[], seed 
     prepared.vault.put(KEYREF, 1, Buffer.from(VALUE));
     prepared.meta.putKey(adminRow);
   }
+  prepare?.(prepared, clock);
   prepared.close();
   const socket = join(dir, 'http.sock');
   const env = { KB_STATE_DIR: stateDir, KB_SOCKET: socket, KB_INSTALL_RESULTS: join(dir, 'results'), KB_CURRENT: join(dir, 'current'), KB_DOMAIN: 'box.example' };
@@ -115,8 +119,16 @@ test('KBOX-23 the kinds whose executors do not exist yet stay refused, whatever 
 });
 
 test('KBOX-34 over the real route, add_key of an admin key on a registered platform opens an approval', async (t) => {
-  const entry = fakeEntry(platform, { issuer: issuerWith(platform.issuer, { classify: () => 'admin' }) });
-  const w = await started(t, [entry]);
+  // As of the KBOX-57 ruling an admin key the issuer creates by run needs the platform's master at proposal (`no_master` without one):
+  // the state holds one master row, master by the entry's own classification of its stored scope.
+  const classify = (scope: { readonly [k: string]: unknown }) => (Array.isArray(scope['items']) && scope['items'].includes('master') ? 'master' as const : 'admin' as const);
+  const entry = fakeEntry(platform, { issuer: issuerWith(platform.issuer, { classify }) });
+  const w = await started(t, [entry], false, (parts, clock) => {
+    const master = 'fake/team/MASTER';
+    parts.vault.put(master, 1, platform.masterBytes);
+    parts.meta.putKey({ ...adminRow, keyref: master, platform: 'fake', name: 'MASTER', projects: ['team'], class: 'master' });
+    createRotationStore(parts.db, clock, parts.hub).putKeyInfo(master, { scopeItems: ['master'], location: {}, rotatedAt: clock.now(), markAdmin: false });
+  });
   const body = { platform: 'fake', name: 'FAKE_ADMIN', projects: ['shop'], scope: { items: ['admin'] }, destinations: [] };
   const opened = await w.call('/api/keys', body);
   assert.equal(opened.status, 202, opened.body);
