@@ -45,6 +45,9 @@ export type ViolationCode =
   | 'probe-item-missing'
   // KBOX-58: a kit's or entry's verifier is read only through verifierFor
   | 'verifier-read'
+  // KBOX-41: RegistryDeps' keyInfo is read only by the Google minter
+  | 'keyinfo-read'
+| 'verifier-read'
   // KBOX-23
   | 'adapter-imports-registry'
   // the checks could not read the tree they were given

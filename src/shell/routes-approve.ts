@@ -24,6 +24,8 @@ export interface ApproveRouteDeps {
   readonly tokens: MachineTokens;
   readonly meta: MetaStore;
   readonly push: PushSubscriptions;
+  /** A proposal-time check that needs a platform call (KBOX-24's grant check): throws `rejected` to refuse before an approval opens. */
+  readonly precheck?: (action: Action) => Promise<void>;
 }
 
 const refused = { ok: false } as const;
@@ -146,7 +148,10 @@ export function approveRoutes(deps: ApproveRouteDeps): Route[] {
       surface: 'api',
       scope: 'control',
       parse: parseProposal,
-      handle: ({ body, actor }) => ({ status: 201, json: approvals.propose({ action: body.action, requester: { kind: 'token', label: actor }, ...(body.reason === undefined ? {} : { reason: body.reason }) }) }),
+      handle: async ({ body, actor }) => {
+        await deps.precheck?.(body.action);
+        return { status: 201, json: approvals.propose({ action: body.action, requester: { kind: 'token', label: actor }, ...(body.reason === undefined ? {} : { reason: body.reason }) }) };
+      },
     }),
 
     parsedRoute({

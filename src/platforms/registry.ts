@@ -5,13 +5,14 @@ import type { Clock } from '../ports/clock.ts';
 import type { PlatformEntry, RegistryDeps } from '../ports/platform.ts';
 import { createAnthropicEntry } from './anthropic/index.ts';
 import { createElevenLabsEntry } from './elevenlabs/index.ts';
+import { createGoogleEntry } from './google/index.ts';
 import { createOpenAiEntry } from './openai/index.ts';
 import { createStripeEntry } from './stripe/index.ts';
 import { createSupabaseEntry } from './supabase/index.ts';
 import { createVercelEntry } from './vercel/index.ts';
 
 export function createRegistry(deps: RegistryDeps): readonly PlatformEntry[] {
-  return [createAnthropicEntry(deps), createElevenLabsEntry(deps), createOpenAiEntry(deps), createStripeEntry(deps), createSupabaseEntry(deps), createVercelEntry(deps)];
+  return [createAnthropicEntry(deps), createElevenLabsEntry(deps), createGoogleEntry(deps), createOpenAiEntry(deps), createStripeEntry(deps), createSupabaseEntry(deps), createVercelEntry(deps)];
 }
 
 /** The registry as a process that makes no adapter calls sees it: every call is refused and time stands at 0. For structure checks only. */

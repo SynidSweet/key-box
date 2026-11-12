@@ -36,6 +36,8 @@ export interface ApproveCoreDeps {
   readonly executors?: Partial<Readonly<Record<ActionKind, Executor>>>;
   /** What an install_update changes, for its page (the update unit counts it). */
   readonly updateChanges?: ApprovalsDeps['updateChanges'];
+  /** A proposal-time check that needs a platform call (KBOX-24's grant check), run by the proposal route before the proposal is made. */
+  readonly precheck?: (action: Action) => Promise<void>;
 }
 
 export interface ApproveCore {
@@ -123,5 +125,5 @@ export function openApproveCore(deps: ApproveCoreDeps): ApproveCore {
     ...(deps.updateChanges === undefined ? {} : { updateChanges: deps.updateChanges }),
   });
   const tokens = createMachineTokens({ meta: parts.meta, events: parts.events, approvals, push: deps.push, audit: parts.audit, clock: deps.clock });
-  return { approvals, approvers, tokens, executorKinds, routes: approveRoutes({ approvals, approvers, tokens, meta: parts.meta, push: deps.push }) };
+  return { approvals, approvers, tokens, executorKinds, routes: approveRoutes({ approvals, approvers, tokens, meta: parts.meta, push: deps.push, ...(deps.precheck === undefined ? {} : { precheck: deps.precheck }) }) };
 }

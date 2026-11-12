@@ -5,7 +5,7 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import type { AuditEvent } from './ports/audit.ts';
 import type { Clock, Scheduler } from './ports/clock.ts';
-import type { PlatformEntry } from './ports/platform.ts';
+import type { BoxIdentity, PlatformEntry, RegistryDeps, StoredKey } from './ports/platform.ts';
 import type { Random } from './ports/random.ts';
 import { DOMAIN_NAME } from './pure/actions.ts';
 import type { Action, ActionKind } from './pure/actions.ts';
@@ -43,6 +43,9 @@ import { readKeyInfo } from './shell/rotation-store.ts';
 import { kindOfStored } from './shell/rotation-ports.ts';
 import type { Rotation } from './shell/rotation.ts';
 import type { PlatformSource } from './shell/rotation-ports.ts';
+import { createGrantChecks } from './shell/grant-checks.ts';
+import type { GrantChecks } from './shell/grant-checks.ts';
+import { identityRoutes } from './shell/identity-routes.ts';
 
 interface Config {
   readonly stateDir: string;
@@ -55,6 +58,11 @@ interface Config {
   readonly staging: string;
   readonly installResults: string;
   readonly current: string;
+  /**
+   * KBOX-41: the audience of the box's own OIDC assertions (for Google, the workload identity provider the owner made in the setup). With
+   * the domain it is the box's identity; absent, every mint refuses, so a grant check refuses every grant it applies to (fail closed).
+   */
+  readonly oidcAudience: string | undefined;
 }
 
 /** The environment is parsed once, here; the rest of the process takes the typed value. */
@@ -70,7 +78,9 @@ function readConfig(env: NodeJS.ProcessEnv): Config {
     throw new RangeError('KB_STATE_DIR, KB_SOCKET, KB_LEND_SOCKET, KB_INSTALL_RESULTS and KB_CURRENT are absolute paths');
   }
   if (domain !== undefined && !DOMAIN_NAME.test(domain)) throw new RangeError('KB_DOMAIN is a lower-case domain name');
-  return { stateDir, socket, lendSocket, domain, staging, installResults, current };
+  const oidcAudience = env['KB_OIDC_AUDIENCE'];
+  if (oidcAudience !== undefined && !/^[\x21-\x7e]{1,255}$/.test(oidcAudience)) throw new RangeError('KB_OIDC_AUDIENCE is printable ASCII without spaces');
+  return { stateDir, socket, lendSocket, domain, staging, installResults, current, oidcAudience };
 }
 
 const SWEEP_EVERY_MS = 60 * 60_000;
@@ -78,6 +88,8 @@ const SWEEP_EVERY_MS = 60 * 60_000;
 const SETTLE_EVERY_MS = 5_000;
 /** How often core samples /proc for the idle watch (KBOX-21). */
 const IDLE_SAMPLE_EVERY_MS = 10 * 60_000;
+/** How often granted keys are checked again (KBOX-24: daily). */
+const GRANT_CHECK_EVERY_MS = 24 * 3600_000;
 
 /** The nominal link speed from deploy/runtime.config.json (KBOX-21); the file is shared, so only this member is read. */
 function linkMbps(): number {
@@ -100,8 +112,11 @@ export interface CoreRuntime {
   readonly journal: (code: string) => void;
   /** The platform adapters rotation is given; production derives them from the registry (a test passes its own). */
   readonly platforms?: PlatformSource;
-  /** The platform registry the box runs with; production builds it with `createRegistry`, a test passes its own. */
-  readonly registry?: readonly PlatformEntry[];
+  /**
+   * The platform registry the box runs with; production builds it with `createRegistry` over core's deps (client, clock, identity, minted sink,
+   * stored-record reader). A test passes its own list, or a builder that is handed core's deps.
+   */
+  readonly registry?: readonly PlatformEntry[] | ((deps: RegistryDeps) => readonly PlatformEntry[]);
   /** The egress host list core reads and checks at its start; production reads deploy/egress-hosts.json (a test passes another file). */
   readonly egressHostsFile?: URL;
 }
@@ -133,13 +148,23 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   const config = readConfig(env);
   // The host list is read here, so a bad one stops the start. The adapters' client holds the gate and the gate reads the registry's hosts: those are bound on first use.
   const egress = createLazyEgress(() => registry, loadEgressHosts(runtime.egressHostsFile));
-  const registry = runtime.registry ?? createRegistry({ http: createAdapterHttp({ egress, scheduler }), clock });
+  // Platform adapters register the short-lived values they mint here, so the scanner holds them while they live (KBOX-14).
+  const minted = createMintedValues(clock);
+  const identity: BoxIdentity | undefined = config.domain === undefined || config.oidcAudience === undefined ? undefined : { issuer: `https://keys.${config.domain}`, audience: config.oidcAudience };
+  // The stored-record reader the registry is handed answers nothing until the store is open below, so an early mint fails closed.
+  let storedOf: ((keyref: string) => StoredKey | undefined) | undefined;
+  const registryDeps: RegistryDeps = { http: createAdapterHttp({ egress, scheduler }), clock, minted, keyInfo: (keyref) => storedOf?.(keyref), ...(identity === undefined ? {} : { identity }) };
+  const registry = typeof runtime.registry === 'function' ? runtime.registry(registryDeps) : (runtime.registry ?? createRegistry(registryDeps));
   assertRegistry(registry);
   const parts = openCore({ stateDir: config.stateDir, clock, scheduler, random, journal });
+  const storedRecord = (keyref: string): StoredKey | undefined => readKeyInfo(parts.db, keyref);
+  storedOf = storedRecord;
   const privateStore = openPrivateDatabase(join(config.stateDir, 'private.db'), journal);
   let approve: ReturnType<typeof openApproveCore> | undefined;
   let idle: IdleWatch | undefined;
   let rotation: Rotation | undefined;
+  let grantChecks: GrantChecks | undefined;
+  let identityPages: readonly Route[] = [];
   const wait = (ms: number): Promise<void> => new Promise((resolve) => void scheduler.after(ms, resolve));
   const updater = createUpdater({
     stagingDir: config.staging,
@@ -171,6 +196,10 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
       if (executor === undefined) throw new RangeError('rotation is not open');
       return executor(approval);
     };
+    const source = runtime.platforms ?? createPlatformSource({ registry, meta: parts.meta, vault: parts.vault, keyInfo: storedRecord });
+    const checks = createGrantChecks({ registry, meta: parts.meta, keyInfo: storedRecord, master: (platform, at, items) => source.master(platform, at, items), audit: parts.audit, events: parts.events, clock });
+    grantChecks = checks;
+    identityPages = identityRoutes({ registry, meta: parts.meta, vault: parts.vault, issuer: `https://keys.${config.domain}` });
     approve = openApproveCore({
       parts,
       approverStore: privateStore,
@@ -184,8 +213,8 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
       refuseUnwired: true,
       executors: { install_update: updater.executor, rotate_key: viaRotation('rotate_key'), add_key: viaRotation('add_key') },
       updateChanges: (action) => updater.changes(action),
+      precheck: (action) => checks.atProposal(action),
     });
-    const source = runtime.platforms ?? createPlatformSource({ registry, meta: parts.meta, vault: parts.vault, keyInfo: (keyref) => readKeyInfo(parts.db, keyref) });
     rotation = openRotation({ parts, approvals: approve.approvals, approvers: approve.approvers, push, clock, scheduler, random, audit: parts.audit, source });
   }
   const rotationStore = rotation?.store;
@@ -203,7 +232,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   });
   // A first file that cannot be written does not stop the box: the file is served as stale (503) until the next key.changed makes one.
   await shares.start().catch(() => parts.audit.append({ action: 'share.refresh_failed', subject: 'share', at: clock.now(), detail: { code: 'start_failed' } }));
-  const routes = [...coreRoutes(parts.routes, approve?.routes ?? [], approve === undefined || running === undefined ? [] : updater.routes), shareRoute(shares), ...(rotation?.routes ?? [])];
+  const routes = [...coreRoutes(parts.routes, approve?.routes ?? [], approve === undefined || running === undefined ? [] : updater.routes), shareRoute(shares), ...(rotation?.routes ?? []), ...identityPages];
   const server = createApiServer({
     routes,
     tokens: approve?.tokens.tokenStore ?? parts.meta,
@@ -213,8 +242,6 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
     journal,
   });
   await server.listen(config.socket);
-  // Platform adapters register the short-lived values they mint here, so the scanner holds them while they live (KBOX-14).
-  const minted = createMintedValues(clock);
   const lend = createLendServer(
     createLendHandler({ meta: parts.meta, tokens: approve?.tokens.tokenStore ?? parts.meta, vault: parts.vault, audit: parts.audit, events: parts.events, registry, shapes: loadCredentialShapes(), clock, minted, journal, locationOf: (keyref) => readKeyInfo(parts.db, keyref)?.location }),
     journal,
@@ -260,6 +287,15 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   };
   if (idle !== undefined) sampleIdle();
   if (approve !== undefined) sweep();
+  // KBOX-24: granted keys are checked at start and then daily. Like every timed job the next run is armed before the work, so a run that
+  // throws (audited) never stops the schedule; the run in flight is waited for before the stores close.
+  let cancelGrantCheck = (): void => undefined;
+  let grantRun: Promise<void> = Promise.resolve();
+  const checkGrants = (checks: GrantChecks): void => {
+    cancelGrantCheck = scheduler.after(GRANT_CHECK_EVERY_MS, () => checkGrants(checks));
+    grantRun = checks.daily().catch(() => failSafeAudit.append({ action: 'grants.check_failed', subject: 'grants', at: clock.now(), detail: { code: 'check_failed' } }));
+  };
+  if (grantChecks !== undefined) checkGrants(grantChecks);
   // Last, once both sockets listen (review N4): resume, reconcile and the first tick run in the background, so a port that hangs holds back
   // neither the start nor the signal handlers main() sets next; the hourly tick and the daily reconcile are armed now.
   const stopRotation = rotation?.run() ?? ((): void => undefined);
@@ -269,6 +305,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   });
   const closeStores = async (): Promise<void> => {
     await rotation?.idle();
+    await grantRun;
     privateStore.close();
     parts.close();
   };
@@ -276,6 +313,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
     cancelSweep();
     cancelSettle();
     cancelIdle();
+    cancelGrantCheck();
     idle?.stop();
     shares.stop();
     stopRotation();

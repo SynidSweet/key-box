@@ -145,7 +145,7 @@ export function parseUpstreamJson(textOf: string): unknown {
 
 // --- events (KBOX-31): the closed list of kinds and their data --------------------------------------------------------
 
-export const BOX_NOTICE_TEXTS = ['credential withheld', 'idle near', 'orphan key found', 'delivery unacknowledged', 'rotation skipped'] as const;
+export const BOX_NOTICE_TEXTS = ['credential withheld', 'idle near', 'orphan key found', 'delivery unacknowledged', 'rotation skipped', 'grant suspended'] as const;
 
 export const EVENT_SCHEMAS = {
   'approval.opened': { approval_id: text(NAME), approval_kind: text(CODE), title: text(TITLE), slot: text(NAME), revision: int() },
@@ -221,6 +221,10 @@ export const AUDIT_SCHEMAS = {
   'approvals.sweep_failed': { code: text(CODE) },
   /** The updater's 5-second settle threw (core's own timer); a fixed code, nothing of the failure. The next settle is still scheduled. */
   'update.settle_failed': { code: text(CODE) },
+  /** KBOX-24: the daily grant check removed a key's grants; the row's ref is the key, `code` names the permission or why the check failed. */
+  'grant.suspended': { code: text(CODE) },
+  /** KBOX-24: the daily grant check threw (core's own timer); a fixed code, nothing of the failure. The next check is still scheduled. */
+  'grants.check_failed': { code: text(CODE) },
   /** A push service accepted one message. The row's ref is `push`; no endpoint, key or title is recorded. */
   'push.delivered': { status: int(100, 599) },
   /** A push service answered 404 or 410: that subscription was removed. */

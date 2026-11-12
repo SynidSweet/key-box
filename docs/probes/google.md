@@ -21,6 +21,7 @@ from `https://<api>.googleapis.com/$discovery/rest?version=<v>` (24 APIs, all 20
 | `google.gocspx-length` | KBOX-41 | none: no real client secret may be sent, and no public endpoint states the length | (no doc found that states it; src/data/credential-shapes.json min 28 stays a note) | STILL UNVERIFIED |
 | `google.aiza-length` | KBOX-41 | none: no real API key may be sent, and no public endpoint states the length | (no doc found that states it; src/data/credential-shapes.json min 35 stays a note) | STILL UNVERIFIED |
 | `google.must-deny-discovery` | KBOX-41 | offline match of every mustDeny and allow-rule sample (method, path, template and parameter patterns) against the 24 fetched discovery documents; see "Discovery check" | 22 of 37 sample lines match a method id; 15 are NOT FOUND (listed below) | STILL UNVERIFIED |
+| `google.apikeys-admin-scope` | KBOX-41 | none: an admin token needs the box's identity and a `kbox-keys` account in a throwaway project, neither of which exists off the box (S-705); left for the box: mint `kbox-keys@<project>` with scope `cloud-platform`, then `GET https://apikeys.googleapis.com/v2/projects/<project>/locations/global/keys` (expect 200) | (doc: the API Keys v2 discovery document names `https://www.googleapis.com/auth/cloud-platform` as the scope of its methods, and `cloud-platform.read-only` for the read methods; not re-fetched for this row) | STILL UNVERIFIED |
 
 ## Facts for the adapter
 

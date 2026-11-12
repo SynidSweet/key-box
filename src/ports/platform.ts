@@ -4,8 +4,49 @@ import type { DestinationKit } from './destination.ts';
 import type { Issuer, KeyLister, LocationProver, Retirer, Verifier } from './issuer.ts';
 import type { Clock } from './clock.ts';
 import type { AdapterHttp } from './http.ts';
+import type { MintedSink } from './minted.ts';
 import type { DenyRule, RelayProfile } from './relay-profile.ts';
-import type { KeyClass, KeyLocation, KeyShape, LocationSchema, PlatformId, Scope } from './types.ts';
+import type { KeyClass, KeyLocation, KeyShape, Lent, LocationSchema, PlatformId, Scope } from './types.ts';
+
+/**
+ * KBOX-41: the box's own OIDC identity, from core's configuration: who it says it is (`https://keys.<domain>`) and the audience its
+ * assertions are for (the platform's federation, for Google the workload identity provider). The adapter checks the audience's form.
+ */
+export interface BoxIdentity {
+  readonly issuer: string;
+  readonly audience: string;
+}
+
+/** KBOX-41: the two documents core serves for a platform that trusts the box's own identity, on keys.<domain>. */
+export interface IdentityDocuments {
+  /** `/.well-known/openid-configuration` for this issuer. */
+  discovery(issuer: string): Readonly<Record<string, unknown>>;
+  /** `/.well-known/jwks.json`: the public halves of the signing keys core lends it (each live generation of the platform's master keys). */
+  jwks(signingKeys: readonly Lent[]): Promise<Readonly<Record<string, unknown>>>;
+}
+
+/** A key's stored record as an adapter may read it (KBOX-57): the approved scope items and the location entered with the key. */
+export interface StoredKey {
+  readonly scopeItems: readonly string[];
+  readonly location: KeyLocation;
+}
+
+/** The granted key a grant check looks at: its reference and its stored location. */
+export interface GrantSubject {
+  readonly keyref: string;
+  readonly at: KeyLocation;
+}
+
+/** `refused` carries a fixed names-only code (`[a-z][a-z0-9_]*`): the permission found, or why the check could not be made. */
+export type GrantVerdict = { readonly verdict: 'pass' } | { readonly verdict: 'refused'; readonly code: string };
+
+/** KBOX-24: whether a key may be (or stay) granted. */
+export interface GrantCheck {
+  /** Whether the check is made for a key with these stored scope items; a key it does not apply to is never checked or suspended. */
+  appliesTo(scopeItems: readonly string[]): boolean;
+  /** The verdict, with the platform's master lent for the key's stored location and scope. Any failure is a refusal: it fails closed. */
+  check(subject: GrantSubject, master: Lent): Promise<GrantVerdict>;
+}
 
 export interface PlatformEntry {
   readonly id: PlatformId;
@@ -56,6 +97,10 @@ export interface PlatformEntry {
   readonly hosts?: readonly string[];
   /** The read calls a pasted key may be verified with, by name (KBOX-40): the paste page offers them, `VerifyTarget.hint` names one. Unique `[a-z0-9_]{1,32}` (the registry check). */
   readonly verifyHints?: readonly string[];
+  /** KBOX-41: the box's OIDC documents, for a platform that trusts the box's own identity (Google). At most one entry has them. */
+  readonly identity?: IdentityDocuments;
+  /** KBOX-24: the check core runs when a grant of one of this platform's keys is proposed, and daily on granted keys. */
+  readonly grantCheck?: GrantCheck;
   /** The probe ids (KBOX-42) that `docs/probes/<id>.md` still marks STILL UNVERIFIED. */
   readonly unverified: readonly string[];
 }
@@ -64,4 +109,13 @@ export interface PlatformEntry {
 export interface RegistryDeps {
   readonly http: AdapterHttp;
   readonly clock: Clock;
+  /** KBOX-41: the box's own identity; core passes it once the domain and the federation's audience are configured, the relay never. */
+  readonly identity?: BoxIdentity;
+  /** KBOX-14: where an adapter registers what it mints inside core, so the scanner holds it; core passes it, the relay never. */
+  readonly minted?: MintedSink;
+  /**
+   * KBOX-41: a key's stored record by keyref (undefined while there is none); core passes it, the relay never. Only the Google minter reads it
+   * (the arch check `key info reads`): every other adapter is handed a location or a stored id by core, never a keyref.
+   */
+  readonly keyInfo?: (keyref: string) => StoredKey | undefined;
 }

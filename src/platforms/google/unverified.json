@@ -8,5 +8,6 @@
   "google.colon-encoding",
   "google.gocspx-length",
   "google.aiza-length",
-  "google.must-deny-discovery"
+  "google.must-deny-discovery",
+  "google.apikeys-admin-scope"
 ]
