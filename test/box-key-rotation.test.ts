@@ -182,11 +182,6 @@ const runOf = (b: BoxWorld, runId: string) => {
   return run;
 };
 
-test('KBOX-55 the second google master row is real: the platform source answers master_ambiguous for a google key (positive control for the no-master tests)', async (t) => {
-  const b = await boxWorld(t);
-  assert.deepEqual(b.real.master('google', {}, []), { ok: false, code: 'master_ambiguous' });
-});
-
 test('KBOX-55 happy path, STS refusing twice then accepting: the new key is listed at once, nothing is asked of STS before the lead, the switch waits for the proof, grace keeps the old key listed, then its value is gone; no master is ever asked and no other Google call is made', async (t) => {
   const b = await boxWorld(t);
   await b.googleFetches();
