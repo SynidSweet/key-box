@@ -23,6 +23,7 @@ import {
   walk,
 } from './arch/index.ts';
 import type { Violation, ViolationCode } from './arch/index.ts';
+import { checkAdapterRegistryImport } from './arch/adapter-registry.ts';
 import { GOOD_PACKAGE, GOOD_TSCONFIG, REPO_ROOT, goodTree, materialise, withChanges, withPackage, withTsconfig } from './arch/fixture.ts';
 import type { Tree } from './arch/fixture.ts';
 
@@ -610,4 +611,28 @@ test('KBOX-6 kb-install writing under the spec\'s paths, through a held director
 
 test('KBOX-6 the repo\'s own kb-install writes only under releases/, current, trust.json, /etc/keybox/codes, /var/lib/keybox-install and staging', async () => {
   assert.deepEqual(await checkInstallWrites(REPO_ROOT), []);
+});
+
+// ---------------------------------------------------------------- KBOX-23 (no adapter imports the registry)
+
+const adapterTree = (file: string, code: string): Tree => withChanges({ [file]: code, 'src/platforms/registry.ts': 'export const registry = [];\n' });
+
+test("KBOX-23 an adapter file importing src/platforms/registry.ts, as a value, a type, a re-export or a dynamic import, from its index or a deeper file, is refused", async (t) => {
+  for (const [file, code] of [
+    ['src/platforms/google/index.ts', "import { registry } from '../registry.ts';\nexport const x = registry;\n"],
+    ['src/platforms/google/index.ts', "import type { RegistryDeps } from '../registry.ts';\nexport type X = RegistryDeps;\n"],
+    ['src/platforms/google/api.ts', "export { registry } from '../registry.ts';\n"],
+    ['src/platforms/google/deep/more.ts', "export const later = (): Promise<unknown> => import('../../registry.ts');\n"],
+  ] as const) {
+    await refuses(t, adapterTree(file, code), checkAdapterRegistryImport, 'adapter-imports-registry');
+  }
+});
+
+test('KBOX-23 an adapter importing the ports, a sibling file or another adapter passes, and so does a shell file importing the registry', async (t) => {
+  await accepts(t, adapterTree('src/platforms/google/index.ts', "import type { RegistryDeps } from '../../ports/platform.ts';\nimport { a } from './api.ts';\nexport const x = a;\nexport type D = RegistryDeps;\n"), checkAdapterRegistryImport);
+  await accepts(t, withChanges({ 'src/shell/x.ts': "import { registry } from '../platforms/registry.ts';\nexport const x = registry;\n", 'src/platforms/registry.ts': 'export const registry = [];\n' }), checkAdapterRegistryImport);
+});
+
+test("KBOX-23 the repo's own tree has no adapter importing the registry", async () => {
+  assert.deepEqual(await checkAdapterRegistryImport(REPO_ROOT), []);
 });

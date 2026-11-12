@@ -18,7 +18,7 @@ export function redeployerContract(name: string, make: () => RedeployerSubject):
     const a = await redeployer.redeploy(target, master);
     const b = await redeployer.redeploy(target, master);
     assert.notEqual(a, b);
-    assert.equal(await redeployer.ready(a), 'ready');
+    assert.equal(await redeployer.ready(a, master), 'ready');
   });
 
   test(`KBOX-35 redeployer contract (${name}): a deploy that fails is failed, and only that one`, async () => {
@@ -26,7 +26,7 @@ export function redeployerContract(name: string, make: () => RedeployerSubject):
     failNext();
     const bad = await redeployer.redeploy(target, master);
     const good = await redeployer.redeploy(target, master);
-    assert.equal(await redeployer.ready(bad), 'failed');
-    assert.equal(await redeployer.ready(good), 'ready');
+    assert.equal(await redeployer.ready(bad, master), 'failed');
+    assert.equal(await redeployer.ready(good, master), 'ready');
   });
 }

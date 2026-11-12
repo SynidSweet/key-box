@@ -1,5 +1,5 @@
 import type { DeployRef, Destination, DestinationKind, DestinationTarget, PushOutcome, Redeployer } from '../../src/ports/destination.ts';
-import type { Lent } from '../../src/ports/types.ts';
+import type { KeyClass, Lent } from '../../src/ports/types.ts';
 
 const slot = (t: DestinationTarget, name: string): string => `${t.kind}:${t.id}/${name}`;
 
@@ -12,8 +12,9 @@ export class FakeDestination implements Destination {
     return { readableBy: 'runtime', needsRedeploy: true };
   }
 
-  async push(t: DestinationTarget, name: string, v: Lent, master: Lent): Promise<PushOutcome> {
+  async push(t: DestinationTarget, name: string, v: Lent, klass: KeyClass, master: Lent): Promise<PushOutcome> {
     void master;
+    void klass;
     const bytes = Buffer.from(await v.use((b) => Promise.resolve(Uint8Array.from(b))));
     const existing = this.#held.get(slot(t, name));
     if (existing !== undefined && existing.bytes.equals(bytes)) return { outcome: 'applied', version: String(existing.version) };
@@ -55,7 +56,8 @@ export class FakeRedeployer implements Redeployer {
     return Promise.resolve(ref);
   }
 
-  ready(r: DeployRef): Promise<'ready' | 'failed'> {
+  ready(r: DeployRef, master: Lent): Promise<'ready' | 'failed'> {
+    void master;
     return Promise.resolve(this.#failing.has(r) ? 'failed' : 'ready');
   }
 }

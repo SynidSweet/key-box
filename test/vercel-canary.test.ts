@@ -43,7 +43,7 @@ test('KBOX-14 a master the platform refuses, quoted back in the 403 message, is 
   world.fake.forceStatus(undefined);
   const verdict = await world.verifier.verify(bad, { platform: 'vercel' });
   c.assertAbsent({ verdict });
-  const outcome = await dest.push(target, 'K', lentText('vcp_KboxTestFakeV'), bad);
+  const outcome = await dest.push(target, 'K', lentText('vcp_KboxTestFakeV'), 'admin', bad);
   c.assertAbsent({ outcome: JSON.stringify(outcome) });
 });
 
@@ -75,14 +75,14 @@ test('KBOX-14 a value pushed to the destination is in no receipt, refusal or err
   const master = lentLabelled();
   for (const status of [undefined, 400, 403, 409, 500]) {
     world.fake.forceStatus(status);
-    c.assertAbsent({ outcome: JSON.stringify(await world.kit.destination.push(target, 'K', value, master)) });
+    c.assertAbsent({ outcome: JSON.stringify(await world.kit.destination.push(target, 'K', value, 'admin', master)) });
   }
   world.fake.forceStatus(undefined);
-  c.assertAbsent({ outcome: JSON.stringify(await world.kit.destination.push(target, 'K', value, master)) });
+  c.assertAbsent({ outcome: JSON.stringify(await world.kit.destination.push(target, 'K', value, 'admin', master)) });
   world.fake.cutAnswers(true);
-  c.assertAbsent({ outcome: JSON.stringify(await world.kit.destination.push(target, 'K', value, master)) });
+  c.assertAbsent({ outcome: JSON.stringify(await world.kit.destination.push(target, 'K', value, 'admin', master)) });
   world.fake.cutAnswers(false);
   await world.fake.setDown(true);
-  c.assertAbsent({ outcome: JSON.stringify(await world.kit.destination.push(target, 'K', value, master)) });
+  c.assertAbsent({ outcome: JSON.stringify(await world.kit.destination.push(target, 'K', value, 'admin', master)) });
   await world.fake.setDown(false);
 });

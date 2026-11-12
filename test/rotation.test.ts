@@ -1061,3 +1061,28 @@ test('KBOX-51 a run that reconcile settles at once files no card', async (t) => 
   assert.equal(w.store.run(runId)?.state, 'abandoned');
   assert.deepEqual(cards(w), []);
 });
+
+// ---------------------------------------------------------------- S2 ports: the class goes to every push, the master to every ready
+
+for (const klass of ['ordinary', 'admin', 'master'] as const) {
+  test(`KBOX-36 the rotation of a ${klass} key hands its class to every push, forward and in a rollback re-push`, async (t) => {
+    const { w, keyref } = await seeded(t, { klass, overlap: false });
+    w.destinations.redeployer.failNext();
+    w.orch.start({ keyref, origin: 'owner' });
+    await w.settle();
+    const pushed = w.destinations.a.pushed();
+    assert.equal(pushed.length, 4, 'two forward pushes, two re-pushes of the old value');
+    assert.deepEqual([...new Set(pushed.map((p) => p.klass))], [klass]);
+  });
+}
+
+test('KBOX-4 KBOX-51 the rotation hands the master to every ready, forward and in a rollback redeploy, so a fresh redeployer can resume', async (t) => {
+  const { w, keyref } = await seeded(t, { overlap: false });
+  w.destinations.redeployer.failNext();
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  const masters = w.destinations.redeployer.readyMasters();
+  assert.ok(masters.length >= 2, `ready was called ${masters.length} times`);
+  const expected = Buffer.from(await bytesOf(w.platform.master())).toString('utf8');
+  for (const m of masters) assert.equal(Buffer.from(await bytesOf(m)).toString('utf8'), expected);
+});
