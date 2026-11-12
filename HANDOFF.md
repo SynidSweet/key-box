@@ -5,7 +5,7 @@ REWRITE it (never append) before you finish. Unchanged fails.
 
 ## Where things stand
 
-Main is `b57bcab`. Stages 1 to 4 and the adapter stage are built and on main. `src/main-core.ts`: `startCore(env, runtime)` (exported;
+Main is `b02e3de`. Stages 1 to 4 and the adapter stage are built and on main. `src/main-core.ts`: `startCore(env, runtime)` (exported;
 `main()` is `startCore` plus SIGTERM/SIGINT) serves the machine API, the share file and, when `KB_DOMAIN` is set, the phone app,
 approvals, the real `TrustPort`, the update intake and rotation (key routes, paste, deliveries, the hourly tick, the daily reconcile).
 
@@ -128,15 +128,13 @@ Spec: `docs/spec.md` (Build units table at the end). Verdicts: `/home/petter/.lo
    check (a sudoers grant to `ocarun`, a running `runcommand` program) and the firewall step were tested on fixture trees only.
 6. Probes: ids still listed in an adapter's `unverified.json` are UNVERIFIED (Google API-key rotations wait on
    `google.apikey-verify-call`). A live SDK run through the relay with a `~` address has not been done.
-7. m6 (relay.verdict.md): `docs/probes/google.md` row `google.colon-encoding` is VERIFIED (the front end does not decode `%3A` in a verb,
-   so `documents%3ArunQuery` is a different route). Whether the canonical re-encoding in `src/pure/target-parse.ts` agrees with that row
-   was not checked when this file was written.
+7. m6 (relay.verdict.md) is closed: `docs/probes/google.md` row `google.colon-encoding` is VERIFIED (the front end does not decode `%3A`
+   in a verb), and the canonical path keeps `:` literal (`PATH_LITERAL`, `src/pure/target-parse.ts:122`), so `documents:runQuery` passes as is.
 8. Open items not fixed: the control enrol window is per label only (accepted residual, see Decisions); `private.db` from before
    kernel-approve has no migration; the phone app ran in real Chromium but never on a real phone's browser and passkey; findings of the
    unit verdicts that no fix commit names are in the verdict files.
 9. Tidy: `ports/platform.ts` carries Vercel-only types (`operations?`, `vetSetting?`) on the generic `PlatformEntry`. Google: a disabled
-   key is still DELETEd once by the sweep; the Secret Manager destination `remove` throws `remove_unsupported`; paste verify hands no
-   master, so a pasted Google API key verifies unreachable.
+   key is still DELETEd once by the sweep; the Secret Manager destination `remove` throws `remove_unsupported`.
 
 ## Decisions
 
@@ -176,15 +174,19 @@ Spec: `docs/spec.md` (Build units table at the end). Verdicts: `/home/petter/.lo
 - Other runq jobs may run remotely with a synced tree: a script outside the repo is not there.
 - A bearer token on any phone path (even an unknown one like `/r/x`) is 403 from the frame.
 - `startCore` takes a `CoreRuntime` (clock, scheduler, random, journal): a test passes a `TimedClock` and checks
-  `pendingTimers === 0` after `stop()`. It still reads `/proc` (idle watch) and the real egress gate; set `KB_INSTALL_RESULTS` and
-  `KB_CURRENT` to temp paths.
+  `pendingTimers === 0` after `stop()`. It reads the real egress gate; set `KB_INSTALL_RESULTS` and `KB_CURRENT` to temp paths. The
+  idle watch (KBOX-21) reads only the `/proc` files `runtime.proc` names (`systemRuntime` names the real ones); a test runtime names none,
+  so a test core holds no reserve. Before that fix every in-process core with `KB_DOMAIN` held 30% of the HOST's memory (~14 GB).
+  `test/setup.test.ts:193` still spawns a real core through `main()` with `KB_DOMAIN`, so that one process still holds the reserve.
 - `vault.lend` of a retired generation throws `unknown_key`; `shareValuesIn` turns that into `''`.
 - A spec rule that lands before its code gets its own Build units row; every KBOX id sits in exactly one row.
 
 ## Recent
 
+- `paste-master` (b02e3de): the paste check hands a `needsMaster` verifier the master KBOX-57 chooses (KBOX-58, as the run and the
+  revoke check already did); before it a pasted Google API key could only verify `unreachable`. Test `test/paste-master.test.ts`.
+- `idle-runtime` (fa4c66d): `CoreRuntime.proc` names the idle watch's `/proc` files; a test runtime names none (KBOX-21). Test
+  `test/core-idle.test.ts`.
 - `relay-ref` (b57bcab): the relay address of a real key is the keyref with `/` written `~` (KBOX-13, KBOX-32); two pins of the old
-  address shape were retired first in their own commit (82e1a37, S-795).
-- `vercel-ops` (48f287b): KBOX-26's three operations, executors, routes and audit, merged over `allow-rules`.
-- `allow-rules` (5e21c8b): KBOX-61 `set_allow_rules` executor. Before it `executors-meta` (3854150): KBOX-60 `set_schedule`, `demote`, the
-  execution re-check, proposal prechecks and the crash rule.
+  address shape were retired first in their own commit (82e1a37, S-795). Before it `vercel-ops` (48f287b, KBOX-26), `allow-rules`
+  (5e21c8b, KBOX-61) and `executors-meta` (3854150, KBOX-60).
