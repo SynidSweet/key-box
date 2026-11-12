@@ -270,7 +270,7 @@ test('KBOX-28 a sweep whose audit append also throws neither escapes the timer n
   db.exec(REFUSE_AUDIT);
   w.clock.advance(HOUR);
   w.clock.advance(HOUR);
-  assert.equal(w.journal.filter((c) => c === 'sweep_failed_unaudited').length, 2, 'each failure reached the journal, and the second sweep ran after the first');
+  assert.equal(w.journal.filter((c) => c === 'audit_failed:approvals.sweep_failed').length, 2, 'each failure reached the journal, and the second sweep ran after the first');
   db.exec('DROP TRIGGER refuse_expiry');
   db.exec('DROP TRIGGER refuse_audit');
   w.clock.advance(HOUR);
@@ -288,14 +288,14 @@ test('KBOX-6 a settle whose audit append also throws neither escapes the timer n
   db.exec(REFUSE_AUDIT);
   w.clock.advance(SETTLE);
   w.clock.advance(SETTLE);
-  assert.equal(w.journal.filter((c) => c === 'settle_failed_unaudited').length, 2);
+  assert.equal(w.journal.filter((c) => c === 'audit_failed:update.settle_failed').length, 2);
   db.exec('DROP TRIGGER refuse_audit');
   rmSync(staging);
   mkdirSync(staging);
   w.clock.advance(SETTLE);
   const entries = (JSON.parse((await w.call('/api/audit?since=0&limit=500')).body) as { entries: { action: string }[] }).entries;
   assert.equal(entries.filter((e) => e.action === 'update.settle_failed').length, 0, 'a settle that works audits nothing, and ran after the throws');
-  assert.equal(w.journal.filter((c) => c === 'settle_failed_unaudited').length, 2);
+  assert.equal(w.journal.filter((c) => c === 'audit_failed:update.settle_failed').length, 2);
 });
 
 test('KBOX-28 KBOX-6 a first sweep and settle at start that throw, with a failing audit, do not stop core from starting, and the schedule runs on', async (t) => {
@@ -308,7 +308,7 @@ test('KBOX-28 KBOX-6 a first sweep and settle at start that throw, with a failin
       db.exec(REFUSE_AUDIT);
     },
   });
-  assert.ok(w.journal.includes('sweep_failed_unaudited'), 'the first sweep failed, could not be audited, and core still started');
+  assert.ok(w.journal.includes('audit_failed:approvals.sweep_failed'), 'the first sweep failed, could not be audited, and core still started');
   w.clock.advance(HOUR);
-  assert.equal(w.journal.filter((c) => c === 'sweep_failed_unaudited').length, 2, 'the schedule went on');
+  assert.equal(w.journal.filter((c) => c === 'audit_failed:approvals.sweep_failed').length, 2, 'the schedule went on');
 });
