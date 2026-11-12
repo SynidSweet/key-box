@@ -31,7 +31,7 @@ import type { KeyKind, Verifier } from '../ports/issuer.ts';
 import type { KeyLocation, KeyShape } from '../ports/types.ts';
 import type { PasteAction } from './new-key.ts';
 import type { Orchestrator } from './orchestrator.ts';
-import { kindOfStored, kitFor, storedPlacement, verifierFor } from './rotation-ports.ts';
+import { kindOfStored, kitFor, storedPlacement, verifierFor, verifyTargetOf } from './rotation-ports.ts';
 import type { PlatformKit, PlatformSource } from './rotation-ports.ts';
 
 export const PASTE_TTL_MS = 14 * 24 * 3600_000;
@@ -165,13 +165,16 @@ export function createPaste(deps: PasteDeps): Paste {
   const refuseUnverifiable = (id: string, verifier: Verifier | undefined): Verifier => verifier ?? refuse(id, rejected('no_verifier'), 'no_verifier');
 
   /** The value checks of KBOX-12, in order: the floor, the key's strict shape, the verifier that applies to the key. Names only. */
-  async function checkValue(target: { readonly platform: string; readonly at: KeyLocation; readonly hint: string | undefined }, value: string, shape: KeyShape, verifier: Verifier): Promise<void> {
+  async function checkValue(target: { readonly platform: string; readonly at: KeyLocation; readonly hint: string | undefined }, value: string, shape: KeyShape, verifier: Verifier, kind: KeyKind): Promise<void> {
     const { platform, at, hint } = target;
     if (Buffer.byteLength(value, 'utf8') < PASTE_FLOOR_BYTES) throw rejected('too_short');
     if (!matchesShape(shape, value)) throw rejected('bad_shape');
     const bytes = Uint8Array.from(Buffer.from(value, 'utf8'));
     const lent = makeLent('paste:1', () => Uint8Array.from(bytes));
-    const verdict = await verifier.verify(lent, { platform, at, ...(hint === undefined ? {} : { hint }) }).catch((): 'unreachable' => 'unreachable');
+    // KBOX-58: a verifier that needs the master gets the one KBOX-57 chooses for the key, resolved now; none chosen, its own answer decides.
+    const chosen = verifier.needsMaster === true ? deps.source.master(platform, kind.at, kind.scopeItems) : undefined;
+    const asked = verifyTargetOf(verifier, { platform, at, ...(hint === undefined ? {} : { hint }) }, chosen?.ok === true ? chosen.value : undefined);
+    const verdict = await verifier.verify(lent, asked).catch((): 'unreachable' => 'unreachable');
     bytes.fill(0);
     if (verdict !== 'ok') throw rejected(verdict === 'rejected' ? 'verifier_rejected' : 'verifier_unreachable');
   }
@@ -297,7 +300,7 @@ export function createPaste(deps: PasteDeps): Paste {
       const verifier = refuseUnverifiable(id, verifierFor(kit, kind));
       // The verifier is told this paste's hint, else the one stored with the key (a rotation without a new choice).
       const stored = action.kind === 'rotate_key' ? deps.store.keyInfo(action.keyref)?.verifyHint : undefined;
-      await checkValue({ platform, at, hint: verifyHint ?? stored }, value, shape, verifier);
+      await checkValue({ platform, at, hint: verifyHint ?? stored }, value, shape, verifier, kind);
       const bytes = Uint8Array.from(Buffer.from(value, 'utf8'));
       try {
         const keyref = await execute(action, bytes, verifyHint);
