@@ -9,7 +9,6 @@ import type { KeyClass, KeyLocation, Lent, PlatformKeyId, Scope } from '../../sr
 import type { Vault } from '../../src/ports/vault.ts';
 import type { EventLog } from '../../src/ports/events.ts';
 import type { EventData, EventKind } from '../../src/pure/schemas.ts';
-import { ApiError } from '../../src/pure/errors.ts';
 import { createOrchestrator } from '../../src/shell/orchestrator.ts';
 import type { NewKey, Orchestrator } from '../../src/shell/orchestrator.ts';
 import type { PlatformSource, Point } from '../../src/shell/rotation-ports.ts';
@@ -41,8 +40,10 @@ export interface Faults {
   vaultPut: boolean;
   /** The master key cannot be lent (the vault refuses it). */
   master: boolean;
-  /** The platform has two master keys that could serve the key and none is its project's: the source refuses to choose (review N5). */
+  /** The platform has two master keys that could serve the key: the source answers master_ambiguous (review N5, KBOX-57). */
   masterAmbiguous: boolean;
+  /** The platform has no master key that could serve the key: the source answers no_master (KBOX-57). */
+  noMaster: boolean;
   /** The lister answers a listing of this location whatever it was asked for (a lister that omits the key's region). */
   listerAt: KeyLocation | undefined;
   /** The lister's listing says it is not complete (one page of several). */
@@ -51,6 +52,13 @@ export interface Faults {
   setThenThrow: boolean;
   /** The issuer answers that it made the key here (`IssuedKey.location`); undefined: the answer names no place. */
   answerAt: KeyLocation | undefined;
+}
+
+/** One ask for a master: the platform, the key's location and its scope items. */
+export interface MasterAsk {
+  readonly platform: string;
+  readonly at: KeyLocation;
+  readonly items: readonly string[];
 }
 
 export interface WorldOptions {
@@ -76,6 +84,8 @@ export interface RotationWorld {
   readonly faults: Faults;
   /** The `at` of every issue call, every listing asked for and every verification, in order. */
   readonly seenAt: { readonly issue: KeyLocation[]; readonly listAt: KeyLocation[]; readonly verify: KeyLocation[] };
+  /** Every master the orchestrator and reconcile asked the platform source for, in order (KBOX-57: by stored location and items). */
+  readonly masterAsked: readonly MasterAsk[];
   /** Told the kind of every event the orchestrator and reconcile append, before it is written. */
   appending: ((kind: EventKind) => void) | undefined;
   readonly destinations: { readonly a: RecordingDestination; readonly redeployer: RecordingRedeployer };
@@ -119,8 +129,9 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
   const push = new FakePush();
   const platform = new FakePlatformWorld(random);
   const trace: string[] = [];
-  const faults: Faults = { issue: false, verifyAt: undefined, revoke404: false, vaultPut: false, master: false, masterAmbiguous: false, listerAt: undefined, listingIncomplete: false, setThenThrow: false, answerAt: undefined };
+  const faults: Faults = { issue: false, verifyAt: undefined, revoke404: false, vaultPut: false, master: false, masterAmbiguous: false, noMaster: false, listerAt: undefined, listingIncomplete: false, setThenThrow: false, answerAt: undefined };
   const seenAt: RotationWorld['seenAt'] = { issue: [], listAt: [], verify: [] };
+  const masterAsked: MasterAsk[] = [];
   const regionOf = new Map<PlatformKeyId, string>();
   const destination = new RecordingDestination(trace);
   const recording = { a: destination, redeployer: new RecordingRedeployer(trace, destination) };
@@ -236,6 +247,7 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
     trace,
     faults,
     seenAt,
+    masterAsked,
     appending: undefined,
     destinations: recording,
     checkpoints,
@@ -245,11 +257,14 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
       const real: PlatformSource = {
         platform: () => ({ issuer, lister, location: FAKE_LOCATION, ...(options.verifier === false ? {} : { verifier }) }),
         destination: () => ({ destination: recording.a, redeployer: recording.redeployer }),
-        master: () => {
+        master: (id, at, items) => {
+          masterAsked.push({ platform: id, at, items });
           if (faults.master) throw new Error('vault: the master key is unreadable');
-          if (faults.masterAmbiguous) throw new ApiError('conflict', 'master_ambiguous');
-          return platform.master();
+          if (faults.masterAmbiguous) return { ok: false, code: 'master_ambiguous' };
+          if (faults.noMaster) return { ok: false, code: 'no_master' };
+          return { ok: true, value: platform.master() };
         },
+        masters: () => [{ at: {}, value: platform.master() }],
       };
       const source = options.source?.(real) ?? real;
       const deps = {
@@ -259,6 +274,7 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
         platform: source.platform,
         destination: source.destination,
         master: source.master,
+        masters: source.masters,
         clock,
         scheduler: clock,
         random,
