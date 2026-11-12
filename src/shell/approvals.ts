@@ -126,6 +126,17 @@ function requesterOf(row: Row): Requester {
   return r;
 }
 
+/**
+ * When the owner last refused, or let expire unanswered, a request the box itself opened in this slot (KBOX-52): the time the approval records
+ * for it. undefined when the box's latest request there is still pending or was approved, or there is none; a token's or the app's request
+ * (a manual "replace now") never counts.
+ */
+export function lastBoxRequestEnd(db: DatabaseSync, slot: string): { readonly outcome: 'denied' | 'expired'; readonly at: number } | undefined {
+  const latest = db.prepare("SELECT status, decided_at FROM approvals WHERE slot = ? AND requester = 'box' ORDER BY opened_at DESC, rowid DESC LIMIT 1").get(slot) as { status: string; decided_at: number | null } | undefined;
+  if (latest === undefined || latest.decided_at === null) return undefined;
+  return latest.status === 'denied' || latest.status === 'expired' ? { outcome: latest.status, at: latest.decided_at } : undefined;
+}
+
 export function createApprovals(deps: ApprovalsDeps): Approvals {
   const { db } = deps;
   let enrolPushUnseen = false;

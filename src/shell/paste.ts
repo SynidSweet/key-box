@@ -100,6 +100,11 @@ export interface Paste {
   view(id: string, cookie: string | undefined): PasteView;
   /** Whether a task waits in this slot (the scheduler opens none beside it). */
   hasPending(slot: string): boolean;
+  /**
+   * When the box's latest task in this slot expired unanswered (KBOX-52): its own expiry time, the only time a task records for it. undefined
+   * when that task is pending or was settled, or there is none; a token's task (a manual "replace now") never counts. A paste has no refusal.
+   */
+  lastExpiredAt(slot: string): number | undefined;
   /** The pending tasks of the app's queue. */
   pending(cookie: string | undefined): readonly { readonly paste_id: string; readonly title: string }[];
   /** For `POST /p/<id>`: the paste with its proof. */
@@ -224,6 +229,12 @@ export function createPaste(deps: PasteDeps): Paste {
     hasPending(slot) {
       sweep();
       return db.prepare("SELECT 1 AS one FROM paste_tasks WHERE slot = ? AND status = 'pending'").get(slot) !== undefined;
+    },
+
+    lastExpiredAt(slot) {
+      sweep();
+      const latest = db.prepare("SELECT status, expires_at FROM paste_tasks WHERE slot = ? AND requester = 'box' ORDER BY opened_at DESC, rowid DESC LIMIT 1").get(slot) as { status: string; expires_at: number } | undefined;
+      return latest?.status === 'expired' ? latest.expires_at : undefined;
     },
 
     pending(cookie) {

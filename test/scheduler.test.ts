@@ -337,7 +337,7 @@ const REFUSAL_WAIT = 7 * DAY;
 const EXPIRY_WAIT = DAY;
 /** How many rotation requests (approvals, or paste tasks) the box has ever opened, whatever became of them. */
 const countOf = (w: RoutesWorld, table: 'approvals' | 'paste_tasks'): number =>
-  (w.parts.db.prepare(table === 'approvals' ? "SELECT count(*) AS n FROM approvals WHERE kind = 'rotate_key'" : 'SELECT count(*) AS n FROM paste_tasks').get() as { n: number }).n;
+  (w.parts.db.prepare(table === 'approvals' ? "SELECT count(*) AS n FROM approvals WHERE kind = 'rotate_key'" : "SELECT count(*) AS n FROM paste_tasks WHERE json_extract(action_json, '$.kind') = 'rotate_key'").get() as { n: number }).n;
 /** Ticks every hour for `span` milliseconds (a multiple of an hour), the way the schedule does. */
 const hourlyTicks = (w: RoutesWorld, span: number): void => {
   for (let spent = 0; spent < span; spent += HOUR) {
@@ -410,7 +410,7 @@ test('KBOX-52 a due admin key on a paste-source platform whose task expires gets
   w.clock.advance(91 * DAY);
   w.rotation.tick();
   assert.equal(countOf(w, 'paste_tasks'), 1);
-  const expiresAt = (w.parts.db.prepare('SELECT expires_at AS at FROM paste_tasks').get() as { at: number }).at;
+  const expiresAt = (w.parts.db.prepare("SELECT expires_at AS at FROM paste_tasks WHERE json_extract(action_json, '$.kind') = 'rotate_key'").get() as { at: number }).at;
   w.clock.advance(expiresAt - w.clock.now());
   w.rotation.tick();
   assert.equal(countOf(w, 'paste_tasks'), 1, 'at the expiry no new task');
