@@ -906,7 +906,6 @@ R11 (database password rotation) waits for the deferred CI destination, which is
 | kernel-approve | KBOX-7, KBOX-8, KBOX-9, KBOX-11, KBOX-20, KBOX-22, KBOX-49, KBOX-53 | kernel-store | — |
 | update | KBOX-1, KBOX-6, KBOX-21, KBOX-44, KBOX-46, KBOX-48 | kernel-approve | — |
 | relay | KBOX-3, KBOX-13, KBOX-14, KBOX-23, KBOX-25, KBOX-32, KBOX-47 | kernel-approve, forms | — |
-| relay-ref | KBOX-3, KBOX-13, KBOX-32 | relay | — |
 | rotate | KBOX-12, KBOX-15, KBOX-16, KBOX-17, KBOX-34, KBOX-51, KBOX-52 | kernel-approve | — |
 | share | KBOX-18, KBOX-33 | kernel-store, forms | — |
 | google-a | KBOX-24, KBOX-41 | relay, rotate, shared-2 | — |
