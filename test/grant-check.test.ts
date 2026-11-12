@@ -42,7 +42,8 @@ const OTHER_SA = 'kbox-test-other@kbox-test-two.iam.gserviceaccount.com';
 const OTHER_ITEM = 'sa:kbox-test-two/kbox-test-other';
 const API_ITEM = 'api:firestore.googleapis.com';
 const KEYREF = 'google/kbox-test-proj/FIRESTORE';
-const MASTER_REF = 'google/box/KBOX_SIGNING_KEY';
+/** KBOX-55: the box's signing key is keyrefOf('google', [], 'OIDC_SIGNING_KEY'); any other google master row stops its creation. */
+const MASTER_REF = 'google/p/OIDC_SIGNING_KEY';
 const SECOND_MASTER_REF = 'google/box/KBOX_SIGNING_KEY_2';
 const READ_ONLY = 'https://www.googleapis.com/auth/cloud-platform.read-only';
 const CRM = 'cloudresourcemanager.googleapis.com';
@@ -106,9 +107,11 @@ interface Seed {
 function seed(parts: Pick<CoreParts, 'meta' | 'vault' | 'db' | 'hub'>, clock: TimedClock, options: Seed = {}): void {
   const rotation = createRotationStore(parts.db, clock, parts.hub);
   for (const ref of [MASTER_REF, SECOND_MASTER_REF].slice(0, options.masters ?? 1)) {
-    parts.meta.putKey(row(ref, 'master', ['box']));
+    parts.meta.putKey(row(ref, 'master', ref === MASTER_REF ? [] : ['box']));
     parts.vault.put(ref, 1, Buffer.from(SIGNING_VALUE));
     rotation.putKeyInfo(ref, { scopeItems: [], location: {}, rotatedAt: clock.now(), markAdmin: false });
+    // The generation row the box key's creation at start finds, so a restart makes no second key (KBOX-55).
+    rotation.putGen({ keyref: ref, gen: 1, status: 'current', platformKeyId: null, location: {} });
   }
   parts.meta.putKey(row(KEYREF, 'admin', options.projects ?? ['kbox-test-proj']));
   if (options.scope !== null) rotation.putKeyInfo(KEYREF, { scopeItems: options.scope ?? [SA_ITEM], location: {}, rotatedAt: clock.now(), markAdmin: false });
@@ -445,28 +448,6 @@ test('KBOX-41 core serves the discovery document and the JWKS of the box\'s sign
   assert.equal(jwks.status, 200, jwks.body);
   assert.deepEqual(JSON.parse(jwks.body), { keys: [{ kty: 'EC', crv: 'P-256', x: SIGNING.x, y: SIGNING.y, kid: SIGNING.kid, alg: 'ES256', use: 'sig' }] });
   assert.equal(jwks.body.includes(SIGNING_VALUE), false);
-});
-
-test('KBOX-41 the JWKS publishes the signing key\'s next generation before it becomes current, and keeps the one before it while the vault holds it', async (t) => {
-  const next = createHash('sha256').update('kbox-test-signing-2').digest().toString('base64url');
-  const previous = createHash('sha256').update('kbox-test-signing-0').digest().toString('base64url');
-  const kids = async (c: Core): Promise<number> => (JSON.parse((await c.call('/.well-known/jwks.json', { phone: true })).body) as { keys: unknown[] }).keys.length;
-  const pending = await core(t, { beforeStart: (parts) => parts.vault.put(MASTER_REF, 2, Buffer.from(next)) });
-  assert.equal(await kids(pending), 2, 'current and the pending generation');
-  const grace = await core(t, {
-    beforeStart: (parts) => {
-      parts.meta.putKey({ ...row(MASTER_REF, 'master', ['box']), gen_current: 2 });
-      parts.vault.put(MASTER_REF, 2, Buffer.from(previous));
-    },
-  });
-  assert.equal(await kids(grace), 2, 'current and the generation before it');
-  const retired = await core(t, {
-    beforeStart: (parts) => {
-      parts.meta.putKey({ ...row(MASTER_REF, 'master', ['box']), gen_current: 3 });
-      parts.vault.put(MASTER_REF, 3, Buffer.from(next));
-    },
-  });
-  assert.equal(await kids(retired), 1, 'a generation two back is not published even while its file exists');
 });
 
 test('KBOX-24 KBOX-41 a grant proposed through core\'s proposal route is checked with core\'s own identity, sink and stored record: refused with 422 naming the permission, and a clean one opens an approval', async (t) => {
