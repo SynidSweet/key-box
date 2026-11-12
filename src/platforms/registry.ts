@@ -8,6 +8,7 @@ import { createAnthropicEntry } from './anthropic/index.ts';
 import { createElevenLabsEntry } from './elevenlabs/index.ts';
 import { createOpenAiEntry } from './openai/index.ts';
 import { createStripeEntry } from './stripe/index.ts';
+import { createVercelEntry } from './vercel/index.ts';
 
 /** What an adapter is handed when its entry is built: the one way to reach its platform, and time. */
 export interface RegistryDeps {
@@ -16,7 +17,7 @@ export interface RegistryDeps {
 }
 
 export function createRegistry(deps: RegistryDeps): readonly PlatformEntry[] {
-  return [createAnthropicEntry(deps), createElevenLabsEntry(deps), createOpenAiEntry(deps), createStripeEntry(deps)];
+  return [createAnthropicEntry(deps), createElevenLabsEntry(deps), createOpenAiEntry(deps), createStripeEntry(deps), createVercelEntry(deps)];
 }
 
 /** The registry as a process that makes no adapter calls sees it: every call is refused and time stands at 0. For structure checks only. */
