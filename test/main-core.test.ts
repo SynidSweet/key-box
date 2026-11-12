@@ -17,7 +17,9 @@ import type { StartedCore } from '../src/main-core.ts';
 import { openCore } from '../src/shell/core.ts';
 import type { PlatformSource } from '../src/shell/rotation-ports.ts';
 import { createRotationStore } from '../src/shell/rotation-store.ts';
+import { createLendClient } from '../src/shell/lend-socket.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
+import { PROJECT_REGISTRY } from './fixtures/profiles.ts';
 import { issuerWith } from './fakes/platform-entry.ts';
 import { TimedClock, bytesOf, drive, lent, seededRandom, tempDir, waitUntil } from './kit/index.ts';
 
@@ -362,4 +364,21 @@ test('KBOX-57 core builds its platform source over the stored record of each mas
   });
   await waitUntil(() => listedWith.length > 0, 'reconcile at start to list the platform');
   assert.deepEqual(listedWith, [Buffer.from(platform.masterBytes).toString('utf8')], 'listed once, with the one master row core read from meta.db');
+});
+
+test('KBOX-57 core as the service wires it resolves a project-host key to its stored project, never the ref its projects name', async (t) => {
+  const pass = newToken(seededRandom(3));
+  const w = await started(t, {
+    lend: true,
+    registry: PROJECT_REGISTRY,
+    seed: ({ meta, vault, clock, rotation }) => {
+      meta.addMachine({ label: 'laptop', scope: 'relay', tokenSha256: hashToken(pass), enrolledAt: clock.now() });
+      meta.putKey({ ...adminRow('projkey01'), platform: 'projplat', name: 'PROJ_KEY', projects: ['zyxwvuts'] });
+      vault.put('projkey01', 1, Buffer.from('a project value'));
+      meta.putGrant('projkey01', 'laptop');
+      rotation.putKeyInfo('projkey01', { scopeItems: [], location: { project: 'abcdefgh' }, rotatedAt: clock.now(), markAdmin: false });
+    },
+  });
+  const resolved = await createLendClient(w.lendSocket).resolve({ op: 'resolve', token_hash: hashToken(pass), keyref: 'projkey01', network: '203.0.113.0/24' });
+  assert.deepEqual(resolved, { ok: true, label: 'laptop', platform: 'projplat', project: 'abcdefgh' });
 });
