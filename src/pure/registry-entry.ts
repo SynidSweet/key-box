@@ -1,7 +1,16 @@
 // KBOX-23: the registry checks that concern an entry as a whole rather than its relay profile.
 import type { PlatformEntry } from '../ports/platform.ts';
 
-export type EntryFailure = 'shape_twice' | 'shape_missing' | 'classify_twice' | 'classify_missing' | 'destination_twice' | 'bad_host';
+export type EntryFailure =
+  | 'shape_twice'
+  | 'shape_missing'
+  | 'classify_twice'
+  | 'classify_missing'
+  | 'destination_twice'
+  | 'bad_host'
+  | 'location_field_unknown'
+  | 'location_prover_missing'
+  | 'master_items_bad';
 
 /** One source of a shape and one of a class: an entry with an issuer takes each from the issuer, one without states them (KBOX-40). */
 export function checkShapeSource(entry: PlatformEntry): EntryFailure | undefined {
@@ -34,3 +43,20 @@ export const checkHosts = (entry: PlatformEntry): 'bad_host' | undefined => ((en
 
 /** Every host the entries' own adapter calls reach (the egress gate's list for caller `adapter`). */
 export const registryHostsOf = (entries: readonly PlatformEntry[]): string[] => entries.flatMap((e) => [...(e.hosts ?? [])]);
+
+const LOCATION_FIELDS: readonly string[] = ['region', 'project'];
+
+/** KBOX-23, KBOX-57: an entry's location declares only `region` and `project` (the stored record has no other place to keep a field). */
+export const checkLocationFields = (entry: PlatformEntry): 'location_field_unknown' | undefined =>
+  Object.keys(entry.location ?? {}).every((f) => LOCATION_FIELDS.includes(f)) ? undefined : 'location_field_unknown';
+
+/** KBOX-23, KBOX-57: a location field that names an upstream host is proven at proposal, so an entry declaring one has a `locationProver`. */
+export const checkLocationProver = (entry: PlatformEntry): 'location_prover_missing' | undefined =>
+  Object.values(entry.location ?? {}).some((rule) => rule.namesHost === true) && entry.locationProver === undefined ? 'location_prover_missing' : undefined;
+
+/** A scope-item prefix: scope-item characters (KBOX-53), ending in `:` after at least one other. */
+const MASTER_ITEM_PREFIX = /^[A-Za-z0-9_./-][A-Za-z0-9_./-]{0,126}:$/;
+
+/** KBOX-23, KBOX-57: each `masterItems` entry is a scope-item prefix ending in `:` (Vercel `team:`). */
+export const checkMasterItems = (entry: PlatformEntry): 'master_items_bad' | undefined =>
+  (entry.masterItems ?? []).every((p) => MASTER_ITEM_PREFIX.test(p)) ? undefined : 'master_items_bad';

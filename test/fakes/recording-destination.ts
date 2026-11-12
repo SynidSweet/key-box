@@ -1,7 +1,7 @@
 // A destination that keeps what it holds, in order, and can refuse a target or fail a deploy: the rotation tests read it to see what each
 // destination holds at any moment. Faults are planted through the port (it refuses), never by patching.
 import type { DeployRef, Destination, DestinationKind, DestinationTarget, PushOutcome, Redeployer } from '../../src/ports/destination.ts';
-import type { Lent } from '../../src/ports/types.ts';
+import type { KeyClass, Lent } from '../../src/ports/types.ts';
 
 const place = (t: DestinationTarget, name: string): string => `${t.id}/${name}`;
 
@@ -19,6 +19,7 @@ export class RecordingDestination implements Destination {
   readonly #removeRefused = new Set<string>();
   readonly #removeThenThrow = new Set<string>();
   readonly #trace: string[];
+  readonly #pushes: { readonly target: string; readonly name: string; readonly klass: KeyClass }[] = [];
   #versions = 0;
   #runtime: boolean;
   #enter: EnterCheck | undefined;
@@ -77,8 +78,9 @@ export class RecordingDestination implements Destination {
     this.#removeRefused.delete(target);
   }
 
-  async push(t: DestinationTarget, name: string, v: Lent, master: Lent): Promise<PushOutcome> {
+  async push(t: DestinationTarget, name: string, v: Lent, klass: KeyClass, master: Lent): Promise<PushOutcome> {
     void master;
+    this.#pushes.push({ target: t.id, name, klass });
     this.#enter?.('push', t.id);
     const left = this.#refused.get(t.id);
     if (left === 0) return { outcome: 'refused' };
@@ -105,6 +107,11 @@ export class RecordingDestination implements Destination {
     this.#held.delete(place(t, name));
     if (this.#removeThenThrow.delete(t.id)) return Promise.reject(new Error(`timed out ${t.id}`));
     return Promise.resolve();
+  }
+
+  /** Every push entered, in order, with the key class it was handed. */
+  pushed(): readonly { readonly target: string; readonly name: string; readonly klass: KeyClass }[] {
+    return this.#pushes;
   }
 
   /** The text of the value held at a target, or undefined. */
@@ -137,6 +144,7 @@ export class RecordingRedeployer implements Redeployer {
   readonly #startThenThrow = new Set<string>();
   readonly #refuseNext = new Set<string>();
   readonly #failAt = new Set<string>();
+  readonly #readyMasters: Lent[] = [];
   #failNext = false;
   #next = 1;
   #enter: EnterCheck | undefined;
@@ -144,6 +152,11 @@ export class RecordingRedeployer implements Redeployer {
   constructor(trace: string[], source?: RecordingDestination) {
     this.#trace = trace;
     this.#source = source;
+  }
+
+  /** The master each `ready` was handed, in order. */
+  readyMasters(): readonly Lent[] {
+    return this.#readyMasters;
   }
 
   /** The next deploy started will end as failed. */
@@ -201,7 +214,8 @@ export class RecordingRedeployer implements Redeployer {
     return Promise.resolve(ref);
   }
 
-  ready(r: DeployRef): Promise<'ready' | 'failed'> {
+  ready(r: DeployRef, master: Lent): Promise<'ready' | 'failed'> {
+    this.#readyMasters.push(master);
     return Promise.resolve(this.#failing.has(r) ? 'failed' : 'ready');
   }
 }

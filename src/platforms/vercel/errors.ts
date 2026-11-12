@@ -14,8 +14,8 @@ export const VERCEL_FAILURES = [
   'malformed',
   /** A scope or an id that is not a plain name: refused before any call. */
   'bad_scope',
-  /** `ready` asked about a deploy this redeployer did not start (or has finished with). */
-  'unknown_deploy',
+  /** A key whose bytes cannot be an HTTP header value: refused before any call. */
+  'bad_key',
   /** A redeploy of a project with no ready production deployment to start from. */
   'no_deployment',
 ] as const;

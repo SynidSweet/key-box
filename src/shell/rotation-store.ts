@@ -1,11 +1,12 @@
 // KBOX-51, KBOX-34: the rotation state in meta.db: runs (one active per key, structurally), generations, destination receipts,
 // deliveries and the orphan notices already sent. Names, ids and numbers only: no column here can hold a value. The tables are
-// created beside the kernel's (`CREATE TABLE IF NOT EXISTS` on the same connection), so this unit adds no line to db.ts.
+// created by `openMetaDatabase` (meta-schema.ts, KBOX-56), so a box without a domain has them too.
 import type { DatabaseSync } from 'node:sqlite';
 import type { Clock } from '../ports/clock.ts';
 import type { EventSignal } from '../ports/events.ts';
 import type { KeyClass, KeyLocation, PlatformKeyId } from '../ports/types.ts';
 import { ApiError } from '../pure/errors.ts';
+import { sameLocation } from '../pure/location.ts';
 import { insertEvent } from './events.ts';
 import { inTransaction } from './db.ts';
 import type { MetaKey } from '../ports/meta.ts';
@@ -19,69 +20,6 @@ export type GenStatus = 'pending' | 'current' | 'grace' | 'retired' | 'failed';
 const PUSH_MAYBE = 1;
 const PUSH_DONE = 2;
 const PUSH_REFUSED = 3;
-const RUN_STATES ="('issuing','verifying','pushing','redeploying','checking','promoting','grace','revoking','rolling_back','done','failed','abandoned')";
-const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS rotation_keys (
-    keyref TEXT PRIMARY KEY REFERENCES keys (keyref),
-    scope_json TEXT NOT NULL,
-    region TEXT,
-    project TEXT,
-    rotated_at INTEGER NOT NULL,
-    mark_admin INTEGER NOT NULL DEFAULT 0 CHECK (mark_admin IN (0, 1))
-  ) STRICT;
-  CREATE TABLE IF NOT EXISTS rotation_runs (
-    run_id TEXT PRIMARY KEY,
-    keyref TEXT NOT NULL REFERENCES keys (keyref),
-    state TEXT NOT NULL CHECK (state IN ${RUN_STATES}),
-    gen_old INTEGER NOT NULL,
-    gen_new INTEGER NOT NULL,
-    intent_name TEXT NOT NULL,
-    origin TEXT NOT NULL,
-    opened_at INTEGER NOT NULL,
-    revoke_at INTEGER,
-    attempts INTEGER NOT NULL DEFAULT 0,
-    failed_step TEXT,
-    reason_code TEXT,
-    failed_notified INTEGER NOT NULL DEFAULT 0,
-    still_on_notified INTEGER NOT NULL DEFAULT 0,
-    failed_at INTEGER,
-    CHECK (state <> 'failed' OR failed_at IS NOT NULL)
-  ) STRICT;
-  CREATE UNIQUE INDEX IF NOT EXISTS rotation_one_active_run_per_key ON rotation_runs (keyref) WHERE state NOT IN ('done', 'failed', 'abandoned');
-  CREATE TABLE IF NOT EXISTS rotation_gens (
-    keyref TEXT NOT NULL REFERENCES keys (keyref),
-    gen INTEGER NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('pending', 'current', 'grace', 'retired', 'failed')),
-    platform_key_id TEXT,
-    region TEXT,
-    project TEXT,
-    PRIMARY KEY (keyref, gen)
-  ) STRICT;
-  CREATE TABLE IF NOT EXISTS rotation_receipts (
-    run_id TEXT NOT NULL REFERENCES rotation_runs (run_id),
-    kind TEXT NOT NULL,
-    target TEXT NOT NULL,
-    version TEXT,
-    pushed INTEGER NOT NULL CHECK (pushed IN (1, 2, 3)),
-    -- 1 once a redeploy's intent is written, before the redeploy is called: the destination may run the new value from then on.
-    redeployed INTEGER NOT NULL DEFAULT 0,
-    rollback_notified INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (run_id, kind, target)
-  ) STRICT;
-  CREATE TABLE IF NOT EXISTS orphan_notices (
-    platform_key_id TEXT PRIMARY KEY
-  ) STRICT;
-  CREATE TABLE IF NOT EXISTS deliveries (
-    delivery_id TEXT PRIMARY KEY,
-    keyref TEXT NOT NULL REFERENCES keys (keyref),
-    project TEXT NOT NULL,
-    name TEXT NOT NULL,
-    gen INTEGER NOT NULL,
-    created_at INTEGER NOT NULL,
-    acked_at INTEGER,
-    notified INTEGER NOT NULL DEFAULT 0
-  ) STRICT;
-`;
 
 export interface RunRow {
   readonly runId: string;
@@ -115,6 +53,8 @@ export interface KeyInfo {
   readonly location: KeyLocation;
   readonly rotatedAt: number;
   readonly markAdmin: boolean;
+  /** The read call the key's verification makes (KBOX-40, KBOX-56); absent until a paste chose one. */
+  readonly verifyHint?: string;
 }
 
 export interface KeyHead {
@@ -282,8 +222,13 @@ export interface RotationStore {
   runs(): readonly RunRow[];
   update(runId: string, patch: RunPatch): RunRow;
 
+  /** Writes the key's rotation record. A record that exists keeps its location: another one is `conflict` (`location_immutable`) and nothing is written (KBOX-57). */
   putKeyInfo(keyref: string, info: KeyInfo): void;
+  /** True when a `keys` or a `rotation_keys` row holds the reference (KBOX-57: a key elsewhere is a new key, never this one moved). */
+  keyExists(keyref: string): boolean;
   keyInfo(keyref: string): KeyInfo | undefined;
+  /** Stores which read call the key's verification makes; `not_found` when the key has no rotation record. */
+  setVerifyHint(keyref: string, hint: string): void;
   /** The key's own row, with what rotation needs of its rotation record. */
   key(keyref: string): KeyHead | undefined;
   keys(): readonly KeyHead[];
@@ -323,8 +268,18 @@ export interface RotationStore {
   markDeliveryNotified(deliveryId: string): void;
 }
 
+/**
+ * A key's stored scope, location and options (`rotation_keys`), read straight from meta.db with no store instance: what the platform source
+ * reads of a master row (KBOX-57). Undefined when the key has no such row.
+ */
+export function readKeyInfo(db: DatabaseSync, keyref: string): KeyInfo | undefined {
+  const r = db.prepare('SELECT scope_json, region, project, rotated_at, mark_admin, verify_hint FROM rotation_keys WHERE keyref = ?').get(keyref) as
+    | { scope_json: string; region: string | null; project: string | null; rotated_at: number; mark_admin: number; verify_hint: string | null }
+    | undefined;
+  return r === undefined ? undefined : { scopeItems: JSON.parse(r.scope_json) as string[], location: locationOf(r.region, r.project), rotatedAt: r.rotated_at, markAdmin: r.mark_admin === 1, ...(r.verify_hint === null ? {} : { verifyHint: r.verify_hint }) };
+}
+
 export function createRotationStore(db: DatabaseSync, clock: Clock, hub: EventSignal): RotationStore {
-  db.exec(SCHEMA);
   const write = <T>(work: () => T): T => {
     const result = inTransaction(db, work);
     hub.notify();
@@ -394,17 +349,21 @@ export function createRotationStore(db: DatabaseSync, clock: Clock, hub: EventSi
 
     putKeyInfo(keyref, info) {
       write(() => {
+        const stored = db.prepare('SELECT region, project FROM rotation_keys WHERE keyref = ?').get(keyref) as { region: string | null; project: string | null } | undefined;
+        if (stored !== undefined && !sameLocation(locationOf(stored.region, stored.project), info.location)) throw new ApiError('conflict', 'location_immutable');
         db.prepare(
           `INSERT INTO rotation_keys (keyref, scope_json, region, project, rotated_at, mark_admin) VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT (keyref) DO UPDATE SET scope_json = excluded.scope_json, region = excluded.region, project = excluded.project, rotated_at = excluded.rotated_at, mark_admin = excluded.mark_admin`,
         ).run(keyref, JSON.stringify(info.scopeItems), info.location.region ?? null, info.location.project ?? null, info.rotatedAt, info.markAdmin ? 1 : 0);
       });
     },
-    keyInfo(keyref) {
-      const r = db.prepare('SELECT scope_json, region, project, rotated_at, mark_admin FROM rotation_keys WHERE keyref = ?').get(keyref) as
-        | { scope_json: string; region: string | null; project: string | null; rotated_at: number; mark_admin: number }
-        | undefined;
-      return r === undefined ? undefined : { scopeItems: JSON.parse(r.scope_json) as string[], location: locationOf(r.region, r.project), rotatedAt: r.rotated_at, markAdmin: r.mark_admin === 1 };
+    keyExists: (keyref) =>
+      db.prepare('SELECT 1 AS one FROM keys WHERE keyref = ? UNION ALL SELECT 1 FROM rotation_keys WHERE keyref = ?').get(keyref, keyref) !== undefined,
+    keyInfo: (keyref) => readKeyInfo(db, keyref),
+    setVerifyHint(keyref, hint) {
+      write(() => {
+        if (db.prepare('UPDATE rotation_keys SET verify_hint = ? WHERE keyref = ?').run(hint, keyref).changes === 0) throw new ApiError('not_found');
+      });
     },
     key: (keyref) => {
       const k = db.prepare(`${HEAD_SELECT} WHERE k.keyref = ?`).get(keyref) as HeadStored | undefined;

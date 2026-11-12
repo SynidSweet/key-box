@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Issuer, KeyLister } from '../../src/ports/issuer.ts';
-import type { Lent } from '../../src/ports/types.ts';
+import type { KeyLocation, Lent } from '../../src/ports/types.ts';
 import { bytesOf } from '../kit/index.ts';
 
 export interface IssuerSubject {
@@ -14,8 +14,9 @@ export interface IssuerSubject {
 }
 
 /** KBOX-35 and KBOX-23: what every Issuer must do, run against the fake and each adapter over fakePlatform. */
-export function issuerContract(name: string, make: () => IssuerSubject): void {
-  const request = { scope: { access: 'read' } };
+/** `at`: the location every issue request of the contract carries (KBOX-57); none by default. */
+export function issuerContract(name: string, make: () => IssuerSubject, at: KeyLocation = {}): void {
+  const request = { scope: { access: 'read' }, at };
 
   test(`KBOX-35 issuer contract (${name}): capabilities give a complete, consistent description of the platform`, () => {
     const { issuer, lister } = make();
@@ -23,7 +24,7 @@ export function issuerContract(name: string, make: () => IssuerSubject): void {
     assert.ok(['api', 'paste'].includes(caps.create));
     assert.ok(['api', 'paste'].includes(caps.revoke));
     assert.ok(caps.shape.coreLength.min > 0 && caps.shape.coreLength.max >= caps.shape.coreLength.min);
-    assert.ok(['ordinary', 'admin', 'master'].includes(caps.classify(request.scope)));
+    assert.ok(['ordinary', 'admin', 'master'].includes(caps.classify(request.scope, request.at)));
     if (caps.revealOnce) assert.ok(lister !== undefined, 'KBOX-23: an issuer that reveals once needs a lister');
   });
 

@@ -5,6 +5,7 @@ import type { Random } from '../ports/random.ts';
 import type { Action, Destination } from '../pure/actions.ts';
 import { parseAction } from '../pure/actions.ts';
 import { classOf, keyrefOf, matchesShape } from '../pure/class.ts';
+import { namesHost } from '../pure/location.ts';
 import { ApiError } from '../pure/errors.ts';
 import { LABEL, NAME, parseQuery, text } from '../pure/schemas.ts';
 import type { Parsed } from '../pure/schemas.ts';
@@ -12,18 +13,18 @@ import type { Approvals } from './approvals.ts';
 import { parsedRoute, route } from './http.ts';
 import type { Route } from './http.ts';
 import { classifierOf, shapeOf } from '../pure/platform-shape.ts';
-import { keyConfigFor, newKeyOf } from './new-key.ts';
-import type { RotateKey } from './new-key.ts';
+import { keyConfigFor, newKeyOf, placedKey } from './new-key.ts';
+import type { AddKey, RotateKey } from './new-key.ts';
 import type { Orchestrator } from './orchestrator.ts';
 import type { Paste } from './paste.ts';
 import { isRecord, only } from './routes-approve.ts';
-import { isPasteSource, overlapOf } from './rotation-ports.ts';
+import { isPasteSource, overlapOf, storedPlacement } from './rotation-ports.ts';
 import type { PlatformSource } from './rotation-ports.ts';
 import type { DestinationRow, RotationStore } from './rotation-store.ts';
 import type { Vault } from '../ports/vault.ts';
-import type { KeyClass } from '../ports/types.ts';
 import type { Audit } from '../ports/audit.ts';
 import type { Clock } from '../ports/clock.ts';
+import type { KeyLocation } from '../ports/types.ts';
 import type { EventLog } from '../ports/events.ts';
 
 export interface KeyRouteDeps {
@@ -51,12 +52,12 @@ interface KeyRequest {
   readonly rotateEveryDays: number | undefined;
 }
 
-/** `{platform, name, projects, scope, label?, destinations?, rotate_every_days?}`, closed. Members are checked by the action parser. */
+/** `{platform, name, projects, scope, location?, label?, destinations?, rotate_every_days?}`, closed. Members are checked by the action parser. */
 function parseKeyRequest(raw: unknown): Parsed<KeyRequest> {
-  if (!isRecord(raw) || !only(raw, ['platform', 'name', 'projects', 'scope'], ['label', 'destinations', 'rotate_every_days'])) return { ok: false };
-  const { platform, name, projects, scope, label } = raw;
+  if (!isRecord(raw) || !only(raw, ['platform', 'name', 'projects', 'scope'], ['location', 'label', 'destinations', 'rotate_every_days'])) return { ok: false };
+  const { platform, name, projects, scope, location, label } = raw;
   if (typeof name !== 'string' || !ENV_KEY_NAME.test(name)) return { ok: false };
-  const action = parseAction({ kind: 'add_key', platform, name, projects, scope, ...(label === undefined ? {} : { label }) });
+  const action = parseAction({ kind: 'add_key', platform, name, projects, scope, ...(location === undefined ? {} : { location }), ...(label === undefined ? {} : { label }) });
   if (!action.ok || action.value.kind !== 'add_key') return { ok: false };
   const listed = raw['destinations'];
   const destinations: Destination[] = [];
@@ -82,12 +83,6 @@ const parseKeyrefBody = (raw: unknown): Parsed<{ readonly keyref: string }> =>
 export function keyRoutes(deps: KeyRouteDeps): Route[] {
   const { store } = deps;
 
-  /** The adapters and the class of a request, or the reason it cannot be issued. */
-  const classify = (platform: string, items: readonly string[]): { readonly klass: KeyClass; readonly create: 'api' | 'paste' } => {
-    const config = keyConfigFor(deps.source, platform);
-    return { klass: classOf(config.classify({ items }), undefined), create: config.create };
-  };
-
   const rowOf = (d: Destination): DestinationRow => {
     // The workstation is a delivery, not an adapter: its value is fetched by the box's own control route (KBOX-34).
     if (d.kind === 'workstation') return { kind: d.kind, target: 'workstation', readable_by: 'api' };
@@ -106,21 +101,26 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
       handle: async ({ body, actor }) => {
         const { action } = body;
         const keyref = keyrefOf(action.platform, action.projects, action.name);
-        const { klass, create } = classify(action.platform, action.scope.items);
+        const config = keyConfigFor(deps.source, action.platform);
+        // KBOX-57, KBOX-15: the class at the request's location (never below the class without it) and the location the entry accepts for it.
+        const { klass, at } = placedKey(config, action);
+        // KBOX-57: a key elsewhere is a new key; an existing reference is refused on every branch before anything is asked, opened or written.
+        if (store.keyExists(keyref)) throw new ApiError('conflict', 'key_exists');
         if (klass === 'master') throw rejected('master_not_issuable');
-        if (create === 'paste') {
+        if (config.create === 'paste') {
           if (klass === 'ordinary') throw rejected('no_issuer');
+          await provenPlacement(deps.source, action, at, 'paste');
           const opened = deps.paste.open({ action, requester: { kind: 'token', label: actor } });
           return { status: 202, json: { keyref, class: klass, paste_task_id: opened.paste_id } };
         }
         // A key of a one-credential platform is added by paste, never by a run (nothing to set back): refused before an approval is asked for.
         if (!overlapOf(deps.source.platform(action.platform))) throw rejected('overlap_needs_paste');
+        if (klass !== 'ordinary' && (body.destinations.length > 0 || body.rotateEveryDays !== undefined)) throw rejected('use_approvals_for_options');
+        await provenPlacement(deps.source, action, at, 'run');
         if (klass !== 'ordinary') {
-          if (body.destinations.length > 0 || body.rotateEveryDays !== undefined) throw rejected('use_approvals_for_options');
           const proposed = deps.approvals.propose({ action, requester: { kind: 'token', label: actor } });
           return { status: 202, json: { keyref, class: klass, approval_id: proposed.approval_id } };
         }
-        if (store.key(keyref) !== undefined) throw new ApiError('conflict', 'key_exists');
         const rows = body.destinations.map(rowOf);
         const created = await deps.orchestrator.create(newKeyOf(action, deps.source, rows, body.rotateEveryDays));
         if (action.label !== undefined) deps.meta.putGrant(keyref, action.label);
@@ -138,6 +138,10 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
         const head = store.key(body.keyref);
         if (head === undefined) throw new ApiError('not_found');
         if (store.activeRunOf(body.keyref) !== undefined) throw new ApiError('conflict', 'run_exists');
+        // KBOX-57: a stored location the entry now refuses is answered with its code, before any run, approval or paste task.
+        const info = store.keyInfo(body.keyref);
+        const placed = info === undefined ? 'ok' : storedPlacement(deps.source, head, info);
+        if (placed !== 'ok') throw rejected(placed);
         if (head.class === 'ordinary') return { status: 201, json: { run_id: deps.orchestrator.start({ keyref: body.keyref, origin: 'agent' }).runId } };
         const action: RotateKey = { kind: 'rotate_key', keyref: body.keyref };
         if (isPasteSource(deps.source, head.platform)) {
@@ -168,6 +172,25 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
   ];
 }
 
+/**
+ * KBOX-57, at proposal: where the key needs its master (made by a run, or on an entry with a `locationProver`), the master chosen by the key's
+ * platform, location and scope items; none is `no_master` and two `master_ambiguous`, both `rejected`. A location naming a host is then proven
+ * with that master: `unseen` is `rejected` (`location_unknown`), a prover that throws is `unavailable`. Throws before anything is proposed,
+ * opened or written.
+ */
+async function provenPlacement(source: PlatformSource, action: AddKey, at: KeyLocation, made: 'run' | 'paste'): Promise<void> {
+  const kit = source.platform(action.platform);
+  const prover = kit?.locationProver;
+  if (made === 'paste' && prover === undefined) return;
+  const master = source.master(action.platform, at, action.scope.items);
+  if (!master.ok) throw rejected(master.code);
+  if (prover === undefined || !namesHost(kit?.location, at)) return;
+  const seen = await prover.prove(at, master.value).catch(() => {
+    throw new ApiError('unavailable');
+  });
+  if (seen === 'unseen') throw rejected('location_unknown');
+}
+
 /** Stores a retired value as a retired generation: never lent, never pushed; fingerprinted only when it passes the shape check (KBOX-34). */
 function retire(deps: KeyRouteDeps, q: { readonly platform: string; readonly project: string; readonly name: string }, bytes: Uint8Array): { readonly status: number; readonly json: unknown } {
   const kit = deps.source.platform(q.platform);
@@ -182,7 +205,7 @@ function retire(deps: KeyRouteDeps, q: { readonly platform: string; readonly pro
       platform: q.platform,
       name: q.name,
       projects: [q.project],
-      class: classOf(classify({ items: [] }), undefined),
+      class: classOf(classify({ items: [] }, {}), undefined),
       status: 'works',
       gen_current: 1,
       schedule: { rotate_every_days: 90, grace_hours: 1, next_due_at: null, expires_at: null },

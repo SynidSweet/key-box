@@ -9,6 +9,14 @@ export function classOf(adapter: KeyClass, mark: KeyClass | undefined): KeyClass
   return mark !== undefined && RANK[mark] > RANK[adapter] ? mark : adapter;
 }
 
+/**
+ * KBOX-15, KBOX-57: the class of a key with a location, the highest of the classification without the location, the one with it, and the
+ * owner's mark. A location may raise a class and never lower it: no platform answer yet shows that a named place narrows a key.
+ */
+export function flooredClass(bare: KeyClass, placed: KeyClass, mark: KeyClass | undefined): KeyClass {
+  return classOf(classOf(bare, placed), mark);
+}
+
 /** A caller may raise a key's class or keep it; asking for a lower one is refused (`demote` is a phone action). */
 export function raiseClass(current: KeyClass, requested: KeyClass): { readonly ok: true; readonly class: KeyClass } | { readonly ok: false } {
   return RANK[requested] >= RANK[current] ? { ok: true, class: requested } : { ok: false };

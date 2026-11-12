@@ -11,7 +11,7 @@ import type { PlatformId } from '../ports/types.ts';
 import type { Orchestrator } from './orchestrator.ts';
 import { intentAbsent } from '../pure/rotation-machine.ts';
 import { revokeAndConfirm } from './revoke-confirm.ts';
-import type { PlatformSource } from './rotation-ports.ts';
+import type { MasterResult, PlatformSource } from './rotation-ports.ts';
 import type { RotationStore, RunRow } from './rotation-store.ts';
 
 export interface ReconcileDeps extends PlatformSource {
@@ -31,16 +31,33 @@ const INTENT_PREFIX = 'kbox_';
 export function createReconciler(deps: ReconcileDeps): Reconciler {
   const { store, orchestrator } = deps;
 
+  const auditFailed = (subject: string, runId: string, code: string): void => {
+    deps.audit.append({ action: 'rotation.drive_failed', subject, at: deps.clock.now(), detail: { run_id: runId, code } });
+  };
+
+  /**
+   * KBOX-57: what the platform holds, listed once per master row (each master sees its own place); a listing that fails audits `list_failed`
+   * for that row only and the others still count. A key two masters both see is listed once.
+   */
   async function listed(platform: PlatformId): Promise<readonly PlatformKeyInfo[] | undefined> {
     const lister = deps.platform(platform)?.lister;
     if (lister === undefined) return undefined;
-    try {
-      return await lister.list(deps.master(platform));
-    } catch {
-      deps.audit.append({ action: 'rotation.drive_failed', subject: platform, at: deps.clock.now(), detail: { run_id: 'reconcile', code: 'list_failed' } });
-      return undefined;
+    const seen = new Map<string, PlatformKeyInfo>();
+    for (const master of deps.masters(platform)) {
+      try {
+        for (const key of await lister.list(master.value)) if (!seen.has(key.platformKeyId)) seen.set(key.platformKeyId, key);
+      } catch {
+        deps.audit.append({ action: 'rotation.drive_failed', subject: platform, at: deps.clock.now(), detail: { run_id: 'reconcile', code: 'list_failed' } });
+      }
     }
+    return [...seen.values()];
   }
+
+  /** KBOX-57: the master of the key a run is for, by its stored location and scope items (never its projects). */
+  const masterOfKey = (platform: PlatformId, keyref: string): MasterResult => {
+    const info = store.keyInfo(keyref);
+    return info === undefined ? { ok: false, code: 'no_master' } : deps.master(platform, info.location, info.scopeItems);
+  };
 
   async function sweepPlatform(platform: PlatformId, keys: readonly PlatformKeyInfo[]): Promise<void> {
     const kit = deps.platform(platform);
@@ -53,7 +70,12 @@ export function createReconciler(deps: ReconcileDeps): Reconciler {
         continue;
       }
       if (orchestrator.isLeased(run.keyref)) continue;
-      const dead = await revokeAndConfirm({ kit, platform, id: key.platformKeyId, at: key.location ?? {}, value: undefined, master: deps.master(platform, store.key(run.keyref)?.projects) });
+      const master = masterOfKey(platform, run.keyref);
+      if (!master.ok) {
+        auditFailed(run.keyref, run.runId, master.code);
+        continue;
+      }
+      const dead = await revokeAndConfirm({ kit, platform, id: key.platformKeyId, at: key.location ?? {}, value: undefined, master: master.value });
       if (!dead) continue;
       deps.audit.append({ action: 'rotation.orphan_revoked', subject: run.keyref, at: deps.clock.now(), detail: { run_id: run.runId } });
       if (run.state === 'issuing') orchestrator.retake(run.runId);
@@ -74,9 +96,14 @@ export function createReconciler(deps: ReconcileDeps): Reconciler {
     // No lister: the platform has nothing to list, so no orphan can be found by listing and there is nothing to wait for.
     if (lister === undefined) return true;
     try {
-      return intentAbsent(await lister.listAt(info.location, deps.master(head.platform, head.projects)), info.location, run.intentName);
+      const master = masterOfKey(head.platform, run.keyref);
+      if (!master.ok) {
+        auditFailed(run.runId, run.runId, master.code);
+        return false;
+      }
+      return intentAbsent(await lister.listAt(info.location, master.value), info.location, run.intentName);
     } catch {
-      deps.audit.append({ action: 'rotation.drive_failed', subject: run.runId, at: deps.clock.now(), detail: { run_id: run.runId, code: 'list_failed' } });
+      auditFailed(run.runId, run.runId, 'list_failed');
       return false;
     }
   }

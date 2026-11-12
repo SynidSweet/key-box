@@ -2,13 +2,18 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
+import type { TestContext } from 'node:test';
+import type { AdapterHttp, HttpRequest, HttpResponse } from '../src/ports/http.ts';
 import type { PlatformEntry } from '../src/ports/platform.ts';
 import type { Issuer, KeyLister, Verifier } from '../src/ports/issuer.ts';
 import type { AllowRule, RelayProfile } from '../src/ports/relay-profile.ts';
 import type { Lent } from '../src/ports/types.ts';
 import { createElevenLabsEntry } from '../src/platforms/elevenlabs/index.ts';
 import { matchesShape } from '../src/pure/class.ts';
+import { confirmDead } from '../src/pure/rotation-machine.ts';
 import { checkRegistry, compileProfile, refuseWidening } from '../src/pure/profile.ts';
+import { checkLocation } from '../src/pure/location.ts';
+import { createPlatformSource } from '../src/shell/platform-source.ts';
 import { parseRelayTarget } from '../src/pure/target-parse.ts';
 import { issuerContract } from './contracts/issuer.contract.ts';
 import { listerContract } from './contracts/lister.contract.ts';
@@ -17,6 +22,8 @@ import { HOST_OF, startElevenLabsWorld } from './fakes/elevenlabs.ts';
 import type { ElevenLabsWorld, Region } from './fakes/elevenlabs.ts';
 import { variants } from './fixtures/profiles.ts';
 import { bytesOf, canary, lent } from './kit/index.ts';
+import { routesWorld } from './support/routes-world.ts';
+import type { RoutesWorld } from './support/routes-world.ts';
 
 const PERMISSIONS = JSON.parse(readFileSync(new URL('../src/platforms/elevenlabs/permissions.json', import.meta.url), 'utf8')) as { master: string[]; ordinary: string[] };
 const MASTER_NAMES = [
@@ -45,8 +52,9 @@ const verifierOf = (): Verifier => {
   assert.ok(entry.verifier);
   return entry.verifier;
 };
-const classify = (items: readonly string[]): string => issuerOf().capabilities().classify({ items });
+const classify = (items: readonly string[]): string => issuerOf().capabilities().classify({ items }, {});
 const textOf = (l: Lent): Promise<string> => bytesOf(l).then((b) => Buffer.from(b).toString('utf8'));
+const GLOBAL = { region: 'global' } as const;
 
 test('KBOX-39 permissions.json holds the 54 permission names of the probe: the 16 master ones and 38 ordinary ones, no name twice', () => {
   assert.deepEqual([...PERMISSIONS.master].sort(), [...MASTER_NAMES].sort());
@@ -65,13 +73,13 @@ test('KBOX-39 classify: "all", an unknown name (fail closed) or one master name 
   assert.equal(classify(['text_to_speech', 'speech_to_text', 'create_user_api_key']), 'master');
   assert.equal(classify([]), 'ordinary');
   assert.equal(classify(['region:us', 'service-account:sa-test-1']), 'ordinary');
-  assert.equal(issuerOf().capabilities().classify({ access: 'read' }), 'ordinary');
+  assert.equal(issuerOf().capabilities().classify({ access: 'read' }, {}), 'ordinary');
 });
 
-test('KBOX-39 the entry states the two management hosts, the three still-unverified probe items, a key page, and no relay profile', () => {
+test('KBOX-39 the entry states the two management hosts, the five still-unverified probe items, a key page, and no relay profile', () => {
   assert.equal(entry.id, 'elevenlabs');
   assert.deepEqual([...(entry.hosts ?? [])].sort(), ['api.elevenlabs.io', 'api.us.elevenlabs.io']);
-  assert.deepEqual([...entry.unverified].sort(), ['elevenlabs.key-format', 'elevenlabs.permission-enum', 'elevenlabs.verifier-call']);
+  assert.deepEqual([...entry.unverified].sort(), ['elevenlabs.empty-permissions', 'elevenlabs.key-format', 'elevenlabs.permission-enum', 'elevenlabs.service-account-list', 'elevenlabs.verifier-call']);
   assert.equal(entry.relay, undefined);
   assert.equal(entry.shape, undefined);
   assert.equal(entry.classify, undefined);
@@ -83,14 +91,14 @@ const subject = () => {
   world.reset();
   return { issuer: issuerOf(), lister: listerOf(), verifier: verifierOf(), master: world.master(), wrongMaster: world.stranger(), stranger: world.stranger(), setUnreachable: (down: boolean) => { for (const r of Object.values(world.regions)) r.down = down; } };
 };
-issuerContract('elevenlabs', subject);
-listerContract('elevenlabs', subject);
-verifierContract('elevenlabs', subject);
+issuerContract('elevenlabs', subject, GLOBAL);
+listerContract('elevenlabs', subject, GLOBAL);
+verifierContract('elevenlabs', subject, GLOBAL);
 
 test('KBOX-39 issue posts the name and the permissions to the service account of the scope, with the master in xi-api-key and never in Authorization', async () => {
   world.reset();
   world.regions.global.accounts.set('sa-test-2', { name: 'two', keys: new Map() });
-  const issued = await issuerOf().issue({ scope: { items: ['text_to_speech', 'models_read', 'service-account:sa-test-2'] } }, 'kbox_intent', world.master());
+  const issued = await issuerOf().issue({ scope: { items: ['text_to_speech', 'models_read', 'service-account:sa-test-2'] }, at: GLOBAL }, 'kbox_intent', world.master());
   const call = world.sent.find((s) => s.method === 'POST');
   assert.equal(call?.target, '/v1/service-accounts/sa-test-2/api-keys');
   assert.equal(call?.originalHost, HOST_OF.global);
@@ -103,44 +111,109 @@ test('KBOX-39 issue posts the name and the permissions to the service account of
 
 test('KBOX-39 issue sends the string "all" when the scope asks for all permissions, and an empty list when it asks for none', async () => {
   world.reset();
-  await issuerOf().issue({ scope: { items: ['all'] } }, 'a', world.master());
-  await issuerOf().issue({ scope: { items: [] } }, 'b', world.master());
+  await issuerOf().issue({ scope: { items: ['all'] }, at: GLOBAL }, 'a', world.master());
+  await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'b', world.master());
   const bodies = world.sent.filter((s) => s.method === 'POST').map((s) => (JSON.parse(Buffer.from(s.body).toString('utf8')) as { permissions: unknown }).permissions);
   assert.deepEqual(bodies, ['all', []]);
 });
 
 test('KBOX-39 issue without a service-account item uses the workspace\'s one service account, and refuses when there are two or none, naming a fixed code', async () => {
   world.reset();
-  await issuerOf().issue({ scope: { items: [] } }, 'a', world.master());
+  await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'a', world.master());
   assert.equal(world.regions.global.accounts.get('sa-test-1')?.keys.size, 1);
   world.regions.global.accounts.set('sa-test-2', { name: 'two', keys: new Map() });
-  await assert.rejects(() => issuerOf().issue({ scope: { items: [] } }, 'b', world.master()), /elevenlabs: service_account_unclear/);
+  await assert.rejects(() => issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'b', world.master()), /elevenlabs: service_account_unclear/);
   world.regions.global.accounts.clear();
-  await assert.rejects(() => issuerOf().issue({ scope: { items: [] } }, 'c', world.master()), /elevenlabs: service_account_unclear/);
+  await assert.rejects(() => issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'c', world.master()), /elevenlabs: service_account_unclear/);
 });
 
-test('KBOX-39 a scope naming a region that does not exist or a service account that is not a plain id is refused before any call', async () => {
+// As of the KBOX-57 ruling the region is the key's location, never a scope item: any region: item is refused by the issuer (bad_scope), and a
+// region the entry does not know is refused at the route (location_bad_value, below).
+test('KBOX-39 KBOX-57 a scope naming a region (any region: item) or a service account that is not a plain id is refused before any call', async () => {
   world.reset();
-  await assert.rejects(() => issuerOf().issue({ scope: { items: ['region:mars'] } }, 'a', world.master()), /elevenlabs: bad_scope/);
-  await assert.rejects(() => issuerOf().issue({ scope: { items: ['service-account:../x'] } }, 'a', world.master()), /elevenlabs: bad_scope/);
+  await assert.rejects(() => issuerOf().issue({ scope: { items: ['region:mars'] }, at: GLOBAL }, 'a', world.master()), /elevenlabs: bad_scope/);
+  await assert.rejects(() => issuerOf().issue({ scope: { items: ['region:us'] }, at: { region: 'us' } }, 'a', world.master('us')), /elevenlabs: bad_scope/);
+  await assert.rejects(() => issuerOf().issue({ scope: { items: [] }, at: {} }, 'a', world.master()), /elevenlabs: bad_scope/, 'no region in the location: the issuer has no default');
+  await assert.rejects(() => issuerOf().issue({ scope: { items: [] }, at: { region: 'mars' } }, 'a', world.master()), /elevenlabs: bad_scope/);
+  await assert.rejects(() => issuerOf().issue({ scope: { items: ['service-account:../x'] }, at: GLOBAL }, 'a', world.master()), /elevenlabs: bad_scope/);
   assert.equal(world.sent.length, 0);
 });
 
-test('KBOX-39 the region switch: scope "region:us" reaches the us host and only it, no item reaches the global host', async () => {
+// As of the KBOX-57 ruling the region comes from the key's location (at), never from a scope item.
+test('KBOX-39 KBOX-57 the region switch: location region us reaches the us host and only it, region global reaches the global host', async () => {
   world.reset();
-  const mine = await issuerOf().issue({ scope: { items: ['region:us'] } }, 'us-key', world.master('us'));
+  const mine = await issuerOf().issue({ scope: { items: [] }, at: { region: 'us' } }, 'us-key', world.master('us'));
   assert.deepEqual(world.sent.map((s) => s.originalHost), [HOST_OF.us, HOST_OF.us]);
   assert.equal(world.regions.us.accounts.get('sa-test-1')?.keys.size, 1);
   assert.equal(world.regions.global.accounts.get('sa-test-1')?.keys.size, 0);
   world.clearSent();
-  await issuerOf().issue({ scope: { items: [] } }, 'global-key', world.master());
+  await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'global-key', world.master());
   assert.ok(world.sent.every((s) => s.originalHost === HOST_OF.global));
   assert.ok(mine.platformKeyId.length > 0);
 });
 
+test('KBOX-57 the entry declares the key\'s region as its location: global or us, the whole value, required of every class', () => {
+  for (const klass of ['ordinary', 'admin', 'master'] as const) {
+    assert.equal(checkLocation(entry.location, { region: 'us' }, klass, []), 'ok');
+    assert.equal(checkLocation(entry.location, { region: 'global' }, klass, []), 'ok');
+    assert.equal(checkLocation(entry.location, {}, klass, []), 'location_missing', klass);
+  }
+  for (const bad of ['mars', 'xus', 'usx', 'global|us', '']) assert.equal(checkLocation(entry.location, { region: bad }, 'ordinary', []), 'location_bad_value', bad);
+  assert.equal(checkLocation(entry.location, { region: 'us', project: 'p' }, 'ordinary', []), 'location_field_unknown');
+});
+
+/** The route world with this file's ElevenLabs entry registered as itself, its master the fake workspace's master of `region`. */
+async function elevenLabsRoutes(t: TestContext, region: Region): Promise<RoutesWorld> {
+  const box: { w?: RoutesWorld } = {};
+  const w = await routesWorld(t, {
+    source: (real) => ({
+      ...real,
+      platform: (id) => {
+        if (id !== 'elevenlabs') return real.platform(id);
+        assert.ok(box.w);
+        const routes = box.w;
+        return createPlatformSource({ registry: [entry], meta: routes.parts.meta, vault: routes.parts.vault, keyInfo: (keyref) => routes.rotation.store.keyInfo(keyref) }).platform(id);
+      },
+      master: (platform, at, items) => (platform === 'elevenlabs' ? { ok: true, value: world.master(region) } : real.master(platform, at, items)),
+    }),
+  });
+  box.w = w;
+  return w;
+}
+const elevenLabsKey = (over: object): object => ({ platform: 'elevenlabs', name: 'ELEVEN_KEY', projects: ['shop'], scope: { items: ['text_to_speech'] }, ...over });
+
+test('KBOX-39 KBOX-57 at the route, a region the entry does not know, a region: scope item and a key with no region are refused before any platform call', async (t) => {
+  world.reset();
+  const w = await elevenLabsRoutes(t, 'us');
+  const cases: readonly [string, object][] = [
+    ['location_bad_value', elevenLabsKey({ location: { region: 'mars' } })],
+    ['location_in_scope', elevenLabsKey({ scope: { items: ['text_to_speech', 'region:us'] }, location: { region: 'us' } })],
+    ['location_missing', elevenLabsKey({})],
+  ];
+  for (const [code, json] of cases) {
+    const reply = await w.api('/api/keys', { json });
+    assert.equal(reply.status, 422, `${code}: ${reply.body}`);
+    assert.equal((reply.json() as { error: { detail?: { code?: string } } }).error.detail?.code, code);
+  }
+  assert.equal(world.sent.length, 0);
+  assert.equal(w.parts.meta.snapshot().keys.length, 0);
+});
+
+test('KBOX-39 KBOX-57 at the route, the key\'s stored region is the one the issuer reaches: location us makes the key on the us host only', async (t) => {
+  world.reset();
+  const w = await elevenLabsRoutes(t, 'us');
+  const reply = await w.api('/api/keys', { json: elevenLabsKey({ location: { region: 'us' } }) });
+  assert.equal(reply.status, 201, reply.body);
+  const posts = world.sent.filter((s) => s.method === 'POST');
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0]?.originalHost, HOST_OF.us);
+  assert.equal(world.regions.us.accounts.get('sa-test-1')?.keys.size, 1);
+  assert.equal(world.regions.global.accounts.get('sa-test-1')?.keys.size, 0);
+});
+
 test('KBOX-39 revoke finds a key in whichever region holds it, and answers absent only after reading both', async () => {
   world.reset();
-  const issued = await issuerOf().issue({ scope: { items: ['region:us'] } }, 'us-key', world.master('us'));
+  const issued = await issuerOf().issue({ scope: { items: [] }, at: { region: 'us' } }, 'us-key', world.master('us'));
   world.clearSent();
   assert.equal(await issuerOf().revoke(issued.platformKeyId, world.master('us')), 'revoked');
   assert.equal(world.regions.us.accounts.get('sa-test-1')?.keys.size, 0);
@@ -149,7 +222,7 @@ test('KBOX-39 revoke finds a key in whichever region holds it, and answers absen
 
 test('KBOX-39 a master only one region knows still lists and revokes: the other region\'s refusal is skipped, a refusal from both throws', async () => {
   world.reset();
-  const issued = await issuerOf().issue({ scope: { items: [] } }, 'k', world.master());
+  const issued = await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'k', world.master());
   assert.equal((await listerOf().list(world.master())).length, 1);
   assert.equal(await issuerOf().revoke(issued.platformKeyId, world.master()), 'revoked');
   await assert.rejects(() => listerOf().list(world.stranger()), /elevenlabs: rejected/);
@@ -158,8 +231,8 @@ test('KBOX-39 a master only one region knows still lists and revokes: the other 
 test('KBOX-39 / KBOX-51 list reads both regions and records each key\'s region; listAt of one region reads that host only; listAt with no region reads both', async () => {
   world.reset();
   world.regions.us.masters.add('sk_kbox-test-master-global-fake');
-  await issuerOf().issue({ scope: { items: ['region:us'] } }, 'in-us', world.master());
-  await issuerOf().issue({ scope: { items: [] } }, 'in-global', world.master());
+  await issuerOf().issue({ scope: { items: [] }, at: { region: 'us' } }, 'in-us', world.master());
+  await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'in-global', world.master());
   world.clearSent();
   const all = await listerOf().list(world.master());
   assert.deepEqual(all.map((k) => [k.name, k.location?.region]).sort(), [['in-global', 'global'], ['in-us', 'us']]);
@@ -177,8 +250,8 @@ test('KBOX-39 / KBOX-51 list reads both regions and records each key\'s region; 
 
 test('KBOX-39 a key the platform holds switched off is listed with disabled: true, and one switched on is not', async () => {
   world.reset();
-  await issuerOf().issue({ scope: { items: [] } }, 'on', world.master());
-  await issuerOf().issue({ scope: { items: [] } }, 'off', world.master());
+  await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'on', world.master());
+  await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'off', world.master());
   for (const k of world.regions.global.accounts.get('sa-test-1')?.keys.values() ?? []) if (k.name === 'off') k.disabled = true;
   const listed = await listerOf().list(world.master());
   assert.deepEqual(listed.map((k) => [k.name, k.disabled]).sort(), [['off', true], ['on', undefined]]);
@@ -186,43 +259,43 @@ test('KBOX-39 a key the platform holds switched off is listed with disabled: tru
 
 test('KBOX-39 verifier: GET /v1/user with xi-api-key; a key one region knows is ok, one no region knows is rejected', async () => {
   world.reset();
-  const issued = await issuerOf().issue({ scope: { items: ['region:us'] } }, 'k', world.master('us'));
+  const issued = await issuerOf().issue({ scope: { items: [] }, at: { region: 'us' } }, 'k', world.master('us'));
   world.clearSent();
-  assert.equal(await verifierOf().verify(issued.value, { platform: 'elevenlabs' }), 'ok');
+  assert.equal(await verifierOf().verify(issued.value, { platform: 'elevenlabs', at: {} }), 'ok');
   const call = world.sent.find((s) => s.target === '/v1/user');
   assert.equal(call?.method, 'GET');
   assert.equal(call?.headers['xi-api-key'], await textOf(issued.value));
-  assert.equal(await verifierOf().verify(world.stranger(), { platform: 'elevenlabs' }), 'rejected');
+  assert.equal(await verifierOf().verify(world.stranger(), { platform: 'elevenlabs', at: {} }), 'rejected');
 });
 
-test('KBOX-39 verifier: a 403 is rejected; a 500, or a refusal in one region with the other down, is unreachable, never rejected', async () => {
+test('KBOX-39 verifier: a 403 is not rejected (no verdict); a 500, or a refusal in one region with the other down, is unreachable, never rejected', async () => {
   world.reset();
   const key = world.master();
   world.regions.global.failWith = 403;
   world.regions.us.failWith = 403;
-  assert.equal(await verifierOf().verify(key, { platform: 'elevenlabs' }), 'rejected');
+  assert.equal(await verifierOf().verify(key, { platform: 'elevenlabs', at: {} }), 'unreachable');
   world.regions.global.failWith = 500;
   world.regions.us.failWith = 500;
-  assert.equal(await verifierOf().verify(key, { platform: 'elevenlabs' }), 'unreachable');
+  assert.equal(await verifierOf().verify(key, { platform: 'elevenlabs', at: {} }), 'unreachable');
   world.regions.global.failWith = undefined;
   world.regions.us.failWith = undefined;
   world.regions.us.down = true;
-  assert.equal(await verifierOf().verify(world.stranger(), { platform: 'elevenlabs' }), 'unreachable');
-  assert.equal(await verifierOf().verify(key, { platform: 'elevenlabs' }), 'ok');
+  assert.equal(await verifierOf().verify(world.stranger(), { platform: 'elevenlabs', at: {} }), 'unreachable');
+  assert.equal(await verifierOf().verify(key, { platform: 'elevenlabs', at: {} }), 'ok');
 });
 
 test('KBOX-39 failures are fixed codes: 401 and 403 are "rejected", 5xx is "platform_error", a cut connection is "unreachable", an answer of the wrong shape is "malformed"', async () => {
   world.reset();
   world.regions.global.failWith = 503;
-  await assert.rejects(() => issuerOf().issue({ scope: { items: [] } }, 'a', world.master()), /elevenlabs: platform_error \(503\)$/);
+  await assert.rejects(() => issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'a', world.master()), /elevenlabs: platform_error \(503\)$/);
   world.regions.global.failWith = 403;
-  await assert.rejects(() => issuerOf().issue({ scope: { items: [] } }, 'a', world.master()), /elevenlabs: rejected \(403\)$/);
+  await assert.rejects(() => issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'a', world.master()), /elevenlabs: rejected \(403\)$/);
   world.regions.global.failWith = undefined;
   world.regions.global.down = true;
-  await assert.rejects(() => issuerOf().issue({ scope: { items: [] } }, 'a', world.master()), /elevenlabs: unreachable$/);
+  await assert.rejects(() => issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'a', world.master()), /elevenlabs: unreachable$/);
   world.regions.global.down = false;
   world.regions.global.createAnswer = 'no-key-id';
-  await assert.rejects(() => issuerOf().issue({ scope: { items: [] } }, 'a', world.master()), /elevenlabs: malformed$/);
+  await assert.rejects(() => issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'a', world.master()), /elevenlabs: malformed$/);
 });
 
 test('KBOX-14 KBOX-39 canary: a create response carrying a canary key and a platform error quoting the canary master never show in any error, its cause or its fields', async () => {
@@ -236,28 +309,28 @@ test('KBOX-14 KBOX-39 canary: a create response carrying a canary key and a plat
   world.regions.global.createValue = value;
   world.regions.global.createAnswer = 'no-key-id';
   const failures: unknown[] = [];
-  await issuerOf().issue({ scope: { items: [] } }, 'a', world.master()).catch((e: unknown) => failures.push(e));
+  await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'a', world.master()).catch((e: unknown) => failures.push(e));
   world.regions.global.createAnswer = 'ok';
-  const created = await issuerOf().issue({ scope: { items: [] } }, 'b', world.master());
+  const created = await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'b', world.master());
   assert.equal(await textOf(created.value), value);
   assert.equal(JSON.stringify(created).includes(value), false);
   assert.equal(String(created.value).includes(value), false);
   const m = canary(24);
   const master = lent(Buffer.from(`sk_${Buffer.from(m.bytes).toString('hex')}`), 'master:canary');
-  await issuerOf().issue({ scope: { items: [] } }, 'c', master).catch((e: unknown) => failures.push(e));
+  await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'c', master).catch((e: unknown) => failures.push(e));
   await listerOf().list(master).catch((e: unknown) => failures.push(e));
   await listerOf().listAt({ region: 'us' }, master).catch((e: unknown) => failures.push(e));
   await issuerOf().revoke('key-x', master).catch((e: unknown) => failures.push(e));
   world.regions.global.failWith = 500;
   world.regions.us.failWith = 500;
-  await issuerOf().issue({ scope: { items: [] } }, 'd', master).catch((e: unknown) => failures.push(e));
+  await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'd', master).catch((e: unknown) => failures.push(e));
   await listerOf().list(master).catch((e: unknown) => failures.push(e));
   assert.equal(failures.length, 7);
   for (const e of failures) {
     c.assertAbsent(surfaces(e));
     m.assertAbsent(surfaces(e));
   }
-  assert.equal(await verifierOf().verify(master, { platform: 'elevenlabs' }), 'unreachable');
+  assert.equal(await verifierOf().verify(master, { platform: 'elevenlabs', at: {} }), 'unreachable');
 });
 
 test('KBOX-39 shape: sk_ plus hex of the stated length is accepted; a wrong prefix, a short core, a long core and a wrong alphabet are refused', () => {
@@ -359,4 +432,93 @@ test('KBOX-39 positive control: with the deny list emptied the same wide profile
 test('KBOX-39 the regions of the world are the two the entry knows', () => {
   const regions: Region[] = ['global', 'us'];
   assert.deepEqual(regions.map((r) => HOST_OF[r]).sort(), [...(entry.hosts ?? [])].sort());
+});
+
+// ---------------------------------------------------------------- review fixes (adapters batch 1)
+
+/** An `AdapterHttp` that answers every request with `answer` and keeps what it was asked. */
+function answeringWith(answer: (req: HttpRequest) => { status: number; body: unknown }): { http: AdapterHttp; asked: HttpRequest[] } {
+  const asked: HttpRequest[] = [];
+  return {
+    asked,
+    http: {
+      request(req: HttpRequest): Promise<HttpResponse> {
+        asked.push(req);
+        const a = answer(req);
+        return Promise.resolve({ status: a.status, headers: {}, body: Buffer.from(JSON.stringify(a.body)) });
+      },
+    },
+  };
+}
+const directoryOf = (accountId: string, keyId: string): { 'service-accounts': unknown[] } => ({ 'service-accounts': [{ service_account_user_id: accountId, name: 'n', 'api-keys': [{ key_id: keyId, name: 'k', is_disabled: false }] }] });
+
+test('KBOX-39 KBOX-51 verifier: a live key refused 403 for a missing permission is not rejected, and its verdict never confirms a revoke', async () => {
+  world.reset();
+  const issued = await issuerOf().issue({ scope: { items: ['text_to_speech'] }, at: GLOBAL }, 'k', world.master());
+  world.regions.global.restricted.add(await textOf(issued.value));
+  world.regions.us.restricted.add(await textOf(issued.value));
+  const verdict = await verifierOf().verify(issued.value, { platform: 'elevenlabs', at: {} });
+  assert.notEqual(verdict, 'rejected');
+  assert.equal(confirmDead({ by: 'verifier', verdict }), false);
+});
+
+test('KBOX-39 KBOX-51 verifier: only a 401 is rejected; a 403 in one region and a 401 in the other is no verdict either', async () => {
+  world.reset();
+  world.regions.global.failWith = 401;
+  world.regions.us.failWith = 401;
+  assert.equal(await verifierOf().verify(world.stranger(), { platform: 'elevenlabs', at: {} }), 'rejected');
+  world.regions.us.failWith = 403;
+  assert.equal(await verifierOf().verify(world.stranger(), { platform: 'elevenlabs', at: {} }), 'unreachable');
+});
+
+test('KBOX-39 KBOX-51 listAt: a region that refused the master for a permission (403) makes the listing incomplete; one that does not know the master (401) holds nothing of its workspace', async () => {
+  world.reset();
+  await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'k', world.master());
+  const one = await listerOf().listAt({}, world.master());
+  assert.equal(one.complete, true, 'the us region does not know a master of the global workspace (401)');
+  assert.equal(one.keys.length, 1);
+  world.regions.us.masters.add('sk_kbox-test-master-global-fake');
+  assert.equal((await listerOf().listAt({}, world.master())).complete, true);
+  world.regions.us.failWith = 403;
+  assert.equal((await listerOf().listAt({}, world.master())).complete, false, '403 in a region');
+  assert.equal((await listerOf().listAt({ region: 'global' }, world.master())).complete, true, 'the region asked for answered');
+});
+
+test('KBOX-39 KBOX-51 revoke never answers absent when a region refused the master: the key may be in it', async () => {
+  world.reset();
+  world.regions.us.masters.add('sk_kbox-test-master-global-fake');
+  world.regions.us.failWith = 403;
+  await assert.rejects(() => issuerOf().revoke('key-not-anywhere', world.master()), /elevenlabs: rejected/);
+  world.regions.us.failWith = undefined;
+  assert.equal(await issuerOf().revoke('key-not-anywhere', world.master()), 'absent');
+});
+
+test('KBOX-14 KBOX-39 a service-account id or key id of "." or ".." from the platform never reaches a path', async () => {
+  for (const [account, key] of [['..', 'k1'], ['.', 'k1'], ['sa', '..']] as const) {
+    const stub = answeringWith(() => ({ status: 200, body: directoryOf(account, key) }));
+    const e = createElevenLabsEntry({ http: stub.http });
+    await assert.rejects(() => e.issuer?.revoke(key, world.master()) ?? Promise.resolve('absent'), /elevenlabs: bad_scope/, `${account}/${key}`);
+    assert.equal(stub.asked.some((r) => r.method === 'DELETE'), false);
+  }
+  const stub = answeringWith(() => ({ status: 200, body: directoryOf('..', 'k1') }));
+  await assert.rejects(() => createElevenLabsEntry({ http: stub.http }).issuer?.issue({ scope: { items: [] }, at: GLOBAL }, 'n', world.master()) ?? Promise.resolve(undefined), /elevenlabs: bad_scope/);
+  assert.equal(stub.asked.some((r) => r.method === 'POST'), false);
+});
+
+test('KBOX-14 KBOX-39 a key that cannot be a header value (newline, space, control, non-ASCII) is refused with no call: the verifier says rejected, any other call a fixed bad_key', async () => {
+  for (const bad of ['sk_a\nb', 'sk_a b', 'sk_\u0001x', 'sk_é', '']) {
+    const stub = answeringWith(() => ({ status: 200, body: {} }));
+    const e = createElevenLabsEntry({ http: stub.http });
+    assert.equal(await e.verifier?.verify(lent(Buffer.from(bad), 'bad:1'), { platform: 'elevenlabs', at: {} }), 'rejected', JSON.stringify(bad));
+    await assert.rejects(() => e.issuer?.issue({ scope: { items: [] }, at: GLOBAL }, 'n', lent(Buffer.from(bad), 'bad:2')) ?? Promise.resolve(undefined), /elevenlabs: bad_key/);
+    assert.equal(stub.asked.length, 0);
+  }
+});
+
+test('KBOX-42 the entry lists the unverified reliance of the review: the service-account list shape and what an empty permission list means', async () => {
+  const listed = JSON.parse(readFileSync(new URL('../src/platforms/elevenlabs/unverified.json', import.meta.url), 'utf8')) as string[];
+  for (const id of ['elevenlabs.service-account-list', 'elevenlabs.empty-permissions']) {
+    assert.ok(entry.unverified.includes(id), `entry: ${id}`);
+    assert.ok(listed.includes(id), `unverified.json: ${id}`);
+  }
 });

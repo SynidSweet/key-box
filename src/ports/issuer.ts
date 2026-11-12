@@ -16,17 +16,22 @@ export interface IssuerCapabilities {
   readonly revealOnce: boolean;
   readonly scopeSchema: ScopeSchema;
   readonly shape: KeyShape;
-  classify(scope: Scope): KeyClass;
+  /** The class of a key with this scope at this location (KBOX-57: the shell takes the higher of this and the class at `{}`). */
+  classify(scope: Scope, at: KeyLocation): KeyClass;
 }
 
 export interface IssueRequest {
   readonly scope: Scope;
+  /** The key's one stored location (KBOX-57): the only place the issuer reads where to make the key. */
+  readonly at: KeyLocation;
 }
 
 export interface IssuedKey {
   readonly value: Lent;
   readonly platformKeyId: PlatformKeyId;
   readonly expiresAt?: number;
+  /** Where the platform says it made the key, from its answer, never copied from the request; left out only when the answer names no place. */
+  readonly location?: KeyLocation;
 }
 
 /** A platform that can create keys. */
@@ -71,6 +76,8 @@ export interface KeyLister {
 
 export interface VerifyTarget {
   readonly platform: PlatformId;
+  /** The generation's recorded location (KBOX-57): what the platform answered when it made the key, else the key's stored one. */
+  readonly at: KeyLocation;
 }
 
 export interface Verifier {
@@ -86,4 +93,12 @@ export type PasteTaskId = string;
 
 export interface PasteSource {
   open(req: PasteRequest): Promise<PasteTaskId>;
+}
+
+/**
+ * KBOX-57: proves a host-naming location before a key is proposed: asks the platform, with the master chosen for the key, whether it can see
+ * that place. `unseen` when it cannot; any other answer (a 401, a 5xx) or a failed call throws.
+ */
+export interface LocationProver {
+  prove(at: KeyLocation, master: Lent): Promise<'seen' | 'unseen'>;
 }

@@ -8,6 +8,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import type { KeyRow } from '../src/ports/meta.ts';
+import type { KeyLister } from '../src/ports/issuer.ts';
+import type { PlatformEntry } from '../src/ports/platform.ts';
 import { intentName } from '../src/pure/rotation-machine.ts';
 import { hashToken, newToken } from '../src/pure/tokens.ts';
 import { startCore } from '../src/main-core.ts';
@@ -16,7 +18,8 @@ import { openCore } from '../src/shell/core.ts';
 import type { PlatformSource } from '../src/shell/rotation-ports.ts';
 import { createRotationStore } from '../src/shell/rotation-store.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
-import { TimedClock, drive, lent, seededRandom, tempDir, waitUntil } from './kit/index.ts';
+import { issuerWith } from './fakes/platform-entry.ts';
+import { TimedClock, bytesOf, drive, lent, seededRandom, tempDir, waitUntil } from './kit/index.ts';
 
 const DAY = 24 * 3600_000;
 
@@ -33,11 +36,13 @@ interface World {
 interface Options {
   readonly domain?: string;
   /** Written to the state directory before core starts. */
-  readonly seed?: (state: { readonly meta: ReturnType<typeof openCore>['meta']; readonly db: ReturnType<typeof openCore>['db']; readonly clock: TimedClock; readonly rotation: ReturnType<typeof createRotationStore> }) => void;
+  readonly seed?: (state: { readonly meta: ReturnType<typeof openCore>['meta']; readonly db: ReturnType<typeof openCore>['db']; readonly vault: ReturnType<typeof openCore>['vault']; readonly clock: TimedClock; readonly rotation: ReturnType<typeof createRotationStore> }) => void;
   /** Core also listens on a lend socket, at `World.lendSocket`. */
   readonly lend?: boolean;
   /** The platform adapters rotation is given in place of the (empty) registry's. */
   readonly platforms?: PlatformSource;
+  /** The platform registry core runs with in place of the real one (core then builds its own platform source over it). */
+  readonly registry?: readonly PlatformEntry[];
   /** The egress host list core reads at its start, in place of deploy/egress-hosts.json. */
   readonly egressHostsFile?: URL;
 }
@@ -53,7 +58,7 @@ async function started(t: TestContext, options: Options = {}): Promise<World> {
   const token = newToken(random);
   const prepared = openCore({ stateDir, clock, scheduler: clock, random });
   prepared.meta.addMachine({ label: 'mc', scope: 'control', tokenSha256: hashToken(token), enrolledAt: clock.now() });
-  options.seed?.({ meta: prepared.meta, db: prepared.db, clock, rotation: createRotationStore(prepared.db, clock, prepared.hub) });
+  options.seed?.({ meta: prepared.meta, db: prepared.db, vault: prepared.vault, clock, rotation: createRotationStore(prepared.db, clock, prepared.hub) });
   prepared.close();
   const journal: string[] = [];
   const lendSocket = join(dir, 'lend.sock');
@@ -65,7 +70,7 @@ async function started(t: TestContext, options: Options = {}): Promise<World> {
     ...(options.domain === undefined ? {} : { KB_DOMAIN: options.domain }),
     ...(options.lend === true ? { KB_LEND_SOCKET: lendSocket } : {}),
   };
-  const core = await startCore(env, { clock, scheduler: clock, random, journal: (code) => void journal.push(code), ...(options.platforms === undefined ? {} : { platforms: options.platforms }), ...(options.egressHostsFile === undefined ? {} : { egressHostsFile: options.egressHostsFile }) });
+  const core = await startCore(env, { clock, scheduler: clock, random, journal: (code) => void journal.push(code), ...(options.platforms === undefined ? {} : { platforms: options.platforms }), ...(options.registry === undefined ? {} : { registry: options.registry }), ...(options.egressHostsFile === undefined ? {} : { egressHostsFile: options.egressHostsFile }) });
   t.after(() => core.stop());
   const driver = drive(socket);
   const call = async (path: string, body?: unknown): Promise<{ status: number; body: string }> => {
@@ -184,7 +189,8 @@ test('KBOX-51 a platform call that hangs while a run resumes holds back neither 
           }
         : undefined,
     destination: () => undefined,
-    master: () => lent(Buffer.from('hang-master'), 'master:1'),
+    master: () => ({ ok: true, value: lent(Buffer.from('hang-master'), 'master:1') }),
+    masters: () => [],
   };
   const w = await started(t, {
     domain: 'box.example',
@@ -330,4 +336,30 @@ test('KBOX-47 a deploy/egress-hosts.json that does not parse stops core\'s start
 test('KBOX-47 a list that parses starts core, and the list file is read at the start, not on the first call', async (t) => {
   const w = await started(t, { egressHostsFile: await hostsFile(t, '{"hosts":[{"host":"push.example.com","purpose":"a test push host","caller":"push"}]}') });
   assert.ok(w.core.routes.length > 0);
+});
+
+test('KBOX-57 core builds its platform source over the stored record of each master row (readKeyInfo): reconcile at start lists the platform with that master', { timeout: 20_000 }, async (t) => {
+  const platform = new FakePlatformWorld(seededRandom(6));
+  const listedWith: string[] = [];
+  const lister: KeyLister = {
+    list: async (master) => {
+      listedWith.push(Buffer.from(await bytesOf(master)).toString('utf8'));
+      return platform.lister.list(master);
+    },
+    listAt: (at, master) => platform.lister.listAt(at, master),
+  };
+  const classify = (scope: { readonly [k: string]: unknown }) => (Array.isArray(scope['items']) && scope['items'].includes('master') ? 'master' as const : 'ordinary' as const);
+  const entry: PlatformEntry = { id: 'fake', issuer: issuerWith(platform.issuer, { classify }), lister, unverified: [] };
+  const keyref = 'fake/team/MASTER_TOKEN';
+  await started(t, {
+    domain: 'box.example',
+    registry: [entry],
+    seed: ({ meta, vault, clock, rotation }) => {
+      vault.put(keyref, 1, platform.masterBytes);
+      meta.putKey({ ...adminRow(keyref), platform: 'fake', name: 'MASTER_TOKEN', class: 'master' });
+      rotation.putKeyInfo(keyref, { scopeItems: ['master'], location: {}, rotatedAt: clock.now(), markAdmin: false });
+    },
+  });
+  await waitUntil(() => listedWith.length > 0, 'reconcile at start to list the platform');
+  assert.deepEqual(listedWith, [Buffer.from(platform.masterBytes).toString('utf8')], 'listed once, with the one master row core read from meta.db');
 });

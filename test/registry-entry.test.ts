@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { PlatformEntry } from '../src/ports/platform.ts';
-import type { KeyShape } from '../src/ports/types.ts';
+import type { KeyShape, LocationSchema } from '../src/ports/types.ts';
 import { checkRegistry } from '../src/pure/profile.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
 import { fakeEntry, pasteOnlyEntry } from './fakes/platform-entry.ts';
@@ -48,4 +48,25 @@ test('KBOX-23 KBOX-40 the class has one source: an entry with an issuer states n
   assert.equal(failure([fakeEntry(w, { classify: () => 'ordinary' })]), 'classify_twice fake');
   assert.equal(failure([{ id: 'pasteonly', verifier: w.verifier, shape: SHAPE, unverified: [] }]), 'classify_missing pasteonly');
   assert.equal(failure([pasteOnlyEntry(w, SHAPE)]), 'passed');
+});
+
+test('KBOX-23 KBOX-57 an entry\'s location declares only region and project: another field fails, naming the platform', () => {
+  const rule = { pattern: /[a-z]{1,8}/, requiredFor: [] };
+  assert.equal(failure([fakeEntry(w, { location: { region: rule, project: rule } })]), 'passed');
+  assert.equal(failure([fakeEntry(w, { location: {} })]), 'passed', 'an entry may declare none');
+  const zoned = { region: rule, zone: rule } as unknown as LocationSchema;
+  assert.equal(failure([fakeEntry(w, { location: zoned })]), 'location_field_unknown fake');
+});
+
+test('KBOX-23 KBOX-57 an entry whose location names a host has a locationProver: one without fails, naming the platform', () => {
+  const host = { project: { pattern: /[a-z]{20}/, requiredFor: [], namesHost: true as const } };
+  const prover = { prove: () => Promise.resolve('seen' as const) };
+  assert.equal(failure([fakeEntry(w, { location: host, locationProver: prover })]), 'passed');
+  assert.equal(failure([fakeEntry(w, { location: host })]), 'location_prover_missing fake');
+  assert.equal(failure([fakeEntry(w, { location: { project: { pattern: /[a-z]{20}/, requiredFor: [] } } })]), 'passed', 'a field naming no host needs no prover');
+});
+
+test('KBOX-23 KBOX-57 each masterItems entry is a scope-item prefix ending in a colon: team: passes, a bare word, a lone colon or a bad character fails', () => {
+  assert.equal(failure([fakeEntry(w, { masterItems: ['team:'] })]), 'passed');
+  for (const bad of ['team', ':', 'te am:', 'team:x', '']) assert.equal(failure([fakeEntry(w, { masterItems: ['team:', bad] })]), 'master_items_bad fake', JSON.stringify(bad));
 });

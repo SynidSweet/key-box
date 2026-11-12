@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ACTION_KINDS, parseAction } from '../src/pure/actions.ts';
 import type { Action } from '../src/pure/actions.ts';
+import { actionDigest } from '../src/pure/challenge.ts';
 import { renderPage } from '../src/pure/words.ts';
 
 const H = (c: string): string => c.repeat(64);
@@ -63,6 +64,21 @@ test('KBOX-8 the other domain moves are stated in the box\'s words', () => {
   const move = renderPage(action({ kind: 'vercel_set_domain', project: 'shop', op: 'move', domain: 'a.example.com', to_project: 'blog' }), { requester: { kind: 'box' } });
   assert.equal(move.lines[0], 'Move the domain a.example.com from the Vercel project shop to blog.');
   assert.equal(move.lines[1], 'Asked for by the box itself (a schedule or a platform expiry).');
+});
+
+test('KBOX-8 KBOX-57 an add_key page names the location in the box\'s words, each field it names, after the scope', () => {
+  const base = { kind: 'add_key', platform: 'supabase', name: 'SUPABASE_KEY', projects: ['shop'], scope: { items: [] } };
+  const both = renderPage(action({ ...base, location: { region: 'us', project: 'abcdefghijabcdefghij' } }), { requester: { kind: 'box' } });
+  assert.deepEqual(both.lines.slice(0, 3), ['Add the supabase key SUPABASE_KEY for shop.', 'Scope: none.', 'Where the platform holds it: region us, project abcdefghijabcdefghij.']);
+  const one = renderPage(action({ ...base, location: { project: 'abcdefghijabcdefghij' } }), { requester: { kind: 'box' } });
+  assert.equal(one.lines[2], 'Where the platform holds it: project abcdefghijabcdefghij.');
+});
+
+test('KBOX-9 KBOX-57 the location is inside the action digest: the same add_key at another location has another digest', () => {
+  const base = { kind: 'add_key', platform: 'supabase', name: 'SUPABASE_KEY', projects: ['shop'], scope: { items: [] } };
+  const here = actionDigest(action({ ...base, location: { project: 'abcdefghijabcdefghij' } }));
+  assert.notDeepEqual(here, actionDigest(action({ ...base, location: { project: 'zzzzzzzzzzzzzzzzzzzz' } })));
+  assert.notDeepEqual(here, actionDigest(action(base)));
 });
 
 test('KBOX-8 a reason with markup, a link and a canary is one separate inert line, and the other lines are unchanged', () => {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Issuer, KeyLister } from '../../src/ports/issuer.ts';
-import type { Lent } from '../../src/ports/types.ts';
+import type { KeyLocation, Lent } from '../../src/ports/types.ts';
 
 export interface ListerSubject {
   readonly issuer: Issuer;
@@ -11,8 +11,9 @@ export interface ListerSubject {
 }
 
 /** KBOX-35: what every KeyLister must do, run against the fake and each adapter over fakePlatform. */
-export function listerContract(name: string, make: () => ListerSubject): void {
-  const request = { scope: { access: 'read' } };
+/** `at`: the location every issue request of the contract carries (KBOX-57); none by default. */
+export function listerContract(name: string, make: () => ListerSubject, at: KeyLocation = {}): void {
+  const request = { scope: { access: 'read' }, at };
 
   test(`KBOX-35 lister contract (${name}): an issued key shows in the list under its name, and is gone after revoke`, async () => {
     const { issuer, lister, master } = make();

@@ -5,6 +5,9 @@ import { HttpTransportError } from '../../ports/http.ts';
 import type { Lent } from '../../ports/types.ts';
 import { VercelError } from './errors.ts';
 
+/** What an HTTP header value can safely carry: printable ASCII, no space. Anything else is not a token the platform could have issued. */
+const HEADER_SAFE = /^[\x21-\x7e]+$/;
+
 export const VERCEL_HOST = 'api.vercel.com';
 const ORIGIN = `https://${VERCEL_HOST}`;
 
@@ -48,7 +51,9 @@ export function createVercelApi(http: AdapterHttp): VercelApi {
   return {
     call: (req, key) =>
       key.use(async (bytes) => {
-        const headers: Record<string, string> = { authorization: `Bearer ${Buffer.from(bytes).toString('utf8')}` };
+        const text = Buffer.from(bytes).toString('utf8');
+        if (!HEADER_SAFE.test(text)) throw new VercelError('bad_key');
+        const headers: Record<string, string> = { authorization: `Bearer ${text}` };
         if (req.body !== undefined) headers['content-type'] = 'application/json';
         try {
           const answer = await http.request({ method: req.method, url: `${ORIGIN}${req.path}${req.query === undefined ? '' : `?${req.query}`}`, headers, ...(req.body === undefined ? {} : { body: req.body }) });

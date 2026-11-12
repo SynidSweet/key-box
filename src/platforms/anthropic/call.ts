@@ -41,3 +41,9 @@ function parse(body: Uint8Array): { readonly ok: true; readonly value: unknown }
 
 /** The fixed error of a status that is not the expected one: a refused key is `rejected`, any other is `http_error` (never the answer's text). */
 export const failureOf = (status: number): AnthropicError => new AnthropicError(status === 401 || status === 403 ? 'rejected' : 'http_error');
+
+/** One path segment from a platform answer: a plain name, never empty, `.` or `..`, so it cannot climb or split a path; else the fixed `bad_answer`. */
+export function segment(text: string): string {
+  if (text === '' || text === '.' || text === '..') throw new AnthropicError('bad_answer');
+  return encodeURIComponent(text);
+}

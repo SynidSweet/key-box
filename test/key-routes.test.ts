@@ -2,8 +2,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { bytesOf, canary } from './kit/index.ts';
+import { ApiError } from '../src/pure/errors.ts';
 import { PASTE_PLATFORM, routesWorld } from './support/routes-world.ts';
 import type { RoutesWorld } from './support/routes-world.ts';
+import type { LocationProver } from '../src/ports/issuer.ts';
+import type { KeyLocation } from '../src/ports/types.ts';
+import type { PlatformSource } from '../src/shell/rotation-ports.ts';
 
 const HOUR = 3600_000;
 const KEYREF = 'fake/shop/OPENAI_KEY';
@@ -270,4 +274,233 @@ test('KBOX-34 KBOX-40 a retired value for a paste-only platform (no issuer) is s
   const misses = await w.api(path('OTHER_KEY'), { bytes: Buffer.from('not-a-key-shape') });
   assert.equal((misses.json() as { coverage: string }).coverage, 'none');
   assert.equal((await w.api('/api/retired?platform=nobody&project=shop&name=X_KEY', { bytes: Buffer.from('x') })).status, 422);
+});
+
+// --- placement (KBOX-57) and the class floor (KBOX-15) ---------------------------------------------------------------------------
+
+const REF = 'abcdefghijabcdefghij';
+const OTHER_REF = 'zzzzzzzzzzzzzzzzzzzz';
+/** A fixture entry declaring `project` (a 20-letter ref, required of ordinary and admin keys), on both the api and the paste platform. */
+const PROJECT_ENTRY = { project: { pattern: /[a-z]{20}/, requiredFor: ['ordinary', 'admin'] } } as const;
+const rowsOf = (w: RoutesWorld, keyref: string): string =>
+  JSON.stringify([w.parts.db.prepare('SELECT * FROM keys WHERE keyref = ?').all(keyref), w.parts.db.prepare('SELECT * FROM rotation_keys WHERE keyref = ?').all(keyref)]);
+const opened = (w: RoutesWorld): number =>
+  (w.parts.db.prepare('SELECT (SELECT count(*) FROM approvals) + (SELECT count(*) FROM paste_tasks) AS n').get() as { n: number }).n;
+
+test('KBOX-57 POST /api/keys refuses each placement fault with its code at proposal, opening, issuing and writing nothing', async (t) => {
+  const w = await routesWorld(t, { location: PROJECT_ENTRY });
+  const cases: readonly [string, object][] = [
+    ['location_field_unknown', body({ location: { region: 'us', project: REF } })],
+    ['location_bad_value', body({ location: { project: 'short' } })],
+    ['location_bad_value', body({ location: { project: `${REF}x` } })],
+    ['location_missing', body()],
+    ['location_missing', body({ platform: PASTE_PLATFORM, name: 'ANTHROPIC_KEY', scope: { items: ['admin'] } })],
+    ['location_in_scope', body({ scope: { items: ['read', `project:${REF}`] }, location: { project: REF } })],
+  ];
+  for (const [code, json] of cases) {
+    const reply = await w.api('/api/keys', { json });
+    assert.equal(reply.status, 422, `${code}: ${reply.body}`);
+    assert.deepEqual([errorOf(reply).code, errorOf(reply).detail?.code], ['rejected', code], JSON.stringify(json));
+  }
+  assert.equal((await w.api('/api/keys', { json: body({ location: {} }) })).status, 400, 'an empty location object is bad_request');
+  assert.equal(w.parts.meta.snapshot().keys.length, 0);
+  assert.equal(opened(w), 0);
+  assert.deepEqual(w.issuedAt, []);
+});
+
+test('KBOX-57 an ordinary key is made at the location of the request and stores it; the issuer is handed exactly that location', async (t) => {
+  const w = await routesWorld(t, { location: PROJECT_ENTRY });
+  const reply = await w.api('/api/keys', { json: body({ location: { project: REF } }) });
+  assert.equal(reply.status, 201, reply.body);
+  assert.deepEqual(w.issuedAt, [{ project: REF }]);
+  assert.deepEqual(w.rotation.store.keyInfo(KEYREF)?.location, { project: REF });
+  assert.deepEqual(w.rotation.store.gen(KEYREF, 1)?.location, { project: REF }, 'the generation records the stored location when the answer names none');
+});
+
+test('KBOX-57 negative control: a key whose projects look like a valid location is never placed by them', async (t) => {
+  const w = await routesWorld(t, { location: PROJECT_ENTRY });
+  const missing = await w.api('/api/keys', { json: body({ projects: [REF] }) });
+  assert.deepEqual([missing.status, errorOf(missing).detail?.code], [422, 'location_missing'], 'projects are no location');
+  const placed = await w.api('/api/keys', { json: body({ projects: [REF], location: { project: OTHER_REF } }) });
+  assert.equal(placed.status, 201, placed.body);
+  assert.deepEqual(w.issuedAt, [{ project: OTHER_REF }]);
+  assert.deepEqual(w.rotation.store.keyInfo(`fake/${REF}/OPENAI_KEY`)?.location, { project: OTHER_REF });
+});
+
+test('KBOX-15 a fixture entry classing master without a location and ordinary with one classes the key master: no issuer call, nothing made', async (t) => {
+  const w = await routesWorld(t, { location: PROJECT_ENTRY, classifyAt: (_scope, at) => (at.project === undefined ? 'master' : 'ordinary') });
+  const reply = await w.api('/api/keys', { json: body({ location: { project: REF } }) });
+  assert.equal(reply.status, 422, reply.body);
+  // The master answer is `master_not_issuable` until the unit that turns it into a paste task (shared-2 U6); the floor is what this pins.
+  assert.equal(errorOf(reply).detail?.code, 'master_not_issuable');
+  assert.deepEqual(w.issuedAt, []);
+  assert.equal(w.parts.meta.snapshot().keys.length, 0);
+});
+
+test('KBOX-15 a fixture entry classing admin only with a location classes the key admin: an approval, no issue before it', async (t) => {
+  const w = await routesWorld(t, { location: PROJECT_ENTRY, classifyAt: (_scope, at) => (at.project === undefined ? 'ordinary' : 'admin') });
+  const reply = await w.api('/api/keys', { json: body({ location: { project: REF } }) });
+  assert.equal(reply.status, 202, reply.body);
+  assert.equal((reply.json() as { class: string }).class, 'admin');
+  assert.deepEqual(w.issuedAt, []);
+  assert.deepEqual((await w.queue()).map((q) => q.kind), ['add_key']);
+});
+
+test('KBOX-57 POST /api/keys for a keyref that exists, at another location and a lower class, is key_exists on every branch and leaves its rows as they were', async (t) => {
+  const w = await routesWorld(t, { location: PROJECT_ENTRY });
+  const seed = (keyref: string, platform: string, name: string): void => {
+    w.parts.meta.putKey({ keyref, platform, name, projects: ['shop'], class: 'master', status: 'works', gen_current: 1, schedule: { rotate_every_days: 90, grace_hours: 1, next_due_at: null, expires_at: null }, coverage: null, last_use_at: null });
+    w.rotation.store.putKeyInfo(keyref, { scopeItems: ['master'], location: { project: REF }, rotatedAt: 1, markAdmin: false });
+  };
+  seed(KEYREF, 'fake', 'OPENAI_KEY');
+  seed(`${PASTE_PLATFORM}/shop/ANTHROPIC_KEY`, PASTE_PLATFORM, 'ANTHROPIC_KEY');
+  const before = [rowsOf(w, KEYREF), rowsOf(w, `${PASTE_PLATFORM}/shop/ANTHROPIC_KEY`)];
+  const at = { location: { project: OTHER_REF } };
+  const branches: readonly [string, object][] = [
+    ['issued at once', body({ ...at })],
+    ['an approval', body({ ...at, scope: { items: ['admin'] } })],
+    ['a master', body({ ...at, scope: { items: ['master'] } })],
+    ['a paste task', body({ ...at, platform: PASTE_PLATFORM, name: 'ANTHROPIC_KEY', scope: { items: ['admin'] } })],
+    ['no issuer', body({ ...at, platform: PASTE_PLATFORM, name: 'ANTHROPIC_KEY' })],
+  ];
+  for (const [branch, json] of branches) {
+    const reply = await w.api('/api/keys', { json });
+    assert.deepEqual([reply.status, errorOf(reply).code, errorOf(reply).detail?.code], [409, 'conflict', 'key_exists'], branch);
+  }
+  assert.deepEqual([rowsOf(w, KEYREF), rowsOf(w, `${PASTE_PLATFORM}/shop/ANTHROPIC_KEY`)], before);
+  assert.equal(opened(w), 0);
+  assert.deepEqual(w.issuedAt, []);
+});
+
+test('KBOX-57 a retired-value record on a location-requiring entry is refused rotation (location_missing): no run, no approval', async (t) => {
+  const w = await routesWorld(t, { location: PROJECT_ENTRY });
+  assert.equal((await w.api(retiredPath(), { bytes: Buffer.from(`fk-${'ab'.repeat(16)}`) })).status, 201);
+  const reply = await w.api('/api/rotations', { json: { keyref: 'fake/shop/OLD_KEY' } });
+  assert.deepEqual([reply.status, errorOf(reply).code, errorOf(reply).detail?.code], [422, 'rejected', 'location_missing']);
+  assert.equal(w.rotation.store.activeRunOf('fake/shop/OLD_KEY'), undefined);
+  assert.equal(opened(w), 0);
+  assert.throws(() => w.rotation.orchestrator.start({ keyref: 'fake/shop/OLD_KEY', origin: 'owner' }), (e: unknown) => e instanceof ApiError && JSON.stringify(e.detail) === JSON.stringify({ code: 'location_missing' }));
+  assert.equal(w.rotation.store.runs().length, 0);
+});
+
+test('KBOX-57 an admin key whose stored location the entry now refuses is refused rotation at the route: no approval, its status unchanged', async (t) => {
+  // The entry gains a project field after the key was made, so the key's stored (empty) location is now missing one an admin key needs.
+  const strict = { on: false };
+  const w = await routesWorld(t, {
+    source: (real) => ({ ...real, platform: (id) => { const kit = real.platform(id); return kit === undefined || !strict.on ? kit : { ...kit, location: PROJECT_ENTRY }; } }),
+  });
+  const execute = w.rotation.executors.add_key;
+  assert.ok(execute);
+  await execute({ approvalId: 'apr_x', revision: 1, action: { kind: 'add_key', platform: 'fake', name: 'OPENAI_KEY', projects: ['shop'], scope: { items: ['admin'] } }, requester: { kind: 'box' }, proof: undefined });
+  const status = w.parts.meta.snapshot().keys.find((k) => k.keyref === KEYREF)?.status;
+  strict.on = true;
+  const reply = await w.api('/api/rotations', { json: { keyref: KEYREF } });
+  assert.equal(reply.status, 422, reply.body);
+  assert.deepEqual([reply.status, errorOf(reply).code, errorOf(reply).detail?.code], [422, 'rejected', 'location_missing']);
+  assert.equal(opened(w), 0);
+  assert.equal(w.parts.meta.snapshot().keys.find((k) => k.keyref === KEYREF)?.status, status);
+});
+
+test('KBOX-57 the schedule skips a due key whose stored location the entry refuses: no run and no request, on this tick or the next', async (t) => {
+  const w = await routesWorld(t, { location: PROJECT_ENTRY });
+  assert.equal((await w.api(retiredPath(), { bytes: Buffer.from(`fk-${'ab'.repeat(16)}`) })).status, 201);
+  // A current generation that falls due: the record above holds only a retired one.
+  w.rotation.store.putGen({ keyref: 'fake/shop/OLD_KEY', gen: 2, status: 'current', platformKeyId: null, location: {} });
+  w.clock.advance(91 * 24 * HOUR);
+  w.rotation.tick();
+  w.rotation.tick();
+  assert.equal(w.rotation.store.runs().length, 0);
+  assert.equal(opened(w), 0);
+  const refused = w.parts.audit.read(0).entries.filter((e) => e.action === 'rotation.refused');
+  assert.deepEqual(refused.map((e) => [e.ref, e.detail['code']]), [['fake/shop/OLD_KEY', 'location_missing']], 'one record per key and code');
+});
+
+test('KBOX-57 the schedule\'s skip of a due key whose stored location the entry refuses sends exactly one box.notice "rotation skipped" naming the code across ticks, and starts no run', async (t) => {
+  const w = await routesWorld(t, { location: PROJECT_ENTRY });
+  assert.equal((await w.api(retiredPath(), { bytes: Buffer.from(`fk-${'ab'.repeat(16)}`) })).status, 201);
+  w.rotation.store.putGen({ keyref: 'fake/shop/OLD_KEY', gen: 2, status: 'current', platformKeyId: null, location: {} });
+  w.clock.advance(91 * 24 * HOUR);
+  w.rotation.tick();
+  w.rotation.tick();
+  w.rotation.tick();
+  const notices = w.parts.events.after(0).filter((e) => e.kind === 'box.notice' && e.data['text'] === 'rotation skipped');
+  assert.deepEqual(notices.map((e) => e.data['code']), ['location_missing'], 'one notice per key and code');
+  assert.equal(w.rotation.store.runs().length, 0);
+});
+
+// --- the master at proposal and the host proof (KBOX-57) --------------------------------------------------------------------------
+
+/** A fixture entry whose `project` names an upstream host (Supabase-like): a 20-letter ref, required of ordinary and admin keys. */
+const HOST_ENTRY = { project: { pattern: /[a-z]{20}/, requiredFor: ['ordinary', 'admin'], namesHost: true } } as const;
+const allRows = (w: RoutesWorld): string => JSON.stringify([w.parts.db.prepare('SELECT * FROM keys').all(), w.parts.db.prepare('SELECT * FROM rotation_keys').all()]);
+const answering = (result: ReturnType<PlatformSource['master']>) => (real: PlatformSource): PlatformSource => ({ ...real, master: () => result });
+const issuedCount = async (w: RoutesWorld): Promise<number> => (await w.platform.lister.list(w.platform.master())).length;
+
+test('KBOX-57 where a proposal needs the master (a key the issuer makes by run), none is rejected no_master and two master_ambiguous: nothing proposed, opened, issued or written', async (t) => {
+  for (const code of ['no_master', 'master_ambiguous'] as const) {
+    const w = await routesWorld(t, { source: answering({ ok: false, code }) });
+    const before = allRows(w);
+    for (const json of [body(), body({ scope: { items: ['admin'] } })]) {
+      const reply = await w.api('/api/keys', { json });
+      assert.deepEqual([reply.status, errorOf(reply).code, errorOf(reply).detail?.code], [422, 'rejected', code], `${code}: ${reply.body}`);
+    }
+    assert.equal(allRows(w), before, 'the keys and rotation_keys rows are byte-identical');
+    assert.equal(opened(w), 0, 'no approval and no paste task');
+    assert.deepEqual(w.issuedAt, [], 'the issuer was never called');
+    assert.equal(await issuedCount(w), 0);
+    // Positive control: a paste platform without a prover needs no master, so the same answer opens its paste task.
+    const paste = await w.api('/api/keys', { json: body({ platform: PASTE_PLATFORM, name: 'ANTHROPIC_KEY', scope: { items: ['admin'] } }) });
+    assert.equal(paste.status, 202, paste.body);
+  }
+});
+
+test('KBOX-57 an entry with a locationProver needs the master even for a paste key: none is rejected no_master before the prover is asked', async (t) => {
+  const asked: KeyLocation[] = [];
+  const prover: LocationProver = { prove: (at) => { asked.push(at); return Promise.resolve('seen'); } };
+  const w = await routesWorld(t, { location: HOST_ENTRY, locationProver: prover, source: answering({ ok: false, code: 'no_master' }) });
+  const before = allRows(w);
+  const reply = await w.api('/api/keys', { json: body({ platform: PASTE_PLATFORM, name: 'ANTHROPIC_KEY', scope: { items: ['admin'] }, location: { project: REF } }) });
+  assert.deepEqual([reply.status, errorOf(reply).detail?.code], [422, 'no_master'], reply.body);
+  assert.deepEqual(asked, []);
+  assert.equal(allRows(w), before);
+  assert.equal(opened(w), 0);
+});
+
+test('KBOX-57 a host-naming location is proven with the chosen master before the proposal: unseen is rejected location_unknown, a prover that throws is unavailable, and neither writes or opens anything', async (t) => {
+  const answer: { now: 'seen' | 'unseen' | 'throws' } = { now: 'unseen' };
+  const asked: { readonly at: KeyLocation; readonly master: string }[] = [];
+  const prover: LocationProver = {
+    prove: async (at, master) => {
+      asked.push({ at, master: Buffer.from(await bytesOf(master)).toString('utf8') });
+      if (answer.now === 'throws') throw new Error('platform answered 500');
+      return answer.now;
+    },
+  };
+  const masterAsks: unknown[] = [];
+  const w = await routesWorld(t, {
+    location: HOST_ENTRY,
+    locationProver: prover,
+    source: (real) => ({ ...real, master: (platform, at, items) => { masterAsks.push([platform, at, items]); return real.master(platform, at, items); } }),
+  });
+  const located = { location: { project: REF } };
+  const requests = [body(located), body({ ...located, scope: { items: ['admin'] } }), body({ ...located, platform: PASTE_PLATFORM, name: 'ANTHROPIC_KEY', scope: { items: ['admin'] } })];
+  const before = allRows(w);
+  for (const [now, status, code] of [['unseen', 422, 'location_unknown'], ['throws', 503, undefined]] as const) {
+    answer.now = now;
+    for (const json of requests) {
+      const reply = await w.api('/api/keys', { json });
+      assert.deepEqual([reply.status, errorOf(reply).detail?.code], [status, code], `${now}: ${reply.body}`);
+    }
+  }
+  assert.equal(allRows(w), before, 'the keys and rotation_keys rows are byte-identical');
+  assert.equal(opened(w), 0, 'no approval and no paste task');
+  assert.deepEqual(w.issuedAt, []);
+  const masterText = Buffer.from(w.platform.masterBytes).toString('utf8');
+  assert.deepEqual(new Set(asked.map((a) => JSON.stringify(a))), new Set([JSON.stringify({ at: { project: REF }, master: masterText })]), 'every proof asked about the key\'s place with the chosen master');
+  assert.deepEqual(masterAsks[0], ['fake', { project: REF }, ['read']], 'the master was chosen by the key\'s platform, location and scope items');
+  answer.now = 'seen';
+  const created = await w.api('/api/keys', { json: requests[0] });
+  assert.equal(created.status, 201, created.body);
+  assert.deepEqual(w.issuedAt, [{ project: REF }], 'the issuer made the key at the proven place');
+  assert.equal((await w.api('/api/keys', { json: requests[2] })).status, 202, 'a proven paste key opens its paste task');
 });

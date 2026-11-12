@@ -1,4 +1,5 @@
 export { checkCatches } from './catches.ts';
+export { checkMigrations } from './migrations.ts';
 export { checkProbes } from './probes.ts';
 export { checkCycles, checkKitIndependence, checkLayers, checkPure } from './purity.ts';
 export { checkErasable, checkSourceImports, checkStrippedText, checkZeroCounts } from './sources.ts';

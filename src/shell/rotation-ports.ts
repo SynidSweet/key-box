@@ -1,10 +1,12 @@
 // What the rotation shell is given: the adapters of a platform and of a destination kind, the master key and the one seam where a
 // test stops the process. Adapters register these when they are built (the adapter units).
 import type { DestinationKit } from '../ports/destination.ts';
-import type { Issuer, KeyLister, Verifier } from '../ports/issuer.ts';
-import type { KeyClass, KeyShape, Lent, PlatformId, Scope } from '../ports/types.ts';
+import type { Issuer, KeyLister, LocationProver, Verifier } from '../ports/issuer.ts';
+import type { KeyClass, KeyLocation, KeyShape, Lent, LocationSchema, PlatformId, Scope } from '../ports/types.ts';
 import type { Vault } from '../ports/vault.ts';
 import type { Step } from '../pure/rotation-machine.ts';
+import { checkLocation } from '../pure/location.ts';
+import type { LocationRefusal } from '../pure/location.ts';
 
 /**
  * A platform's adapters. A paste platform has no issuer: its keys are made on the phone (KBOX-12) and retired by the owner, so
@@ -19,7 +21,11 @@ export interface PlatformKit {
   /** The key shape a paste-only platform states (no issuer); `shapeOf` reads the one shape of a kit. */
   readonly shape?: KeyShape;
   /** The class a paste-only platform states (no issuer); `classifierOf` reads the one class source of a kit. */
-  readonly classify?: (scope: Scope) => KeyClass;
+  readonly classify?: (scope: Scope, at: KeyLocation) => KeyClass;
+  /** The location fields the entry declares (KBOX-57); none: the platform's keys take no location. */
+  readonly location?: LocationSchema;
+  /** Proves a host-naming location with the key's master before the key is proposed (KBOX-57). */
+  readonly locationProver?: LocationProver;
 }
 
 /** A registered platform whose keys are made on the phone (KBOX-12, KBOX-34), one with no issuer or an issuer that says `paste`: the box cannot issue one, so it never runs an api run for it. */
@@ -27,6 +33,16 @@ export function isPasteSource(source: Pick<PlatformSource, 'platform'>, platform
   const kit = source.platform(platform);
   return kit !== undefined && (kit.issuer === undefined || kit.issuer.capabilities().create === 'paste');
 }
+
+/**
+ * KBOX-57: whether a stored key's location still passes its entry's declaration as it is now (`ok`), else the refusal code. Every place that
+ * starts work on a stored key asks this one function: a run's start and the schedule's due check.
+ */
+export const storedPlacement = (
+  source: Pick<PlatformSource, 'platform'>,
+  head: { readonly platform: PlatformId; readonly class: KeyClass },
+  info: { readonly location: KeyLocation; readonly scopeItems: readonly string[] },
+): 'ok' | LocationRefusal => checkLocation(source.platform(head.platform)?.location, info.location, head.class, info.scopeItems);
 
 /** Whether the platform can hold two valid keys at once (true when it says nothing: there is then no one-credential order to follow). */
 export const overlapOf = (kit: PlatformKit | undefined): boolean => kit?.issuer?.capabilities().overlap ?? true;
@@ -66,8 +82,23 @@ export interface PlatformSource {
   /** The adapters of a destination kind as the metadata names it (`vercel_env`, ...), or undefined. */
   destination(kind: string): DestinationKit | undefined;
   /**
-   * The platform's master key, lent: of the master keys whose current generation can be lent, the one of the key's own project (`projects`
-   * of the key it serves; none given, no project is preferred). Throws `conflict` (`master_ambiguous`) when two still qualify (review N5).
+   * KBOX-57: the platform's master for a key at `at` with scope `items`, lent: the one candidate row (`masters`) whose stored location covers
+   * `at` and that carries the key's items for each of the entry's `masterItems` prefixes. `projects` and row order never take part. None is
+   * `no_master`, two or more `master_ambiguous`; never a throw for either.
    */
-  master(platform: PlatformId, projects?: readonly string[]): Lent;
+  master(platform: PlatformId, at: KeyLocation, items: readonly string[]): MasterResult;
+  /**
+   * KBOX-57: every candidate master row of the platform with its stored location: master class, master by its own classification at its
+   * stored location (not only by the KBOX-15 floor), its current generation lendable. Reconcile lists the platform once per row.
+   */
+  masters(platform: PlatformId): readonly MasterRow[];
+}
+
+/** The master chosen for a key, or why there is none to choose (KBOX-57). */
+export type MasterResult = { readonly ok: true; readonly value: Lent } | { readonly ok: false; readonly code: 'no_master' | 'master_ambiguous' };
+
+/** A candidate master row: where it is stored and its current value, lent. */
+export interface MasterRow {
+  readonly at: KeyLocation;
+  readonly value: Lent;
 }

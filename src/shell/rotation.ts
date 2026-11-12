@@ -25,7 +25,8 @@ import { createReconciler } from './reconcile.ts';
 import type { Reconciler } from './reconcile.ts';
 import { createRotationStore } from './rotation-store.ts';
 import type { KeyHead, RotationStore } from './rotation-store.ts';
-import { isPasteSource as pasteSource, overlapOf } from './rotation-ports.ts';
+import { isPasteSource as pasteSource, overlapOf, storedPlacement } from './rotation-ports.ts';
+import type { LocationRefusal } from '../pure/location.ts';
 import type { PlatformSource, Point } from './rotation-ports.ts';
 
 const HOUR_MS = 3600_000;
@@ -80,7 +81,7 @@ export function openRotation(deps: RotationDeps): Rotation {
   const store = createRotationStore(parts.db, deps.clock, parts.hub);
   const orchestrator = createOrchestrator({ ...deps.source, store, meta: parts.meta, vault: parts.vault, clock: deps.clock, scheduler: deps.scheduler, random: deps.random, audit: deps.audit, events: parts.events, push: deps.push, ...(deps.checkpoint === undefined ? {} : { checkpoint: deps.checkpoint }) });
   const reconciler = createReconciler({ ...deps.source, store, audit: deps.audit, events: parts.events, clock: deps.clock, orchestrator });
-  const paste = createPaste({ db: parts.db, approvers: deps.approvers, clock: deps.clock, random: deps.random, audit: deps.audit, events: parts.events, push: deps.push, meta: parts.meta, source: deps.source, orchestrator });
+  const paste = createPaste({ db: parts.db, approvers: deps.approvers, clock: deps.clock, random: deps.random, audit: deps.audit, events: parts.events, push: deps.push, meta: parts.meta, source: deps.source, orchestrator, store });
   const delivery = { store, vault: parts.vault, audit: deps.audit, events: parts.events, clock: deps.clock };
   const routes = [
     ...keyRoutes({ store, meta: parts.meta, orchestrator, approvals: deps.approvals, paste, source: deps.source, vault: parts.vault, audit: deps.audit, events: parts.events, clock: deps.clock, random: deps.random }),
@@ -96,7 +97,7 @@ export function openRotation(deps: RotationDeps): Rotation {
       if (isPasteSource(action.platform)) return { result: 'failed', reason: 'paste_required' };
       if (!overlapOf(deps.source.platform(action.platform))) return { result: 'failed', reason: 'overlap_needs_paste' };
       const key = newKeyOf(action, deps.source);
-      if (store.key(key.keyref) !== undefined) return { result: 'failed', reason: 'key_exists' };
+      if (store.keyExists(key.keyref)) return { result: 'failed', reason: 'key_exists' };
       const created = await orchestrator.create(key);
       if (action.label !== undefined) parts.meta.putGrant(key.keyref, action.label);
       return created.status === 'works' ? { result: 'done' } : { result: 'failed', reason: 'create_failed' };
@@ -152,6 +153,16 @@ export function openRotation(deps: RotationDeps): Rotation {
     return ended !== undefined && now - ended.at < (ended.outcome === 'denied' ? AFTER_REFUSAL_MS : AFTER_EXPIRY_MS);
   };
 
+  /** The key and code pairs this process already skipped (KBOX-57: one notice and one audit row per key and code while core runs). */
+  const refused = new Set<string>();
+  const refusedOnce = (keyref: string, code: LocationRefusal): void => {
+    const pair = `${keyref} ${code}`;
+    if (refused.has(pair)) return;
+    deps.audit.append({ action: 'rotation.refused', subject: keyref, at: deps.clock.now(), detail: { code } });
+    parts.events.append('box.notice', { code, text: 'rotation skipped' });
+    refused.add(pair);
+  };
+
   const tickKey = (key: KeyHead, now: number, due: ReadonlyMap<string, number>, waiting: ReadonlySet<string>): void => {
     const slot = slotOf({ kind: 'rotate_key', keyref: key.keyref });
     const pending = waiting.has(slot) || paste.hasPending(slot);
@@ -165,6 +176,13 @@ export function openRotation(deps: RotationDeps): Rotation {
     if (key.class !== 'ordinary' && requestWaits(slot, key.platform, now)) return;
     // KBOX-34: an ordinary key on a paste-source platform has no issuer; the box holds no such key and never runs it as an api run.
     if (key.class === 'ordinary' && isPasteSource(key.platform)) return;
+    // KBOX-57: a stored location the entry now refuses is skipped, recorded once per key and code; nothing is rewritten.
+    const info = store.keyInfo(key.keyref);
+    const placed = info === undefined ? 'ok' : storedPlacement(deps.source, key, info);
+    if (placed !== 'ok') {
+      refusedOnce(key.keyref, placed);
+      return;
+    }
     if (key.class === 'ordinary') orchestrator.start({ keyref: key.keyref, origin: 'schedule' });
     else openRequest(key.keyref, key.platform);
   };

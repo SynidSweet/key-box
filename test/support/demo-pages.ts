@@ -119,7 +119,8 @@ function pasteSource(): PlatformSource {
     platform: (id) => (id === PLATFORM ? { issuer, verifier, keyPageUrl: 'https://platform.example/keys' } : undefined),
     destination: () => undefined,
     // The paste platform issues nothing, but a run reads its master before it pushes: the demo hands it a stand-in.
-    master: () => lent(Buffer.from('demo master key, never sent anywhere'), 'demo-master'),
+    master: () => ({ ok: true, value: lent(Buffer.from('demo master key, never sent anywhere'), 'demo-master') }),
+    masters: () => [],
   };
 }
 

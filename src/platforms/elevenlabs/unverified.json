@@ -1,5 +1,7 @@
 [
   "elevenlabs.key-format",
   "elevenlabs.permission-enum",
-  "elevenlabs.verifier-call"
+  "elevenlabs.verifier-call",
+  "elevenlabs.service-account-list",
+  "elevenlabs.empty-permissions"
 ]

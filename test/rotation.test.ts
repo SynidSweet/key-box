@@ -7,6 +7,7 @@ import { bytesOf, lent, seededRandom } from './kit/index.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
 import { newKeyOf } from '../src/shell/new-key.ts';
 import type { PlatformSource } from '../src/shell/rotation-ports.ts';
+import type { Lent } from '../src/ports/types.ts';
 import { ApiError } from '../src/pure/errors.ts';
 import { HOUR, MINUTE, rotationWorld } from './support/rotation-world.ts';
 import type { RotationWorld, WorldOptions } from './support/rotation-world.ts';
@@ -140,7 +141,7 @@ test('KBOX-51 a daily reconcile between issue and store revokes nothing: the run
 
 test('KBOX-51 a key named kbox_ that matches no intent and no generation raises one notice and is not revoked, and the second reconcile raises none', async (t) => {
   const { w } = await seeded(t);
-  const stray = await w.platform.issuer.issue({ scope: {} }, 'kbox_stranger_g1_deadbeef', w.platform.master());
+  const stray = await w.platform.issuer.issue({ scope: {}, at: {} }, 'kbox_stranger_g1_deadbeef', w.platform.master());
   const before = (await w.live()).length;
   await w.reconciler.run();
   await w.reconciler.run();
@@ -277,7 +278,7 @@ for (const klass of ['ordinary', 'admin'] as const) {
       await w.settle();
       assert.deepEqual(heldBy(w), [oldValue, oldValue], 'the old value is in every destination');
       assert.deepEqual(await w.live(), [oldId], 'the new key is revoked; the old one still works');
-      assert.equal(await w.platform.verifier.verify(w.parts.vault.lend(keyref, 1), { platform: 'fake' }), 'ok');
+      assert.equal(await w.platform.verifier.verify(w.parts.vault.lend(keyref, 1), { platform: 'fake', at: {} }), 'ok');
       const failed = w.events('rotation.failed');
       assert.equal(failed.length, 1, 'exactly one notice event');
       assert.deepEqual([failed[0]?.data['step'], failed[0]?.data['reason_code'], failed[0]?.data['old_key_works']], [failedStep, reason, true]);
@@ -778,7 +779,7 @@ test('KBOX-51 with no verifier call, a lister that answers for another region th
 // --- overlap:false: the platform takes a value the box chose (review M5) -----------------------------------------------------------
 
 const platformTakes = async (w: RotationWorld, value: string): Promise<string> =>
-  w.platform.verifier.verify(lent(Buffer.from(value), 'probe:1'), { platform: 'fake' });
+  w.platform.verifier.verify(lent(Buffer.from(value), 'probe:1'), { platform: 'fake', at: {} });
 
 test('KBOX-51 overlap:false sets a value the box chose at the platform, which stops taking the old one, then pushes and redeploys at once and needs no revoke', async (t) => {
   const { w, keyref, oldValue } = await seeded(t, { overlap: false });
@@ -817,7 +818,8 @@ test('KBOX-51 an overlap:false platform that cannot take a chosen value is refus
       issuer: { platform: 'fake', capabilities: () => caps(set), issue: () => Promise.reject(new Error('unused')), revoke: () => Promise.resolve('absent' as const), ...(set === 'api' ? { set: () => Promise.resolve() } : {}) },
     }),
     destination: () => undefined,
-    master: () => new FakePlatformWorld(seededRandom(3)).master(),
+    master: () => ({ ok: true, value: new FakePlatformWorld(seededRandom(3)).master() }),
+    masters: () => [],
   });
   const action = { kind: 'add_key', platform: 'fake', name: 'DB_PASSWORD', projects: ['shop'], scope: { items: ['read'] } } as const;
   assert.throws(() => newKeyOf(action, sourceWith('none')), (e: unknown) => e instanceof ApiError && e.code === 'rejected' && JSON.stringify(e.detail) === JSON.stringify({ code: 'overlap_needs_set' }));
@@ -1060,4 +1062,214 @@ test('KBOX-51 a run that reconcile settles at once files no card', async (t) => 
   await w.reconciler.run();
   assert.equal(w.store.run(runId)?.state, 'abandoned');
   assert.deepEqual(cards(w), []);
+});
+
+// ---------------------------------------------------------------- S2 ports: the class goes to every push, the master to every ready
+
+for (const klass of ['ordinary', 'admin', 'master'] as const) {
+  test(`KBOX-36 the rotation of a ${klass} key hands its class to every push, forward and in a rollback re-push`, async (t) => {
+    const { w, keyref } = await seeded(t, { klass, overlap: false });
+    w.destinations.redeployer.failNext();
+    w.orch.start({ keyref, origin: 'owner' });
+    await w.settle();
+    const pushed = w.destinations.a.pushed();
+    assert.ok(pushed.length > TARGETS.length, 'the two forward pushes and at least one re-push of the old value in the rollback');
+    assert.deepEqual([...new Set(pushed.map((p) => p.klass))], [klass]);
+  });
+}
+
+test('KBOX-4 KBOX-51 the rotation hands the master to every ready, forward and in a rollback redeploy, so a fresh redeployer can resume', async (t) => {
+  const { w, keyref } = await seeded(t, { overlap: false });
+  w.destinations.redeployer.failNext();
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  const masters = w.destinations.redeployer.readyMasters();
+  assert.ok(masters.length >= 2, `ready was called ${masters.length} times`);
+  const expected = Buffer.from(await bytesOf(w.platform.master())).toString('utf8');
+  for (const m of masters) assert.equal(Buffer.from(await bytesOf(m)).toString('utf8'), expected);
+});
+
+// --- placement (KBOX-57) -----------------------------------------------------------------------------------------------------------
+
+const rowsOfKey = (w: RotationWorld, keyref: string): string =>
+  JSON.stringify([w.parts.db.prepare('SELECT * FROM keys WHERE keyref = ?').all(keyref), w.parts.db.prepare('SELECT * FROM rotation_keys WHERE keyref = ?').all(keyref)]);
+
+test('KBOX-57 the issuer is handed the key\'s stored location, and the verifier the generation\'s, on a create and on every rotation', async (t) => {
+  const { w, keyref } = await seeded(t);
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.deepEqual(w.seenAt.issue, [{ region: 'eu' }, { region: 'eu' }]);
+  assert.ok(w.seenAt.verify.length >= 3);
+  assert.ok(w.seenAt.verify.every((at) => at.region === 'eu' && at.project === undefined), JSON.stringify(w.seenAt.verify));
+});
+
+for (const [name, answer] of [
+  ['another region', { region: 'us' }],
+  ['the stored region and a project the stored location lacks', { region: 'eu', project: 'p1' }],
+  ['no region where the stored location names one', {}],
+] as const) {
+  test(`KBOX-57 KBOX-17 an issuer answering ${name} fails the run at step 3 with location_mismatch: the new key is revoked, one notice, nothing stored`, async (t) => {
+    const { w, keyref, oldValue } = await seeded(t);
+    w.faults.answerAt = answer;
+    w.orch.start({ keyref, origin: 'owner' });
+    await w.settle();
+    const run = w.store.runs().at(-1);
+    assert.deepEqual([run?.state, run?.failedStep, run?.reasonCode], ['failed', 'issuing', 'location_mismatch']);
+    assert.equal((await w.live()).length, 1, 'only the old key is live: the misplaced one was revoked');
+    assert.equal(genOf(w, keyref, 2), undefined, 'the misplaced key was never stored as a generation');
+    assert.equal(w.events('rotation.failed').length, 1);
+    assert.deepEqual(heldBy(w), [oldValue, oldValue]);
+  });
+}
+
+test('KBOX-57 a misplaced new key is confirmed dead at the location the platform answered, not the stored one', async (t) => {
+  const { w, keyref } = await seeded(t, { verifier: false });
+  w.faults.answerAt = { region: 'us' };
+  w.faults.revoke404 = true;
+  w.seenAt.listAt.length = 0;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'rolling_back', 'a listing of the answered region still shows it: not dead');
+  assert.deepEqual(w.seenAt.listAt, [{ region: 'us' }]);
+  // As for a key that could not be stored: the retry has no platform key id of its own, and the misplaced key is reconcile's orphan, found
+  // by its intent name and confirmed dead at the location the listing gives it.
+  w.faults.revoke404 = false;
+  await w.settle();
+  await w.reconciler.run();
+  assert.equal((await w.live()).length, 1, 'only the old key is live');
+  assert.deepEqual(w.seenAt.listAt.filter((at) => at.region !== 'us'), [], 'no listing of the stored region was taken for proof');
+});
+
+test('KBOX-57 an answer naming the stored location is no mismatch, and an answer naming no place is no claim: both runs complete', async (t) => {
+  const { w, keyref } = await seeded(t);
+  w.faults.answerAt = { region: 'eu' };
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.equal(w.store.runs().at(-1)?.state, 'done');
+  assert.deepEqual(genOf(w, keyref, 2)?.location, { region: 'eu' });
+  w.faults.answerAt = undefined;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.equal(w.store.runs().at(-1)?.state, 'done');
+  assert.deepEqual(genOf(w, keyref, 3)?.location, { region: 'eu' }, 'no place in the answer: the stored one is recorded');
+});
+
+test('KBOX-57 putKeyInfo refuses another location for a stored key with location_immutable and changes nothing; the same location is kept', async (t) => {
+  const { w, keyref } = await seeded(t);
+  const before = rowsOfKey(w, keyref);
+  const info = w.store.keyInfo(keyref);
+  assert.ok(info);
+  for (const location of [{ region: 'us' }, {}, { region: 'eu', project: 'p1' }]) {
+    assert.throws(() => w.store.putKeyInfo(keyref, { ...info, location, rotatedAt: info.rotatedAt + 1 }), (e: unknown) => e instanceof ApiError && JSON.stringify(e.detail) === JSON.stringify({ code: 'location_immutable' }), JSON.stringify(location));
+  }
+  assert.equal(rowsOfKey(w, keyref), before);
+  w.store.putKeyInfo(keyref, { ...info, rotatedAt: info.rotatedAt + 1 });
+  assert.equal(w.store.keyInfo(keyref)?.rotatedAt, info.rotatedAt + 1);
+});
+
+test('KBOX-57 create refuses a keyref that exists with key_exists before its first write: no run, no issue', async (t) => {
+  const { w, keyref } = await seeded(t);
+  const before = rowsOfKey(w, keyref);
+  const issued = w.seenAt.issue.length;
+  await assert.rejects(() => w.orch.create(w.newKey({ location: { region: 'us' }, class: 'ordinary' })), (e: unknown) => e instanceof ApiError && e.code === 'conflict' && JSON.stringify(e.detail) === JSON.stringify({ code: 'key_exists' }));
+  assert.equal(rowsOfKey(w, keyref), before);
+  assert.equal(w.store.runs().length, 1, 'only the seed run');
+  assert.equal(w.seenAt.issue.length, issued);
+});
+
+test('KBOX-57 a run is refused before it starts when the stored location fails the entry\'s current declaration, with the check\'s code', async (t) => {
+  // The entry now requires a project of ordinary keys; the key was stored without one.
+  const strict = { region: { pattern: /[a-z]{2,16}/, requiredFor: [] }, project: { pattern: /p[0-9]/, requiredFor: ['ordinary' as const] } };
+  const w = await rotationWorld(t, { source: (real) => ({ ...real, platform: (id) => ({ ...real.platform(id), location: strict }) }) });
+  const keyref = 'fake/shop/OLD';
+  w.parts.meta.putKey({ keyref, platform: 'fake', name: 'OLD', projects: ['shop'], class: 'ordinary', status: 'works', gen_current: 1, schedule: { rotate_every_days: 90, grace_hours: 1, next_due_at: null, expires_at: null }, coverage: null, last_use_at: null });
+  w.store.putKeyInfo(keyref, { scopeItems: ['read'], location: { region: 'eu' }, rotatedAt: 1, markAdmin: false });
+  for (const value of [undefined, Buffer.from('fk-pasted')]) {
+    assert.throws(
+      () => w.orch.start({ keyref, origin: 'owner', ...(value === undefined ? {} : { value }) }),
+      (e: unknown) => e instanceof ApiError && e.code === 'rejected' && JSON.stringify(e.detail) === JSON.stringify({ code: 'location_missing' }),
+    );
+  }
+  assert.equal(w.store.runs().length, 0);
+  assert.deepEqual(w.seenAt.issue, []);
+});
+
+// --- masters by stored location (KBOX-57) -----------------------------------------------------------------------------------------
+
+test('KBOX-57 every master a run asks for is chosen by the key\'s platform, stored location and stored scope items, never by its projects', async (t) => {
+  const { w, keyref } = await seeded(t);
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.equal(genOf(w, keyref, 1)?.status, 'retired', 'the run went through every step that needs the master');
+  assert.ok(w.masterAsked.length > 0);
+  assert.deepEqual(new Set(w.masterAsked.map((a) => JSON.stringify(a))), new Set([JSON.stringify({ platform: 'fake', at: { region: 'eu' }, items: ['read'] })]));
+});
+
+test('KBOX-57 KBOX-17 a run whose push step finds no master fails there with no_master: one card, the new key revoked once a master is back, the old key everywhere', async (t) => {
+  const { w, keyref, oldValue, oldId } = await seeded(t);
+  w.checkpoints.hook = async (point) => {
+    if (point === 'verifying') w.faults.noMaster = true;
+  };
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.checkpoints.hook = undefined;
+  // Each retry is let to finish before the next falls due (TimedClock runs timers synchronously; a lease still held would drop one).
+  for (const ms of [MINUTE, 2 * MINUTE, 4 * MINUTE]) {
+    w.clock.advance(ms);
+    await w.orch.idle();
+  }
+  assert.equal(w.parts.audit.read(0).entries.filter((e) => e.action === 'rotation.step_failed' && e.detail['code'] === 'no_master').length, 4, 'the rollback waited for a master and retried');
+  const failed = w.events('rotation.failed');
+  assert.deepEqual(failed.map((e) => [e.data['step'], e.data['reason_code'], e.data['old_key_works']]), [['pushing', 'no_master', true]], 'one card, retries included');
+  assert.deepEqual(heldBy(w), [oldValue, oldValue], 'nothing was pushed without a master');
+  w.faults.noMaster = false;
+  await w.settle(HOUR);
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+  assert.deepEqual(await w.live(), [oldId], 'the new key was revoked with the master once there was one');
+  assert.equal(w.events('rotation.failed').length, 1);
+});
+
+test('KBOX-57 KBOX-17 a run whose first step finds no master fails at issuing with no_master and one card: nothing issued, the run ends failed at once', async (t) => {
+  const { w, keyref, oldValue, oldId } = await seeded(t);
+  w.faults.noMaster = true;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  assert.deepEqual(w.events('rotation.failed').map((e) => [e.data['step'], e.data['reason_code']]), [['issuing', 'no_master']]);
+  assert.equal(w.store.runs().at(-1)?.state, 'failed', 'nothing to undo: the rollback needs no master');
+  assert.deepEqual(heldBy(w), [oldValue, oldValue]);
+  assert.deepEqual(await w.live(), [oldId]);
+});
+
+test('KBOX-57 KBOX-51 a master missing at step 10 keeps the old key in grace with one old_key_still_on notice and retries until a master is back', async (t) => {
+  const { w, keyref, oldId } = await seeded(t);
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.faults.noMaster = true;
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  w.clock.advance(MINUTE);
+  await w.orch.idle();
+  assert.equal(genOf(w, keyref, 1)?.status, 'grace');
+  assert.equal(w.events('rotation.old_key_still_on').length, 1);
+  assert.ok((await w.live()).includes(oldId));
+  w.faults.noMaster = false;
+  await w.settle(2 * MINUTE);
+  assert.equal(genOf(w, keyref, 1)?.status, 'retired');
+  assert.ok(!(await w.live()).includes(oldId));
+});
+
+test('KBOX-51 KBOX-57 reconcile lists the platform once per master row: a listing that fails audits list_failed for that row only, and the orphan another master sees is still revoked', async (t) => {
+  const box: { stranger?: Lent } = {};
+  const { w, keyref } = await seeded(t, { source: (real) => ({ ...real, masters: (platform) => [...(box.stranger === undefined ? [] : [{ at: { region: 'us' }, value: box.stranger }]), ...real.masters(platform)] }) });
+  box.stranger = w.platform.stranger();
+  w.checkpoints.arm('issued');
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  assert.equal((await w.live()).length, 2, 'the orphan beside the old key');
+  w.checkpoints.crashAt = undefined;
+  w.build();
+  await w.reconciler.run();
+  const audit = w.parts.audit.read(0).entries;
+  assert.equal(audit.filter((e) => e.detail['code'] === 'list_failed').length, 1, 'the master the platform refuses: one row');
+  assert.equal(audit.filter((e) => e.action === 'rotation.orphan_revoked').length, 1, 'the working master\'s listing found the orphan');
 });

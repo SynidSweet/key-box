@@ -4,8 +4,8 @@
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type { TestContext } from 'node:test';
-import type { Issuer, IssuerCapabilities, Verifier } from '../../src/ports/issuer.ts';
-import type { KeyClass, KeyLocation, KeyShape, Lent, PlatformKeyId, Scope } from '../../src/ports/types.ts';
+import type { Issuer, IssuerCapabilities, LocationProver, Verifier } from '../../src/ports/issuer.ts';
+import type { KeyClass, KeyLocation, KeyShape, Lent, LocationSchema, PlatformKeyId, Scope } from '../../src/ports/types.ts';
 import { deliveryRoutes } from '../../src/shell/deliveries.ts';
 import { keyRoutes } from '../../src/shell/key-routes.ts';
 import type { Route } from '../../src/shell/http.ts';
@@ -54,6 +54,10 @@ export interface RoutesWorld extends World {
   readonly destination: RecordingDestination;
   /** The values the paste platform's verifier answers ok for. */
   readonly accepted: Set<string>;
+  /** The `at` of every issue call the api platform received, in order. */
+  readonly issuedAt: KeyLocation[];
+  /** The `at` of every call the paste platform's verifier received, in order. */
+  readonly verifiedAt: KeyLocation[];
   /** The token that may call the control routes. */
   readonly control: string;
   api(path: string, options?: { readonly method?: string; readonly json?: unknown; readonly bytes?: Uint8Array; readonly contentType?: string }): ReturnType<World['call']>;
@@ -72,6 +76,12 @@ export interface RoutesWorldOptions {
   readonly approvals?: (real: RotationApprovals) => RotationApprovals;
   /** Wraps the platform source rotation is given: a fault planted at the port. */
   readonly source?: (real: PlatformSource) => PlatformSource;
+  /** The location fields the api platform (`fake`) and the paste platform declare (KBOX-57); none by default. */
+  readonly location?: LocationSchema;
+  /** The api platform's classification at a location, in place of the items-only one (a KBOX-15 floor fixture). */
+  readonly classifyAt?: (scope: Scope, at: KeyLocation) => KeyClass;
+  /** The prover of a host-naming location (KBOX-57), on both the api and the paste platform; none by default. */
+  readonly locationProver?: LocationProver;
 }
 
 type RotationApprovals = RotationDeps['approvals'];
@@ -86,11 +96,18 @@ export async function routesWorld(t: TestContext, options: RoutesWorldOptions = 
   const destination = new RecordingDestination([]);
   const redeployer = new RecordingRedeployer([]);
   const accepted = new Set<string>();
+  const issuedAt: KeyLocation[] = [];
+  const verifiedAt: KeyLocation[] = [];
+  const apiClassify = options.classifyAt ?? classify;
+  const placed = { ...(options.location === undefined ? {} : { location: options.location }), ...(options.locationProver === undefined ? {} : { locationProver: options.locationProver }) };
 
   const apiIssuer: Issuer = {
     platform: 'fake',
-    capabilities: (): IssuerCapabilities => ({ ...platform.issuer.capabilities(), classify, ...(options.overlap === false ? { overlap: false, set: 'api' as const } : {}) }),
-    issue: (req, intent, master) => platform.issuer.issue(req, intent, master),
+    capabilities: (): IssuerCapabilities => ({ ...platform.issuer.capabilities(), classify: apiClassify, ...(options.overlap === false ? { overlap: false, set: 'api' as const } : {}) }),
+    issue: (req, intent, master) => {
+      issuedAt.push(req.at);
+      return platform.issuer.issue(req, intent, master);
+    },
     revoke: (id: PlatformKeyId, master: Lent) => platform.issuer.revoke(id, master),
     ...(options.overlap === false ? { set: (value: Lent, _at: KeyLocation, master: Lent) => platform.set(value, master) } : {}),
   };
@@ -111,17 +128,21 @@ export async function routesWorld(t: TestContext, options: RoutesWorldOptions = 
     revoke: () => Promise.resolve('absent'),
   };
   const pasteVerifier: Verifier = {
-    verify: async (key) => (accepted.has(Buffer.from(await bytesOf(key)).toString('utf8')) ? 'ok' : 'rejected'),
+    verify: async (key, target) => {
+      verifiedAt.push(target.at);
+      return accepted.has(Buffer.from(await bytesOf(key)).toString('utf8')) ? 'ok' : 'rejected';
+    },
   };
   const source: PlatformSource = {
     platform: (id) => {
-      if (id === 'fake') return { issuer: apiIssuer, lister: platform.lister, verifier: platform.verifier };
-      if (id === PASTE_PLATFORM && options.pasteOnly === true) return { shape: PASTE_SHAPE, classify, verifier: pasteVerifier, keyPageUrl: 'https://platform.example/keys' };
-      if (id === PASTE_PLATFORM) return { issuer: pasteIssuer, verifier: pasteVerifier, keyPageUrl: 'https://platform.example/keys' };
+      if (id === 'fake') return { issuer: apiIssuer, lister: platform.lister, verifier: platform.verifier, ...placed };
+      if (id === PASTE_PLATFORM && options.pasteOnly === true) return { shape: PASTE_SHAPE, classify, verifier: pasteVerifier, keyPageUrl: 'https://platform.example/keys', ...placed };
+      if (id === PASTE_PLATFORM) return { issuer: pasteIssuer, verifier: pasteVerifier, keyPageUrl: 'https://platform.example/keys', ...placed };
       return undefined;
     },
     destination: (kind) => (kind === 'vercel_env' ? { destination, redeployer } : undefined),
-    master: () => platform.master(),
+    master: () => ({ ok: true, value: platform.master() }),
+    masters: () => [{ at: {}, value: platform.master() }],
   };
   const rotation = openRotation({
     parts: w.parts,
@@ -160,6 +181,8 @@ export async function routesWorld(t: TestContext, options: RoutesWorldOptions = 
     platform,
     destination,
     accepted,
+    issuedAt,
+    verifiedAt,
     control,
     api,
     pasteProof(view: PasteView, forId?: string): WireProof {
