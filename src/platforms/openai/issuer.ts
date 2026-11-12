@@ -45,7 +45,7 @@ export function createOpenAiIssuer(http: AdapterHttp): Issuer {
     platform: 'openai',
     capabilities: () => capabilities,
     async issue(req: IssueRequest, intentName: string, master: Lent): Promise<IssuedKey> {
-      const project = projectOf(req.scope);
+      const project = projectOf(req.scope, req.at);
       const account = await accountFor(project, accountNameOf(intentName), master);
       // UNVERIFIED (openai.create-key-body): the body fields `name`, `expires_in_seconds` and the answer fields `value`, `id`, `expires_at` are read from
       // the platform's published description; the request path itself was seen answering 401 for a bad key and 404 for a made-up sibling.

@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
 import type { TestContext } from 'node:test';
 import { inspect } from 'node:util';
-import type { Issuer } from '../src/ports/issuer.ts';
+import type { IssueRequest, Issuer } from '../src/ports/issuer.ts';
 import type { PlatformEntry } from '../src/ports/platform.ts';
 import type { AllowRule, DenyRule, RelayProfile } from '../src/ports/relay-profile.ts';
 import type { Lent } from '../src/ports/types.ts';
@@ -30,7 +30,8 @@ import { relayWorld } from './support/relay-world.ts';
 
 const ADMIN = 'sk-admin-kbox-test-0123456789abcdefghijklmnopqrstuvwxyz';
 const PROJECT = 'proj_kbox_test';
-const SCOPE = { items: [`project:${PROJECT}`] };
+const AT = { project: PROJECT };
+const REQ = { scope: {}, at: AT };
 const DAY = 86_400;
 const FILLER = 'kbox-test-filler-0123456789abcdefghijklmnopqrstuvwxyz';
 
@@ -41,7 +42,7 @@ const text = (l: Lent): Promise<string> => bytesOf(l).then((b) => Buffer.from(b)
 
 function adapterOver(fake: FakeOpenAi): { readonly entry: PlatformEntry; readonly issuer: Issuer; readonly http: ReturnType<typeof adapterHttpTo> } {
   const http = adapterHttpTo(fake);
-  const entry = createOpenAiEntry({ http });
+  const entry = createOpenAiEntry({ http, clock: { now: () => 0 } });
   assert.ok(entry.issuer !== undefined && entry.lister !== undefined && entry.verifier !== undefined);
   return { entry, issuer: entry.issuer, http };
 }
@@ -68,8 +69,8 @@ after(async () => {
   await must(shared).close();
 });
 
-/** The suites ask for a key with a scope of their own that names no project: this issuer adds the test project to it. */
-const withProject = (issuer: Issuer): Issuer => ({ ...issuer, issue: (req, intent, m) => issuer.issue({ scope: { ...req.scope, ...SCOPE } }, intent, m) });
+/** The suites ask for a key at no location: this issuer stores the test project as its location. */
+const withProject = (issuer: Issuer): Issuer => ({ ...issuer, issue: (req, intent, m) => issuer.issue({ scope: req.scope, at: AT }, intent, m) });
 
 const entryOfShared = (): PlatformEntry => adapterOver(must(shared)).entry;
 
@@ -100,8 +101,8 @@ relayProfileContract('openai', () => must(entryOfShared().relay));
 
 test('KBOX-38 a rotation keeps the service account and changes only its key: the second issue under the same stem adds a key to the same account', async (t) => {
   const { fake, issuer } = await fresh(t);
-  const first = await issuer.issue({ scope: SCOPE }, 'kbox_shop_g1_aaaa1111', master());
-  const second = await issuer.issue({ scope: SCOPE }, 'kbox_shop_g2_bbbb2222', master());
+  const first = await issuer.issue(REQ, 'kbox_shop_g1_aaaa1111', master());
+  const second = await issuer.issue(REQ, 'kbox_shop_g2_bbbb2222', master());
   assert.deepEqual(fake.serviceAccounts(PROJECT).map((a) => a.name), ['kbox_shop']);
   assert.deepEqual(fake.keysOf(PROJECT).map((k) => k.name), ['kbox_shop_g1_aaaa1111', 'kbox_shop_g2_bbbb2222']);
   assert.notEqual(first.platformKeyId, second.platformKeyId);
@@ -109,7 +110,7 @@ test('KBOX-38 a rotation keeps the service account and changes only its key: the
 
 test('KBOX-38 the key the platform makes with a new service account is deleted at once: the account holds only the key the box asked for, with an expiry', async (t) => {
   const { fake, issuer } = await fresh(t);
-  const issued = await issuer.issue({ scope: SCOPE }, 'kbox_shop_g1_aaaa1111', master());
+  const issued = await issuer.issue(REQ, 'kbox_shop_g1_aaaa1111', master());
   const keys = fake.keysOf(PROJECT);
   assert.equal(keys.length, 1);
   assert.equal(keys[0]?.expiresInSeconds, 90 * DAY);
@@ -117,20 +118,49 @@ test('KBOX-38 the key the platform makes with a new service account is deleted a
   assert.equal(issued.expiresAt, (1_000 + 90 * DAY) * 1000);
 });
 
-test('KBOX-38 issue is refused with a fixed error for a scope with no project, a master scope and a project id that is not an id; nothing is sent', async (t) => {
+test('KBOX-38 KBOX-57 issue is refused with a fixed error for a request with no project, a project that is not an id, a master scope and any `project:` item; nothing is sent', async (t) => {
   const { fake, issuer } = await fresh(t);
-  for (const scope of [{}, { items: [] }, { items: ['organization:admin'] }, { items: ['project:../organization'] }, { items: ['project:a/b'] }, { items: ['project:'] }, { items: ['project:proj_a', 'project:proj_b'] }]) {
-    await assert.rejects(() => issuer.issue({ scope }, 'kbox_x_g1_aaaa1111', master()), /^OpenAiError: openai: bad_scope$/, JSON.stringify(scope));
+  const refused: readonly IssueRequest[] = [
+    { scope: {}, at: {} },
+    { scope: {}, at: { region: 'eu' } },
+    { scope: {}, at: { project: '../organization' } },
+    { scope: {}, at: { project: 'a/b' } },
+    { scope: {}, at: { project: '' } },
+    { scope: { items: ['organization:admin'] }, at: AT },
+    { scope: { items: [`project:${PROJECT}`] }, at: AT },
+    { scope: { items: [`project:${PROJECT}`] }, at: {} },
+    { scope: { items: ['project:proj_a', 'project:proj_b'] }, at: AT },
+  ];
+  for (const req of refused) {
+    await assert.rejects(() => issuer.issue(req, 'kbox_x_g1_aaaa1111', master()), /^OpenAiError: openai: bad_scope$/, JSON.stringify(req));
   }
   assert.equal(fake.calls.length, 0);
 });
 
+test('KBOX-38 KBOX-57 the entry declares the project as its one location field, required of ordinary and admin keys, with the id pattern', async (t) => {
+  const { entry } = await fresh(t);
+  const field = entry.location?.project;
+  assert.deepEqual(field?.requiredFor, ['ordinary', 'admin']);
+  assert.ok(field?.pattern.test(PROJECT) === true && field.pattern.test('../x') === false);
+  assert.equal(entry.location?.region, undefined);
+});
+
+test('KBOX-38 KBOX-57 the project the key is made in is the stored location, and no other', async (t) => {
+  const { fake, issuer } = await fresh(t);
+  const other = await fakeOpenAi({ adminKey: ADMIN, projects: ['proj_other'] });
+  t.after(() => other.close());
+  await issuer.issue(REQ, 'kbox_shop_g1_aaaa1111', master());
+  assert.equal(fake.keysOf(PROJECT).length, 1);
+  await assert.rejects(() => adapterOver(other).issuer.issue(REQ, 'kbox_x_g1_aaaa1111', master()), /openai: not_found/);
+  assert.equal(other.keysOf('proj_other').length, 0);
+});
+
 test('KBOX-38 a project the platform does not know is a fixed not_found; a refused master is rejected, an answer of 500 is upstream_error', async (t) => {
   const { fake, issuer } = await fresh(t);
-  await assert.rejects(() => issuer.issue({ scope: { items: ['project:proj_nowhere'] } }, 'kbox_x_g1_aaaa1111', master()), /openai: not_found/);
-  await assert.rejects(() => issuer.issue({ scope: SCOPE }, 'kbox_x_g1_aaaa1111', wrongMaster()), /openai: rejected/);
+  await assert.rejects(() => issuer.issue({ scope: {}, at: { project: 'proj_nowhere' } }, 'kbox_x_g1_aaaa1111', master()), /openai: not_found/);
+  await assert.rejects(() => issuer.issue(REQ, 'kbox_x_g1_aaaa1111', wrongMaster()), /openai: rejected/);
   fake.setMode('500');
-  await assert.rejects(() => issuer.issue({ scope: SCOPE }, 'kbox_x_g1_aaaa1111', master()), /openai: upstream_error/);
+  await assert.rejects(() => issuer.issue(REQ, 'kbox_x_g1_aaaa1111', master()), /openai: upstream_error/);
 });
 
 test('KBOX-38 a platform that cannot be reached is a thrown fixed error naming nothing of the transport', async (t) => {
@@ -152,7 +182,7 @@ test('KBOX-38 a revoke of an id that is not <project>/<key> in the platform alph
 
 test('KBOX-38 a revoke the platform answers 404 is absent, one it answers 500 throws, and a revoked key is gone from the platform', async (t) => {
   const { fake, issuer } = await fresh(t);
-  const issued = await issuer.issue({ scope: SCOPE }, 'kbox_shop_g1_aaaa1111', master());
+  const issued = await issuer.issue(REQ, 'kbox_shop_g1_aaaa1111', master());
   assert.equal(await issuer.revoke(`${PROJECT}/key_9999`, master()), 'absent');
   fake.setMode('500');
   await assert.rejects(() => issuer.revoke(issued.platformKeyId, master()), /openai: upstream_error/);
@@ -165,9 +195,9 @@ test('KBOX-38 the capabilities: api create and revoke, overlap, reveal once, no 
   const { issuer } = await fresh(t);
   const caps = issuer.capabilities();
   assert.deepEqual([caps.create, caps.revoke, caps.overlap, caps.set, caps.revealOnce, caps.scopeSchema.fields], ['api', 'api', true, 'none', true, ['items']]);
-  assert.equal(caps.classify(SCOPE), 'ordinary');
-  assert.equal(caps.classify({ items: ['organization:admin'] }), 'master');
-  assert.equal(caps.classify({}), 'ordinary');
+  assert.equal(caps.classify({}, AT), 'ordinary');
+  assert.equal(caps.classify({ items: ['organization:admin'] }, AT), 'master');
+  assert.equal(caps.classify({}, {}), 'ordinary');
   assert.equal(issuer.set, undefined);
 });
 
@@ -176,8 +206,8 @@ test('KBOX-38 the capabilities: api create and revoke, overlap, reveal once, no 
 test('KBOX-38 KBOX-51 a listing reads every page of a project: five keys over pages of two are complete, each located at the project', async (t) => {
   const { entry, issuer } = await fresh(t);
   const lister = must(entry.lister);
-  for (let i = 1; i <= 4; i += 1) await issuer.issue({ scope: SCOPE }, `kbox_shop_g${i}_aaaa1111`, master());
-  await issuer.issue({ scope: SCOPE }, 'kbox_other_g1_aaaa1111', master());
+  for (let i = 1; i <= 4; i += 1) await issuer.issue(REQ, `kbox_shop_g${i}_aaaa1111`, master());
+  await issuer.issue(REQ, 'kbox_other_g1_aaaa1111', master());
   const listing = await lister.listAt({ project: PROJECT }, master());
   assert.equal(listing.complete, true);
   assert.deepEqual(listing.at, { project: PROJECT });
@@ -187,7 +217,7 @@ test('KBOX-38 KBOX-51 a listing reads every page of a project: five keys over pa
 
 test('KBOX-38 KBOX-51 a listing whose platform keeps saying there is more on the same cursor is incomplete, never complete', async (t) => {
   const { fake, entry, issuer } = await fresh(t);
-  await issuer.issue({ scope: SCOPE }, 'kbox_shop_g1_aaaa1111', master());
+  await issuer.issue(REQ, 'kbox_shop_g1_aaaa1111', master());
   fake.setMode('stuck-pages');
   const listing = await must(entry.lister).listAt({ project: PROJECT }, master());
   assert.equal(listing.complete, false);
@@ -221,16 +251,16 @@ test('KBOX-38 a location whose project is not an id is a fixed bad_scope and sen
 
 test('KBOX-38 the verifier calls GET /v1/models with the key as bearer; a 401 is rejected, a 500 is unreachable', async (t) => {
   const { fake, entry, issuer, http } = await fresh(t);
-  const issued = await issuer.issue({ scope: SCOPE }, 'kbox_shop_g1_aaaa1111', master());
+  const issued = await issuer.issue(REQ, 'kbox_shop_g1_aaaa1111', master());
   const verifier = must(entry.verifier);
-  assert.equal(await verifier.verify(issued.value, { platform: 'openai' }), 'ok');
+  assert.equal(await verifier.verify(issued.value, { platform: 'openai', at: AT }), 'ok');
   const call = must(http.sent[http.sent.length - 1]);
   assert.deepEqual([call.method, call.target, call.originalHost, call.headers['authorization']], ['GET', '/v1/models', 'api.openai.com', `Bearer ${await text(issued.value)}`]);
-  assert.equal(await verifier.verify(stranger(), { platform: 'openai' }), 'rejected');
+  assert.equal(await verifier.verify(stranger(), { platform: 'openai', at: AT }), 'rejected');
   fake.setMode('500');
-  assert.equal(await verifier.verify(issued.value, { platform: 'openai' }), 'unreachable');
+  assert.equal(await verifier.verify(issued.value, { platform: 'openai', at: AT }), 'unreachable');
   fake.setMode('401-echo');
-  assert.equal(await verifier.verify(issued.value, { platform: 'openai' }), 'rejected');
+  assert.equal(await verifier.verify(issued.value, { platform: 'openai', at: AT }), 'rejected');
 });
 
 // --- the value rules (KBOX-14) --------------------------------------------------------------------------------------------------
@@ -251,12 +281,12 @@ test('KBOX-14 a platform that quotes the key it was sent in a 401, or the key it
   };
   fake.setMode('401-echo');
   const failures = [
-    await errorText(() => issuer.issue({ scope: SCOPE }, 'kbox_shop_g1_aaaa1111', planted)),
+    await errorText(() => issuer.issue(REQ, 'kbox_shop_g1_aaaa1111', planted)),
     await errorText(() => issuer.revoke(`${PROJECT}/key_1`, planted)),
     await errorText(() => must(entry.lister).list(planted)),
     await errorText(() => must(entry.lister).listAt({ project: PROJECT }, planted)),
   ];
-  assert.equal(await must(entry.verifier).verify(planted, { platform: 'openai' }), 'rejected');
+  assert.equal(await must(entry.verifier).verify(planted, { platform: 'openai', at: AT }), 'rejected');
   c.assertAbsent({ errors: failures.join('\n') });
 
   // the key the platform would issue, echoed by a failing create and carried by a create answer that is cut short of its id
@@ -266,14 +296,14 @@ test('KBOX-14 a platform that quotes the key it was sent in a 401, or the key it
   const later: string[] = [];
   for (const mode of ['create-500-echo', 'create-bad-shape'] as const) {
     issuedFake.setMode(mode);
-    later.push(await errorText(() => over.issuer.issue({ scope: SCOPE }, `kbox_shop_${mode.replaceAll('-', '_')}_g1_aaaa1111`, planted)));
+    later.push(await errorText(() => over.issuer.issue(REQ, `kbox_shop_${mode.replaceAll('-', '_')}_g1_aaaa1111`, planted)));
   }
   for (const fakeValue of [...later]) assert.equal(fakeValue.includes('sk-svcacct-'), false, 'a key the platform would have issued is in an error');
 });
 
 test('KBOX-14 an issued value is a Lent: printing, inspecting and JSON of the issued key show no key text', async (t) => {
   const { issuer } = await fresh(t);
-  const issued = await issuer.issue({ scope: SCOPE }, 'kbox_shop_g1_aaaa1111', master());
+  const issued = await issuer.issue(REQ, 'kbox_shop_g1_aaaa1111', master());
   const value = await text(issued.value);
   for (const shown of [String(issued.value), inspect(issued), JSON.stringify(issued)]) assert.equal(shown.includes(value), false);
 });
@@ -281,7 +311,7 @@ test('KBOX-14 an issued value is a Lent: printing, inspecting and JSON of the is
 test('KBOX-14 a create answer with no usable value or id is a fixed bad_response', async (t) => {
   const { fake, issuer } = await fresh(t);
   fake.setMode('create-bad-shape');
-  await assert.rejects(() => issuer.issue({ scope: SCOPE }, 'kbox_shop_g1_aaaa1111', master()), /^OpenAiError: openai: bad_response/);
+  await assert.rejects(() => issuer.issue(REQ, 'kbox_shop_g1_aaaa1111', master()), /^OpenAiError: openai: bad_response/);
 });
 
 // --- the shape ------------------------------------------------------------------------------------------------------------------
@@ -324,9 +354,9 @@ test('KBOX-23 KBOX-38 the entry: id, the one host, the key page, the verifier-an
 
 test('KBOX-38 every network call the adapter made went to api.openai.com over the https URL it was given', async (t) => {
   const { entry, issuer, http } = await fresh(t);
-  const issued = await issuer.issue({ scope: SCOPE }, 'kbox_shop_g1_aaaa1111', master());
+  const issued = await issuer.issue(REQ, 'kbox_shop_g1_aaaa1111', master());
   await must(entry.lister).list(master());
-  await must(entry.verifier).verify(issued.value, { platform: 'openai' });
+  await must(entry.verifier).verify(issued.value, { platform: 'openai', at: AT });
   await issuer.revoke(issued.platformKeyId, master());
   assert.ok(http.sent.length > 4);
   assert.ok(http.sent.every((r) => r.originalHost === 'api.openai.com'));

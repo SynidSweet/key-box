@@ -1,10 +1,9 @@
 // KBOX-38: what a key's scope items mean for OpenAI, the shape of its keys, and the names the adapter derives. Pure.
-import type { KeyClass, KeyShape, Scope } from '../../ports/types.ts';
+import type { KeyClass, KeyLocation, KeyShape, Scope } from '../../ports/types.ts';
 import { ID, OpenAiError } from './client.ts';
 
 /** The item that names the organization admin key itself: a key of this scope is `master` and is never issued by the box (KBOX-34). */
 export const ORGANIZATION_ADMIN_ITEM = 'organization:admin';
-const PROJECT_PREFIX = 'project:';
 
 /**
  * `sk-admin-` and `sk-svcacct-` keys both fit: the prefix is `sk-` and the core (which begins `admin-` or `svcacct-`) is base64url.
@@ -19,18 +18,17 @@ const itemsOf = (scope: Scope): readonly string[] => {
   return typeof items === 'string' ? [items] : items;
 };
 
-/** KBOX-38: project service-account keys are ordinary; the organization admin key is master. (`mark_admin` raises an ordinary key later.) */
-export const classify = (scope: Scope): KeyClass => (itemsOf(scope).includes(ORGANIZATION_ADMIN_ITEM) ? 'master' : 'ordinary');
+/** KBOX-38: project service-account keys are ordinary; the organization admin key is master. (`mark_admin` raises an ordinary key later.) The project is the key's location, not its class. */
+export const classify = (scope: Scope, _at: KeyLocation): KeyClass => (itemsOf(scope).includes(ORGANIZATION_ADMIN_ITEM) ? 'master' : 'ordinary');
 
-/** The one project an issue is for. Anything else (none, two, a master scope, an id the adapter cannot put in a path) is `bad_scope`. */
-export function projectOf(scope: Scope): string {
-  const items = itemsOf(scope);
-  const projects = items.filter((i) => i.startsWith(PROJECT_PREFIX));
-  const [only] = projects;
-  if (projects.length !== 1 || only === undefined || items.length !== 1) throw new OpenAiError('bad_scope');
-  const id = only.slice(PROJECT_PREFIX.length);
-  if (!ID.test(id)) throw new OpenAiError('bad_scope');
-  return id;
+/**
+ * The one project an issue is for: the key's stored location (KBOX-57), never a scope item. A scope with any item (a `project:` item, a master
+ * scope) and a project that is absent or not an id the adapter can put in a path are `bad_scope`, before any call.
+ */
+export function projectOf(scope: Scope, at: KeyLocation): string {
+  if (itemsOf(scope).length !== 0) throw new OpenAiError('bad_scope');
+  if (at.project === undefined || !ID.test(at.project)) throw new OpenAiError('bad_scope');
+  return at.project;
 }
 
 /** `kbox_<ref>_g<N>_<run8>` (KBOX-51) names the service account by its stem `kbox_<ref>`, so each rotation adds a key to the same account. */
