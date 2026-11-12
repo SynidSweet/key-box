@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import type { TestContext } from 'node:test';
 import { join } from 'node:path';
 import type { Issuer, IssuerCapabilities, IssueRequest, IssuedKey, KeyListing, KeyLister, PlatformKeyInfo, Verifier } from '../../src/ports/issuer.ts';
-import type { KeyClass, KeyLocation, Lent, LocationSchema, PlatformKeyId, Scope } from '../../src/ports/types.ts';
+import type { KeyClass, KeyLocation, Lent, PlatformKeyId, Scope } from '../../src/ports/types.ts';
 import type { Vault } from '../../src/ports/vault.ts';
 import type { EventLog } from '../../src/ports/events.ts';
 import type { EventData, EventKind } from '../../src/pure/schemas.ts';
@@ -20,6 +20,7 @@ import type { RotationStore } from '../../src/shell/rotation-store.ts';
 import { openCore } from '../../src/shell/core.ts';
 import type { CoreParts } from '../../src/shell/core.ts';
 import { FakePlatformWorld } from '../fakes/platform.ts';
+import { FAKE_LOCATION } from '../fakes/platform-entry.ts';
 import { FakePush } from '../fakes/push.ts';
 import { RecordingDestination, RecordingRedeployer } from '../fakes/recording-destination.ts';
 import type { DestinationCall } from '../fakes/recording-destination.ts';
@@ -51,9 +52,6 @@ export interface Faults {
   /** The issuer answers that it made the key here (`IssuedKey.location`); undefined: the answer names no place. */
   answerAt: KeyLocation | undefined;
 }
-
-/** The world's platform declares a `region` (any lower-case name) that no class must name, so the tests' `{ region: 'eu' }` keys are placed. */
-export const WORLD_LOCATION: LocationSchema = { region: { pattern: /[a-z]{2,16}/, requiredFor: [] } };
 
 export interface WorldOptions {
   readonly seed?: number;
@@ -245,7 +243,7 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
     reconciler: undefined as never,
     build() {
       const real: PlatformSource = {
-        platform: () => ({ issuer, lister, location: WORLD_LOCATION, ...(options.verifier === false ? {} : { verifier }) }),
+        platform: () => ({ issuer, lister, location: FAKE_LOCATION, ...(options.verifier === false ? {} : { verifier }) }),
         destination: () => ({ destination: recording.a, redeployer: recording.redeployer }),
         master: () => {
           if (faults.master) throw new Error('vault: the master key is unreadable');

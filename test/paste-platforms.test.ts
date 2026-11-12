@@ -33,8 +33,8 @@ const ordinary = (tag: string): string => `sk-ant-api03-kbox-test-${'x'.repeat(4
 const ADMIN_PREFIX = 'sk-ant-admin01-';
 const ADMIN = `${ADMIN_PREFIX}kbox-test-${'y'.repeat(40)}`;
 const restricted = (tag: string): string => `rk_live_kbox${'T'.repeat(30)}${tag}`;
-const ANTHROPIC = { platform: 'anthropic' };
-const STRIPE = { platform: 'stripe' };
+const ANTHROPIC = { platform: 'anthropic', at: {} };
+const STRIPE = { platform: 'stripe', at: {} };
 
 interface Anthropic {
   readonly api: FakeAnthropic;
@@ -95,11 +95,11 @@ test('KBOX-40 KBOX-15 each entry has no issuer and states its own shape and clas
     assert.notEqual(classifierOf(entry), undefined);
   }
   const classify = classifierOf(a.entry);
-  assert.equal(classify?.({ items: ['admin'] }), 'master');
-  assert.equal(classify?.({ items: ['read', 'admin'] }), 'master');
-  assert.equal(classify?.({ items: ['read'] }), 'ordinary');
-  assert.equal(classify?.({ items: [] }), 'ordinary');
-  assert.equal(classifierOf(s.entry)?.({ items: ['balance'] }), 'admin');
+  assert.equal(classify?.({ items: ['admin'] }, {}), 'master');
+  assert.equal(classify?.({ items: ['read', 'admin'] }, {}), 'master');
+  assert.equal(classify?.({ items: ['read'] }, {}), 'ordinary');
+  assert.equal(classify?.({ items: [] }, {}), 'ordinary');
+  assert.equal(classifierOf(s.entry)?.({ items: ['balance'] }, {}), 'admin');
 });
 
 test('KBOX-40 KBOX-23 neither entry has a relay profile or a deny list, both pass the registry check, and the hosts are exactly the management hosts', async (t) => {

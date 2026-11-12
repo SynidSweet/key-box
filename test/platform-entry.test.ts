@@ -118,8 +118,8 @@ test('KBOX-51 a rotation does not promote when the verifier of the registry entr
 test('KBOX-40 KBOX-15 classifierOf reads the issuer\'s classification, or the entry\'s own when it has no issuer, and nothing for a platform that is not registered', () => {
   const w = world();
   const own = classifierOf(pasteOnlyEntry(w, SHAPE, { classify: (s) => (s['items'] === 'x' ? 'master' : 'admin') }));
-  assert.deepEqual([own?.({ items: 'x' }), own?.({ items: ['y'] })], ['master', 'admin']);
+  assert.deepEqual([own?.({ items: 'x' }, {}), own?.({ items: ['y'] }, {})], ['master', 'admin']);
   const issued = classifierOf(fakeEntry(w, { issuer: issuerWith(w.issuer, { classify: () => 'admin' }) }));
-  assert.equal(issued?.({ items: ['read'] }), 'admin');
+  assert.equal(issued?.({ items: ['read'] }, {}), 'admin');
   assert.equal(classifierOf(undefined), undefined);
 });

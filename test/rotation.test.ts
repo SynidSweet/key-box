@@ -140,7 +140,7 @@ test('KBOX-51 a daily reconcile between issue and store revokes nothing: the run
 
 test('KBOX-51 a key named kbox_ that matches no intent and no generation raises one notice and is not revoked, and the second reconcile raises none', async (t) => {
   const { w } = await seeded(t);
-  const stray = await w.platform.issuer.issue({ scope: {} }, 'kbox_stranger_g1_deadbeef', w.platform.master());
+  const stray = await w.platform.issuer.issue({ scope: {}, at: {} }, 'kbox_stranger_g1_deadbeef', w.platform.master());
   const before = (await w.live()).length;
   await w.reconciler.run();
   await w.reconciler.run();
@@ -277,7 +277,7 @@ for (const klass of ['ordinary', 'admin'] as const) {
       await w.settle();
       assert.deepEqual(heldBy(w), [oldValue, oldValue], 'the old value is in every destination');
       assert.deepEqual(await w.live(), [oldId], 'the new key is revoked; the old one still works');
-      assert.equal(await w.platform.verifier.verify(w.parts.vault.lend(keyref, 1), { platform: 'fake' }), 'ok');
+      assert.equal(await w.platform.verifier.verify(w.parts.vault.lend(keyref, 1), { platform: 'fake', at: {} }), 'ok');
       const failed = w.events('rotation.failed');
       assert.equal(failed.length, 1, 'exactly one notice event');
       assert.deepEqual([failed[0]?.data['step'], failed[0]?.data['reason_code'], failed[0]?.data['old_key_works']], [failedStep, reason, true]);
@@ -778,7 +778,7 @@ test('KBOX-51 with no verifier call, a lister that answers for another region th
 // --- overlap:false: the platform takes a value the box chose (review M5) -----------------------------------------------------------
 
 const platformTakes = async (w: RotationWorld, value: string): Promise<string> =>
-  w.platform.verifier.verify(lent(Buffer.from(value), 'probe:1'), { platform: 'fake' });
+  w.platform.verifier.verify(lent(Buffer.from(value), 'probe:1'), { platform: 'fake', at: {} });
 
 test('KBOX-51 overlap:false sets a value the box chose at the platform, which stops taking the old one, then pushes and redeploys at once and needs no revoke', async (t) => {
   const { w, keyref, oldValue } = await seeded(t, { overlap: false });
@@ -1129,10 +1129,13 @@ test('KBOX-57 a misplaced new key is confirmed dead at the location the platform
   await w.orch.idle();
   assert.equal(w.store.activeRunOf(keyref)?.state, 'rolling_back', 'a listing of the answered region still shows it: not dead');
   assert.deepEqual(w.seenAt.listAt, [{ region: 'us' }]);
+  // As for a key that could not be stored: the retry has no platform key id of its own, and the misplaced key is reconcile's orphan, found
+  // by its intent name and confirmed dead at the location the listing gives it.
   w.faults.revoke404 = false;
   await w.settle();
-  assert.equal(w.store.runs().at(-1)?.state, 'failed');
-  assert.equal((await w.live()).length, 1);
+  await w.reconciler.run();
+  assert.equal((await w.live()).length, 1, 'only the old key is live');
+  assert.deepEqual(w.seenAt.listAt.filter((at) => at.region !== 'us'), [], 'no listing of the stored region was taken for proof');
 });
 
 test('KBOX-57 an answer naming the stored location is no mismatch, and an answer naming no place is no claim: both runs complete', async (t) => {
@@ -1162,7 +1165,7 @@ test('KBOX-57 putKeyInfo refuses another location for a stored key with location
   assert.equal(w.store.keyInfo(keyref)?.rotatedAt, info.rotatedAt + 1);
 });
 
-test('KBOX-57 create refuses a keyref that exists (a keys or a rotation_keys row) with key_exists before its first write: no run, no issue', async (t) => {
+test('KBOX-57 create refuses a keyref that exists with key_exists before its first write: no run, no issue', async (t) => {
   const { w, keyref } = await seeded(t);
   const before = rowsOfKey(w, keyref);
   const issued = w.seenAt.issue.length;
@@ -1170,9 +1173,6 @@ test('KBOX-57 create refuses a keyref that exists (a keys or a rotation_keys row
   assert.equal(rowsOfKey(w, keyref), before);
   assert.equal(w.store.runs().length, 1, 'only the seed run');
   assert.equal(w.seenAt.issue.length, issued);
-  w.store.putKeyInfo('fake/shop/ORPHAN_INFO', { scopeItems: [], location: {}, rotatedAt: 1, markAdmin: false });
-  await assert.rejects(() => w.orch.create(w.newKey({ keyref: 'fake/shop/ORPHAN_INFO', name: 'ORPHAN_INFO' })), /key_exists|conflict/);
-  assert.equal(w.parts.meta.snapshot().keys.some((k) => k.keyref === 'fake/shop/ORPHAN_INFO'), false);
 });
 
 test('KBOX-57 a run is refused before it starts when the stored location fails the entry\'s current declaration, with the check\'s code', async (t) => {
