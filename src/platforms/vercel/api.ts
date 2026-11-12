@@ -10,7 +10,7 @@ const ORIGIN = `https://${VERCEL_HOST}`;
 
 export interface ApiAnswer {
   readonly status: number;
-  /** The body parsed as JSON; `undefined` when it is not JSON. */
+  /** The body parsed as JSON; `NOT_JSON` when it is not JSON. */
   readonly json: unknown;
 }
 
@@ -33,11 +33,14 @@ export function segment(text: string): string {
   return encodeURIComponent(text);
 }
 
+/** What `json` holds when the body is not JSON; every narrowing helper below reads it as no record and no text. */
+export const NOT_JSON = Symbol('not json');
+
 const parseJson = (body: Uint8Array): unknown => {
   try {
     return JSON.parse(Buffer.from(body).toString('utf8')) as unknown;
   } catch {
-    return undefined;
+    return NOT_JSON;
   }
 };
 

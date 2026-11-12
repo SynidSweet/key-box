@@ -7,6 +7,7 @@ import type { TestContext } from 'node:test';
 import type { PlatformEntry } from '../src/ports/platform.ts';
 import type { AllowRule, DenyRule, RelayProfile } from '../src/ports/relay-profile.ts';
 import { checkRegistry, compileProfile, refuseWidening } from '../src/pure/profile.ts';
+import type { ProfileEngine } from '../src/pure/profile.ts';
 import { createVercelEntry } from '../src/platforms/vercel/index.ts';
 import { refusingAdapterHttp } from '../src/ports/http.ts';
 import { TEST_REGISTRY } from './fixtures/profiles.ts';
@@ -98,8 +99,7 @@ function relayProfileWith(mustDeny: readonly DenyRule[], allow: readonly AllowRu
   };
 }
 
-const engineOf = (profile: RelayProfile): ReturnType<typeof compiledEngine> => compiledEngine(profile);
-function compiledEngine(profile: RelayProfile) {
+function engineOf(profile: RelayProfile): ProfileEngine {
   const compiled = compileProfile(profile);
   if (!compiled.ok) throw new Error(`profile refused: ${compiled.code}`);
   return compiled.engine;

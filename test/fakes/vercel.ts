@@ -75,18 +75,23 @@ type Answer = { readonly status: number; readonly body: unknown };
 
 const fail = (status: number, code: string, message: string, extra: object = {}): Answer => ({ status, body: { error: { code, message, ...extra } } });
 
+/** A body that is not JSON reads as this text, which is no record and so fails every field check. */
+const NOT_JSON = '[not json]';
+
+const parseBody = (text: string): unknown => {
+  if (text === '') return undefined;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return NOT_JSON;
+  }
+};
+
 const readBody = (req: IncomingMessage): Promise<unknown> =>
   new Promise((resolve) => {
     const chunks: Buffer[] = [];
-    req.on('data', (c: Buffer) => chunks.push(c));
-    req.on('end', () => {
-      const text = Buffer.concat(chunks).toString('utf8');
-      try {
-        resolve(text === '' ? undefined : (JSON.parse(text) as unknown));
-      } catch {
-        resolve(undefined);
-      }
-    });
+    req.on('data', (c: Buffer) => void chunks.push(c));
+    req.on('end', () => resolve(parseBody(Buffer.concat(chunks).toString('utf8'))));
   });
 
 const asRecord = (value: unknown): Record<string, unknown> => (typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {});
