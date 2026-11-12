@@ -2,7 +2,6 @@ import { spawn } from 'node:child_process';
 import type { TestContext } from 'node:test';
 import type { NodeRun } from './proc.ts';
 import { onTestEnd } from './cleanup.ts';
-import { waitUntil } from './settle.ts';
 
 /** Starts this Node with `args` in `cwd` (with `env` applied over ours; an `undefined` value removes the variable) and resolves when it exits, so two of them can run at once. A failure to start rejects. */
 export function spawnNode(args: readonly string[], cwd: string, env: Readonly<Record<string, string | undefined>> = {}): Promise<NodeRun> {
@@ -17,10 +16,13 @@ export function spawnNode(args: readonly string[], cwd: string, env: Readonly<Re
   });
 }
 
+/** How long `ready` waits for a started process to print its line. The spec's own update health check allows a restarted core 60 s (docs/spec.md, "within 60 seconds of restart"), so a core on a loaded machine may take that long. */
+const READY_TIMEOUT_MS = 60_000;
+
 export interface LiveNode {
   stdout(): string;
   stderr(): string;
-  /** Resolves when `text` has appeared on stdout; rejects if the process exits first. */
+  /** Resolves when `text` has appeared on stdout; rejects at once if the process exits first, and after 60 s. */
   ready(text: string): Promise<void>;
   /** Sends SIGTERM and resolves with the exit. */
   stop(): Promise<NodeRun>;
@@ -34,8 +36,12 @@ export function startNode(t: TestContext, args: readonly string[], cwd: string, 
   child.stdout.on('data', (c: Buffer) => out.push(c));
   child.stderr.on('data', (c: Buffer) => err.push(c));
   const text = (parts: Buffer[]): string => Buffer.concat(parts).toString('utf8');
+  let closed = false;
   const exited = new Promise<NodeRun>((resolve) => {
-    child.on('close', (status, signal) => resolve({ status, signal, stdout: text(out), stderr: text(err) }));
+    child.on('close', (status, signal) => {
+      closed = true;
+      resolve({ status, signal, stdout: text(out), stderr: text(err) });
+    });
   });
   onTestEnd(t, 'process', async () => {
     child.kill('SIGKILL');
@@ -44,12 +50,26 @@ export function startNode(t: TestContext, args: readonly string[], cwd: string, 
   return {
     stdout: () => text(out),
     stderr: () => text(err),
-    ready: async (wanted) => {
-      let done = false;
-      void exited.then(() => (done = true));
-      await waitUntil(() => text(out).includes(wanted) || done, `"${wanted}" on stdout`);
-      if (!text(out).includes(wanted)) throw new Error(`the process exited before printing "${wanted}": ${text(err)}`);
-    },
+    ready: (wanted) =>
+      new Promise<void>((resolve, reject) => {
+        const printed = (): boolean => text(out).includes(wanted);
+        const exitedWithout = (): Error => new Error(`the process exited before printing "${wanted}": ${text(err)}`);
+        if (printed()) return resolve();
+        if (closed) return reject(exitedWithout());
+        const settle = (finish: () => void): void => {
+          clearTimeout(timer);
+          child.stdout.off('data', onData);
+          child.off('close', onClose);
+          finish();
+        };
+        const onData = (): void => {
+          if (printed()) settle(resolve);
+        };
+        const onClose = (): void => settle(printed() ? resolve : () => reject(exitedWithout()));
+        const timer = setTimeout(() => settle(() => reject(new Error(`timed out after ${READY_TIMEOUT_MS} ms waiting for "${wanted}" on stdout: ${text(err)}`))), READY_TIMEOUT_MS);
+        child.stdout.on('data', onData);
+        child.on('close', onClose);
+      }),
     stop: () => {
       child.kill('SIGTERM');
       return exited;
