@@ -15,6 +15,8 @@ export const PATH_HOST = 'api.pathplat.example';
 
 /** The one key shape the shapeless test entries state (an entry with no issuer must carry its own, KBOX-40). */
 export const NO_ISSUER_SHAPE: KeyShape = { prefix: null, alphabet: 'hex', coreLength: { min: 8, max: 8 }, random: true };
+/** The class of the fixture entries that have no issuer (KBOX-40): they state it themselves. */
+export const NO_ISSUER_CLASSIFY = (): 'ordinary' => 'ordinary';
 
 /** Sample variants of one upstream request: the canonicalisation table of KBOX-13 applied to it. */
 export function variants(method: string, host: string, path: string): DenyRule['samples'] {
@@ -103,7 +105,7 @@ export const leakyProfile: RelayProfile = {
 
 /** The registry the relay tests run: both test profiles and a platform with no relay profile. */
 export const TEST_REGISTRY: readonly PlatformEntry[] = [
-  { id: 'pathplat', relay: pathProfile, shape: NO_ISSUER_SHAPE, unverified: [] },
-  { id: 'hostplat', relay: hostProfile, shape: NO_ISSUER_SHAPE, unverified: [] },
-  { id: 'plain', shape: NO_ISSUER_SHAPE, unverified: [] },
+  { id: 'pathplat', relay: pathProfile, shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] },
+  { id: 'hostplat', relay: hostProfile, shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] },
+  { id: 'plain', shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] },
 ];
