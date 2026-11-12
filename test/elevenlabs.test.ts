@@ -70,10 +70,10 @@ test('KBOX-39 classify: "all", an unknown name (fail closed) or one master name 
   assert.equal(issuerOf().capabilities().classify({ access: 'read' }), 'ordinary');
 });
 
-test('KBOX-39 the entry states the two management hosts, the three still-unverified probe items, a key page, and no relay profile', () => {
+test('KBOX-39 the entry states the two management hosts, the five still-unverified probe items, a key page, and no relay profile', () => {
   assert.equal(entry.id, 'elevenlabs');
   assert.deepEqual([...(entry.hosts ?? [])].sort(), ['api.elevenlabs.io', 'api.us.elevenlabs.io']);
-  assert.deepEqual([...entry.unverified].sort(), ['elevenlabs.key-format', 'elevenlabs.permission-enum', 'elevenlabs.verifier-call']);
+  assert.deepEqual([...entry.unverified].sort(), ['elevenlabs.empty-permissions', 'elevenlabs.key-format', 'elevenlabs.permission-enum', 'elevenlabs.service-account-list', 'elevenlabs.verifier-call']);
   assert.equal(entry.relay, undefined);
   assert.equal(entry.shape, undefined);
   assert.equal(entry.classify, undefined);
@@ -197,12 +197,12 @@ test('KBOX-39 verifier: GET /v1/user with xi-api-key; a key one region knows is 
   assert.equal(await verifierOf().verify(world.stranger(), { platform: 'elevenlabs' }), 'rejected');
 });
 
-test('KBOX-39 verifier: a 403 is rejected; a 500, or a refusal in one region with the other down, is unreachable, never rejected', async () => {
+test('KBOX-39 verifier: a 403 is not rejected (no verdict); a 500, or a refusal in one region with the other down, is unreachable, never rejected', async () => {
   world.reset();
   const key = world.master();
   world.regions.global.failWith = 403;
   world.regions.us.failWith = 403;
-  assert.equal(await verifierOf().verify(key, { platform: 'elevenlabs' }), 'rejected');
+  assert.equal(await verifierOf().verify(key, { platform: 'elevenlabs' }), 'unreachable');
   world.regions.global.failWith = 500;
   world.regions.us.failWith = 500;
   assert.equal(await verifierOf().verify(key, { platform: 'elevenlabs' }), 'unreachable');

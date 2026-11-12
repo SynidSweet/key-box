@@ -279,13 +279,13 @@ test('KBOX-36 verifier: a project token cannot read its user, so it reads itself
   assert.equal(await verifier.verify(made.value, { platform: 'vercel' }), 'rejected');
 });
 
-test('KBOX-36 verifier: a stranger is rejected on 403 with invalidToken, and on 401', async () => {
+test('KBOX-36 verifier: a stranger is rejected on 403 with invalidToken, and on 401; a bare 403 (no invalidToken) is no verdict', async () => {
   fresh();
   assert.equal(await verifier.verify(lentText(WRONG_TEXT), { platform: 'vercel' }), 'rejected');
   fake.forceStatus(401);
   assert.equal(await verifier.verify(master(), { platform: 'vercel' }), 'rejected');
   fake.forceStatus(403);
-  assert.equal(await verifier.verify(master(), { platform: 'vercel' }), 'rejected');
+  assert.equal(await verifier.verify(master(), { platform: 'vercel' }), 'unreachable');
 });
 
 test('KBOX-36 verifier: no answer, a cut answer, a 5xx or a 429 is unreachable, never rejected', async () => {
@@ -328,7 +328,7 @@ test('KBOX-36 verifier: a token that reads itself but names no project is ok, an
   assert.equal(await verify({ token: { id: 't' } }, 200), 'ok');
   assert.equal(await verify({ token: { id: 't', projectId: 'prj_x' } }, 200), 'ok');
   assert.equal(await verify({ token: { id: 't', projectId: 'prj_x' } }, 404), 'rejected');
-  assert.equal(await verify({ token: { id: 't', projectId: 'prj_x' } }, 403), 'rejected');
+  assert.equal(await verify({ token: { id: 't', projectId: 'prj_x' } }, 403), 'unreachable');
   assert.equal(await verify({ token: { id: 't', projectId: 'prj_x' } }, 500), 'unreachable');
   assert.equal(await verify({}, 200), 'unreachable', 'an answer that is no token record proves nothing');
   assert.equal(await verify('text', 200), 'unreachable');

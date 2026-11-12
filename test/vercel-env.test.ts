@@ -70,15 +70,20 @@ test('KBOX-36 the project id and the name are encoded as path text and body text
   assert.equal(body.key, 'N"AME\n');
 });
 
-test('KBOX-36 the receipt names the variable and the value pushed, so two values give two receipts, and it never holds the value', async () => {
+test('KBOX-2 KBOX-36 the receipt names the variable (its id, one per name) and holds no part and no digest of either value', async () => {
   fake.reset();
   const one = await destination.push(target, 'K', lentText('vcp_KboxTestFakeOne'), master());
   const two = await destination.push(target, 'K', lentText('vcp_KboxTestFakeTwo'), master());
   const other = await destination.push(target, 'L', lentText('vcp_KboxTestFakeOne'), master());
   assert.ok(one.outcome === 'applied' && two.outcome === 'applied' && other.outcome === 'applied');
-  assert.notEqual(one.version, two.version);
-  assert.notEqual(one.version, other.version);
-  assert.equal(JSON.stringify([one, two, other]).includes('KboxTestFakeOne'), false);
+  assert.equal(one.version, two.version, 'the same variable, the same receipt');
+  assert.notEqual(one.version, other.version, 'another variable, another receipt');
+  assert.equal(one.version, fake.envs.get(PROJECT)?.find((e) => e.key === 'K')?.id);
+  const seen = JSON.stringify([one, two, other]);
+  for (const text of ['vcp_KboxTestFakeOne', 'vcp_KboxTestFakeTwo']) {
+    const bytes = Buffer.from(text);
+    for (const form of [text, bytes.toString('hex'), bytes.toString('base64'), createHash('sha256').update(bytes).digest('hex').slice(0, 16)]) assert.equal(seen.includes(form), false, form);
+  }
   assert.equal(fake.envs.get(PROJECT)?.filter((e) => e.key === 'K').length, 1, 'upsert: one variable, not two');
 });
 
