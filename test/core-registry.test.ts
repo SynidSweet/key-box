@@ -20,6 +20,7 @@ import { createRotationStore } from '../src/shell/rotation-store.ts';
 import { hashToken, newToken } from '../src/pure/tokens.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
 import { fakeEntry, issuerWith, pasteOnlyEntry } from './fakes/platform-entry.ts';
+import { fakeRelayProfile } from './fakes/relay-profile.ts';
 import { TimedClock, drive, seededRandom, tempDir } from './kit/index.ts';
 
 const SHAPE: KeyShape = { prefix: 'po-', alphabet: 'hex', coreLength: { min: 32, max: 32 }, random: true };
@@ -181,4 +182,19 @@ test('KBOX-60 through the running core, the proposal check of set_schedule and d
   assert.deepEqual([nothing.status, reason(nothing)], [422, 'nothing_to_lower']);
   const opened = await w.call('/api/proposals', { action: { kind: 'set_schedule', keyref: KEYREF, rotate_every_days: 30, grace_hours: 1 } });
   assert.equal(opened.status, 201, opened.body);
+});
+
+test('KBOX-61 through the running core, set_allow_rules is wired: the proposal check runs before an approval opens (an op the profile lacks and a pinned param are refused), a good set opens an approval', async (t) => {
+  const w = await started(t, [fakeEntry(platform, { relay: fakeRelayProfile })], false, (parts) => parts.meta.putKey({ ...adminRow, keyref: KEYREF_OF, platform: 'fake', name: 'FAKE_KEY' }));
+  assert.ok(w.core.executorKinds.has('set_allow_rules'), 'the kind is wired');
+  const reason = (reply: { readonly body: string }): unknown => (JSON.parse(reply.body) as { error: { detail?: { code?: string } } }).error.detail?.code;
+  const propose = (rules: readonly object[]) => w.call('/api/proposals', { action: { kind: 'set_allow_rules', keyref: KEYREF_OF, rules } });
+  const unknownOp = await propose([{ op: 'mint-key', params: {} }]);
+  assert.deepEqual([unknownOp.status, reason(unknownOp)], [422, 'unknown_op']);
+  const pinned = await propose([{ op: 'things-list', params: { id: 'x' } }]);
+  assert.deepEqual([pinned.status, reason(pinned)], [422, 'params_unsupported']);
+  const opened = await propose([{ op: 'things-list', params: {} }]);
+  assert.equal(opened.status, 201, opened.body);
+  const empty = await propose([]);
+  assert.equal(empty.status, 201, empty.body);
 });

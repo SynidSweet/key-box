@@ -40,7 +40,7 @@ import type { Executor } from './shell/approvals.ts';
 import { createPlatformSource } from './shell/platform-source.ts';
 import { openRotation } from './shell/rotation.ts';
 import { createRotationStore, readKeyInfo } from './shell/rotation-store.ts';
-import { createKeyActions } from './shell/key-executors.ts';
+import { createAllowRuleActions, createKeyActions } from './shell/key-executors.ts';
 import { kindOfStored, kitFor } from './shell/rotation-ports.ts';
 import type { Rotation } from './shell/rotation.ts';
 import type { PlatformSource } from './shell/rotation-ports.ts';
@@ -214,7 +214,9 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
     const source = runtime.platforms ?? registrySource;
     const checks = createGrantChecks({ registry, meta: parts.meta, keyInfo: storedRecord, master: (platform, at, items) => source.master(platform, at, items), audit: parts.audit, events: parts.events, clock });
     grantChecks = checks;
-    const keyActions = createKeyActions({ registry, source, store: createRotationStore(parts.db, clock, parts.hub), audit: parts.audit, clock });
+    const keyStore = createRotationStore(parts.db, clock, parts.hub);
+    const keyActions = createKeyActions({ registry, source, store: keyStore, audit: parts.audit, clock });
+    const allowRules = createAllowRuleActions({ registry, store: keyStore, meta: parts.meta, audit: parts.audit, clock });
     approve = openApproveCore({
       parts,
       approverStore: privateStore,
@@ -226,12 +228,13 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
       wordlist,
       vet: vetAction(registry),
       refuseUnwired: true,
-      executors: { install_update: updater.executor, rotate_key: viaRotation('rotate_key'), add_key: viaRotation('add_key'), ...keyActions.executors },
+      executors: { install_update: updater.executor, rotate_key: viaRotation('rotate_key'), add_key: viaRotation('add_key'), ...keyActions.executors, set_allow_rules: allowRules.executor },
       updateChanges: (action) => updater.changes(action),
       pageFacts: keyActions.pageFacts,
       precheck: async (action) => {
         refuseBoxKeyAction(registry, action);
         keyActions.precheck(action);
+        allowRules.precheck(action);
         await checks.atProposal(action);
       },
     });

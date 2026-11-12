@@ -41,6 +41,9 @@ export function keyrefOf(platform: string, projects: readonly string[], name: st
   return `${platform}/${slug === '' || /^\.+$/.test(slug) ? 'p' : slug}/${name}`;
 }
 
+/** The platform a key reference names: its first segment (the inverse of `keyrefOf`'s first part). */
+export const platformOfKeyref = (keyref: string): string => keyref.split('/', 1)[0] ?? '';
+
 const ALPHABETS: Readonly<Record<Alphabet, RegExp>> = {
   hex: /^[0-9a-fA-F]*$/,
   base62: /^[0-9A-Za-z]*$/,

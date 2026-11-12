@@ -4,9 +4,9 @@
 //
 // Narrower than the spec's list, on purpose (reported):
 // - PATCH and DELETE on a table are not allowed: a row filter is a query key named after a column, and a rule lists exact keys, so such a
-//   request would always be a change to every row. A key's own rules (`set_allow_rules`) may add them.
+//   request would always be a change to every row. A key's own rules (`set_allow_rules`) cannot add them: they only narrow this list (KBOX-61).
 // - Storage uploads and deletes name a bucket in the path; a generic `{bucket}` there would also match `object/sign/<bucket>` and
-//   `object/upload/sign/<bucket>`, which are denied by name. A key gets those by a rule that names its bucket.
+//   `object/upload/sign/<bucket>`, which are denied by name. Those need a rule that names its bucket, which is a profile change (an update), not a key's own rule (KBOX-61).
 // - No `limit` or `offset` query key (KBOX-13: nothing whose job is to cut a response).
 import type { AllowRule, DenyRule, RelayProfile, SampleRequest } from '../../ports/relay-profile.ts';
 import type { Lent } from '../../ports/types.ts';

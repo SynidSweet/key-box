@@ -6,7 +6,7 @@
 //
 // Narrower than a client might want, on purpose (reported): an object name with a slash is `%2F` in Cloud Storage's path, which KBOX-13 refuses,
 // so only flat object names pass; a list or a read takes only the `alt` word; an upload takes `uploadType=multipart` only (the object's name is
-// in its body). A key's own rules (`set_allow_rules`) may add more. The mustDeny paths are confirmed against the discovery documents by the probe
+// in its body). A key's own rules (`set_allow_rules`) never add more: they only narrow this list (KBOX-61). The mustDeny paths are confirmed against the discovery documents by the probe
 // (KBOX-42, `google.must-deny-discovery`, UNVERIFIED): 15 of the samples name routes no discovery document describes.
 import type { AllowRule, DenyRule, RelayProfile, SampleRequest } from '../../ports/relay-profile.ts';
 import type { Lent } from '../../ports/types.ts';

@@ -204,6 +204,16 @@ export function createMetaStore(db: DatabaseSync, clock: Clock, hub: EventSignal
       });
     },
 
+    replaceAllowRules(keyref: string, ruleIds: readonly string[]): void {
+      const rules = ruleIds.map((id) => closed(parseObject(ALLOW_RULE_SCHEMA, { keyref, rule_id: id })));
+      write(() => {
+        if (db.prepare('SELECT 1 FROM keys WHERE keyref = ?').get(keyref) === undefined) throw new ApiError('not_found');
+        db.prepare('DELETE FROM allow_rules WHERE keyref = ?').run(keyref);
+        for (const r of rules) db.prepare('INSERT INTO allow_rules (keyref, rule_id) VALUES (?, ?)').run(r.keyref, r.rule_id);
+        keyChanged(keyref);
+      });
+    },
+
     removeGrant(keyref: string, machine: string): void {
       const g = closed(parseObject(GRANT_SCHEMA, { keyref, machine }));
       write(() => {

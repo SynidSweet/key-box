@@ -143,3 +143,10 @@ test('KBOX-60 a demote page says what the fall to ordinary ends, and that a mast
   assert.deepEqual(page('admin'), [lower, 'It stays an admin key.']);
   assert.deepEqual(page(), [lower]);
 });
+
+test('KBOX-61 an empty set_allow_rules page says the relay passes every request the platform profile allows, with no list under it; a non-empty one keeps "only these"', () => {
+  const empty = renderPage(action({ kind: 'set_allow_rules', keyref: 'google/shop/GOOGLE_KEY', rules: [] }), BOX);
+  assert.deepEqual(empty.lines.slice(0, -1), ['Let the relay pass every request the google profile allows with the key google/shop/GOOGLE_KEY.']);
+  const some = renderPage(action({ kind: 'set_allow_rules', keyref: 'google/shop/GOOGLE_KEY', rules: [{ op: 'gcs-list', params: {} }] }), BOX);
+  assert.deepEqual(some.lines.slice(0, -1), ['Let the relay pass only these requests with the key google/shop/GOOGLE_KEY:', 'gcs-list']);
+});
