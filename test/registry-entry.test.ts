@@ -49,3 +49,11 @@ test('KBOX-23 KBOX-40 the class has one source: an entry with an issuer states n
   assert.equal(failure([{ id: 'pasteonly', verifier: w.verifier, shape: SHAPE, unverified: [] }]), 'classify_missing pasteonly');
   assert.equal(failure([pasteOnlyEntry(w, SHAPE)]), 'passed');
 });
+
+test('KBOX-23 KBOX-57 an entry\'s location declares only region and project: another field fails, naming the platform', () => {
+  const rule = { pattern: /[a-z]{1,8}/, requiredFor: [] };
+  assert.equal(failure([fakeEntry(w, { location: { region: rule, project: rule } })]), 'passed');
+  assert.equal(failure([fakeEntry(w, { location: {} })]), 'passed', 'an entry may declare none');
+  const zoned = { region: rule, zone: rule } as unknown as PlatformEntry['location'];
+  assert.equal(failure([fakeEntry(w, { location: zoned })]), 'location_field_unknown fake');
+});
