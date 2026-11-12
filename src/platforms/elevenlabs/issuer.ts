@@ -2,13 +2,20 @@
 // revoked by `DELETE`. The master and every created key are Lent: used inside `use(...)`, never copied, never in an error.
 import type { AdapterHttp } from '../../ports/http.ts';
 import type { IssuedKey, IssueRequest, Issuer, IssuerCapabilities } from '../../ports/issuer.ts';
-import type { Lent, PlatformKeyId } from '../../ports/types.ts';
+import type { KeyLocation, Lent, PlatformKeyId } from '../../ports/types.ts';
 import { makeLent } from '../../pure/lent.ts';
 import { ElevenLabsError, call, expectJson, isRecord, isRefusal, segment } from './api.ts';
 import { locateKey, readServiceAccounts } from './directory.ts';
+import { isRegion } from './regions.ts';
 import type { Region } from './regions.ts';
 import { classifyScope, parseScope } from './scope.ts';
 import { ELEVENLABS_SHAPE } from './shape.ts';
+
+/** KBOX-57: the region is the key's stored location, and only it; no region, or one the platform does not have, is refused before any call. */
+function regionAt(at: KeyLocation): Region {
+  if (at.region === undefined || !isRegion(at.region)) throw new ElevenLabsError('bad_scope');
+  return at.region;
+}
 
 /** The service account a key is made in: the scope's own, else the workspace's only one. */
 async function serviceAccountFor(http: AdapterHttp, region: Region, asked: string | undefined, master: Lent): Promise<string> {
@@ -35,8 +42,9 @@ export function createIssuer(http: AdapterHttp): Issuer {
     }),
     async issue(req: IssueRequest, intentName: string, master: Lent): Promise<IssuedKey> {
       const scope = parseScope(req.scope);
-      const account = await serviceAccountFor(http, scope.region, scope.serviceAccount, master);
-      const answer = await call(http, scope.region, 'POST', `/v1/service-accounts/${segment(account)}/api-keys`, master, { name: intentName, permissions: scope.permissions });
+      const region = regionAt(req.at);
+      const account = await serviceAccountFor(http, region, scope.serviceAccount, master);
+      const answer = await call(http, region, 'POST', `/v1/service-accounts/${segment(account)}/api-keys`, master, { name: intentName, permissions: scope.permissions });
       const body = expectJson(answer);
       const value = isRecord(body) ? body['xi-api-key'] : undefined;
       const keyId = isRecord(body) ? body['key_id'] : undefined;

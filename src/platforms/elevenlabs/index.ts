@@ -22,6 +22,8 @@ export function createElevenLabsEntry(deps: { readonly http: AdapterHttp }): Pla
     verifier: createVerifier(deps.http),
     denyOnly: ELEVENLABS_MUST_DENY,
     keyPageUrl: 'https://elevenlabs.io/app/developers/api-keys',
+    // KBOX-57: the region is the key's one stored location, required of every class; the issuer and lister read it from there only.
+    location: { region: { pattern: new RegExp(`^(${REGIONS.join('|')})$`), requiredFor: ['ordinary', 'admin', 'master'] } },
     hosts: REGIONS.map((r) => HOST_OF[r]),
     unverified: loadUnverified(),
   };
