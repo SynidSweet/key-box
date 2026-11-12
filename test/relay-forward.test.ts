@@ -370,10 +370,10 @@ test('KBOX-50 a request whose pass core did not confirm writes no audit row, wha
 const STORED_HOST = 'abcdefgh.projplat.example';
 const PROJECT_PATH = '/r/projkey01/rest/v1/things';
 
-/** The relay over the project-host fixture, with key `projkey01` stored at project `abcdefgh` and naming `zyxwvuts` in its projects. */
-async function projectRelay(t: TestContext, at: { readonly project?: string } | undefined = { project: 'abcdefgh' }): Promise<RelayWorld> {
+/** The relay over the project-host fixture, with key `projkey01` stored at project `abcdefgh` and naming `zyxwvuts` in its projects (`at` null stores no rotation record). */
+async function projectRelay(t: TestContext, at: { readonly project?: string } | null = { project: 'abcdefgh' }): Promise<RelayWorld> {
   const w = await relayWorld(t, { registry: PROJECT_REGISTRY });
-  w.lend.addKey({ keyref: 'projkey01', value: w.value, platform: 'projplat', grants: ['laptop'], projects: ['zyxwvuts'], ...(at === undefined ? {} : { at }) });
+  w.lend.addKey({ keyref: 'projkey01', value: w.value, platform: 'projplat', grants: ['laptop'], projects: ['zyxwvuts'], ...(at === null ? {} : { at }) });
   return w;
 }
 
@@ -397,7 +397,7 @@ test('KBOX-13 a request path or headers naming another ref change nothing: the c
 });
 
 test('KBOX-57 a project-host key with no stored project is 403 forbidden with no lend and no upstream call, audited location_mismatch', async (t) => {
-  const w = await projectRelay(t, undefined);
+  const w = await projectRelay(t, null);
   const reply = await w.call(PROJECT_PATH);
   assert.deepEqual([reply.status, JSON.parse(reply.body.toString()).error.code], [403, 'forbidden']);
   const rows = await settleAudit(w);

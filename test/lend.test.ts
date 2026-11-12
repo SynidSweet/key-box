@@ -342,11 +342,12 @@ const STORED = 'abcdefgh';
 /** A valid-looking ref the key's `projects` name: never placement (the negative control). */
 const OTHER = 'zyxwvuts';
 
-async function projectKey(t: Parameters<typeof lendWorld>[0], at: { readonly project?: string } | undefined = { project: STORED }) {
+/** `at` null stores no rotation record for the key. */
+async function projectKey(t: Parameters<typeof lendWorld>[0], at: { readonly project?: string } | null = { project: STORED }) {
   const w = await lendWorld(t, PROJECT_REGISTRY);
   const c = canary();
   const pass = w.enrol('laptop');
-  w.addKey({ keyref: 'projkey01', value: textValue(c.bytes), platform: 'projplat', grants: ['laptop'], projects: [OTHER], ...(at === undefined ? {} : { at }) });
+  w.addKey({ keyref: 'projkey01', value: textValue(c.bytes), platform: 'projplat', grants: ['laptop'], projects: [OTHER], ...(at === null ? {} : { at }) });
   return { w, pass, c };
 }
 
@@ -376,16 +377,18 @@ test('KBOX-3 a project-host lend naming the stored project is lent; another proj
   ]);
 });
 
-test('KBOX-57 a project-host key with no stored project: resolve and every lend are forbidden, audited location_mismatch, no value frame', async (t) => {
-  const { w, pass, c } = await projectKey(t, undefined);
-  assert.deepEqual(await resolveProject(w, pass), { ok: false, code: 'forbidden' });
-  assert.deepEqual(await w.client.lend(projectLend('projkey01', pass, undefined)), { ok: false, code: 'forbidden' });
-  c.assertAbsent({ answer: await rawExchange(w.socket, projectLend('projkey01', pass, OTHER)) });
-  assert.deepEqual(mismatchRows(w), [
-    ['laptop', 'projkey01', 'resolve', 'location_mismatch'],
-    ['laptop', 'projkey01', 'lend', 'location_mismatch'],
-    ['laptop', 'projkey01', 'lend', 'location_mismatch'],
-  ]);
+test('KBOX-57 a project-host key with no stored project (no record, or a record naming none): resolve and every lend are forbidden, audited location_mismatch, no value frame', async (t) => {
+  for (const at of [null, {}]) {
+    const { w, pass, c } = await projectKey(t, at);
+    assert.deepEqual(await resolveProject(w, pass), { ok: false, code: 'forbidden' });
+    assert.deepEqual(await w.client.lend(projectLend('projkey01', pass, undefined)), { ok: false, code: 'forbidden' });
+    c.assertAbsent({ answer: await rawExchange(w.socket, projectLend('projkey01', pass, OTHER)) });
+    assert.deepEqual(mismatchRows(w), [
+      ['laptop', 'projkey01', 'resolve', 'location_mismatch'],
+      ['laptop', 'projkey01', 'lend', 'location_mismatch'],
+      ['laptop', 'projkey01', 'lend', 'location_mismatch'],
+    ], JSON.stringify(at));
+  }
 });
 
 test('KBOX-57 a key deleted and re-added at another project between resolve and lend: the earlier lend is refused, a lend for the new place is not', async (t) => {
