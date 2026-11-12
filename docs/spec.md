@@ -837,7 +837,7 @@ R11 (database password rotation) waits for the deferred CI destination, which is
 | rotate | KBOX-12, KBOX-15, KBOX-16, KBOX-17, KBOX-34, KBOX-51, KBOX-52 | kernel-approve | — |
 | share | KBOX-18, KBOX-33 | kernel-store, forms | — |
 | google | KBOX-24, KBOX-41 | relay, rotate | — |
-| google-key | KBOX-55 | google | — |
+| google-key | KBOX-55 | google, shared-2 | — |
 | vercel | KBOX-26, KBOX-36 | relay, rotate | — |
 | supabase | KBOX-37 | relay, rotate | — |
 | openai | KBOX-38 | relay, rotate | — |
