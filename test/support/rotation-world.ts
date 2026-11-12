@@ -12,7 +12,7 @@ import type { EventData, EventKind } from '../../src/pure/schemas.ts';
 import { ApiError } from '../../src/pure/errors.ts';
 import { createOrchestrator } from '../../src/shell/orchestrator.ts';
 import type { NewKey, Orchestrator } from '../../src/shell/orchestrator.ts';
-import type { Point } from '../../src/shell/rotation-ports.ts';
+import type { PlatformSource, Point } from '../../src/shell/rotation-ports.ts';
 import { createReconciler } from '../../src/shell/reconcile.ts';
 import type { Reconciler } from '../../src/shell/reconcile.ts';
 import { createRotationStore } from '../../src/shell/rotation-store.ts';
@@ -59,6 +59,8 @@ export interface WorldOptions {
   readonly klass?: KeyClass;
   /** With `overlap: false`, whether the platform can take a value the box chose (true unless false). */
   readonly settable?: boolean;
+  /** Wraps the platform source the orchestrator is given (a test hands in one built from a registry entry). */
+  readonly source?: (real: PlatformSource) => PlatformSource;
 }
 
 export interface RotationWorld {
@@ -229,10 +231,7 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
     orch: undefined as never,
     reconciler: undefined as never,
     build() {
-      const deps = {
-        store,
-        meta: parts.meta,
-        vault,
+      const real: PlatformSource = {
         platform: () => ({ issuer, lister, ...(options.verifier === false ? {} : { verifier }) }),
         destination: () => ({ destination: recording.a, redeployer: recording.redeployer }),
         master: () => {
@@ -240,6 +239,15 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
           if (faults.masterAmbiguous) throw new ApiError('conflict', 'master_ambiguous');
           return platform.master();
         },
+      };
+      const source = options.source?.(real) ?? real;
+      const deps = {
+        store,
+        meta: parts.meta,
+        vault,
+        platform: source.platform,
+        destination: source.destination,
+        master: source.master,
         clock,
         scheduler: clock,
         random,
