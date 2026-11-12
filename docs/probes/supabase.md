@@ -29,6 +29,7 @@ Only `https://api.supabase.com` (the Management API) was contacted, with no `Aut
 | `supabase.relay-deny-rest-root` | KBOX-37 | none: project host, off limits | (doc: kong.yml has a separate `rest-v1-openapi` service for the exact `/rest/v1/` root, served by PostgREST) | STILL UNVERIFIED |
 | `supabase.relay-deny-profile-headers` | KBOX-37 | none: project host, off limits | (doc: PostgREST schemas docs: `Accept-Profile` for GET/HEAD, `Content-Profile` for other methods; absent header means the first schema in `db_schema`) | STILL UNVERIFIED |
 | `supabase.sb-secret-length` | KBOX-37 | none: a key can only be seen by creating one | (doc: OpenAPI example `sb_secret_live_example_9f4d3a206b2e4a7e8c91` is an illustration, not a length) | STILL UNVERIFIED |
+| `supabase.project-get-shape` | KBOX-57 | none sent: it needs a personal access token, and none exists off the box (S-705); added 2026-11-13 for the location prover | (not observed; the prover reads 200 naming the asked `ref` (or `id`) as seen, 403 and 404 as unseen, anything else as a failure) | STILL UNVERIFIED |
 
 ## Facts for the adapter
 
@@ -56,3 +57,4 @@ Only `https://api.supabase.com` (the Management API) was contacted, with no `Aut
 - `supabase.edge-secrets-get-value`: `POST /v1/projects/{ref}/secrets` with a canary name `KBOX_PROBE` and a throwaway value, then `GET`; record whether `value` equals the canary or looks like a digest (length only), then `DELETE`.
 - `supabase.relay-*` and `supabase.relay-deny-profile-headers`: on a throwaway project, send each sample path with the fake and the real publishable key through the key box relay's upstream, and with `Accept-Profile` / `Content-Profile` set to `public` and to another schema; record status only.
 - `supabase.sb-secret-length`: create several secret keys on the throwaway project and record the lengths of `api_key` (length only, never the value).
+- `supabase.project-get-shape`: with a PAT, `GET /v1/projects/{ref}` for the throwaway project (record status and whether the body names it as `ref` or `id`), for a made-up 20-letter ref, and for a project of another account (record each status: 404 or 403); names only.

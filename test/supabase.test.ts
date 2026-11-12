@@ -185,7 +185,7 @@ test('KBOX-57 at the route, a project the master cannot see (404 or 403) is reje
   assert.deepEqual(http.sent.map((r) => [r.method, r.target]), [['GET', `/v1/projects/${OTHER_REF}`], ['GET', `/v1/projects/${OTHER_REF}`], ['GET', `/v1/projects/${REF}`], ['GET', `/v1/projects/${REF}`]], 'only the proof was asked');
 });
 
-test('KBOX-57 at the route, a prover that throws (401, 5xx, a 200 about another project, transport) makes the proposal unavailable: nothing written or opened', async (t) => {
+test('KBOX-57 at the route, a prover that throws (401, 5xx, a 200 about another project, a malformed body) makes the proposal unavailable: nothing written or opened', async (t) => {
   const { w } = await supabaseRoutes(t);
   const before = rowsOf(w);
   for (const mode of ['500', 'other-ref', 'malformed'] as const) {

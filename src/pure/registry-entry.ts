@@ -1,5 +1,6 @@
 // KBOX-23: the registry checks that concern an entry as a whole rather than its relay profile.
 import type { PlatformEntry } from '../ports/platform.ts';
+import { isProjectOrigin } from './project-host.ts';
 
 export type EntryFailure =
   | 'shape_twice'
@@ -10,6 +11,7 @@ export type EntryFailure =
   | 'bad_host'
   | 'location_field_unknown'
   | 'location_prover_missing'
+  | 'project_host_without_location'
   | 'master_items_bad';
 
 /** One source of a shape and one of a class: an entry with an issuer takes each from the issuer, one without states them (KBOX-40). */
@@ -60,3 +62,10 @@ const MASTER_ITEM_PREFIX = /^[A-Za-z0-9_./-][A-Za-z0-9_./-]{0,126}:$/;
 /** KBOX-23, KBOX-57: each `masterItems` entry is a scope-item prefix ending in `:` (Vercel `team:`). */
 export const checkMasterItems = (entry: PlatformEntry): 'master_items_bad' | undefined =>
   (entry.masterItems ?? []).every((p) => MASTER_ITEM_PREFIX.test(p)) ? undefined : 'master_items_bad';
+
+/**
+ * KBOX-23, KBOX-57: a `project-host` relay profile takes its upstream host from the key's stored project, so its entry declares `project` naming a
+ * host (and with it, by `checkLocationProver`, a prover): without it no key could carry a proven project, and the relay would refuse every call.
+ */
+export const checkProjectHostLocation = (entry: PlatformEntry): 'project_host_without_location' | undefined =>
+  entry.relay !== undefined && isProjectOrigin(entry.relay.origin) && entry.location?.project?.namesHost !== true ? 'project_host_without_location' : undefined;
