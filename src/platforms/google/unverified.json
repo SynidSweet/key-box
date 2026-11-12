@@ -1,0 +1,12 @@
+[
+  "google.sts-exchange",
+  "google.generateaccesstoken-scope",
+  "google.apikeys-patch-restrictions",
+  "google.secretmanager-addversion",
+  "google.jwks-cache-duration",
+  "google.testiampermissions-path",
+  "google.colon-encoding",
+  "google.gocspx-length",
+  "google.aiza-length",
+  "google.must-deny-discovery"
+]

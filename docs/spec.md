@@ -487,7 +487,10 @@ port, no `@`, no `%`, no trailing dot). In order:
 3. **Parse once, refuse ambiguity.** From the raw request target, 400 with no upstream call if the path has an encoded `/`, `\` or `.` (`%2F`, `%5C`, `%2E`,
    either case); `%00`, a control byte or a non-ASCII byte; a raw `\`, `;`, `#`; an empty segment (`//`); a `.` or `..` segment; a malformed `%` escape. The
    remaining percent escapes are decoded per segment; rules match the **decoded segments**; the forwarded path is the decoded segments re-encoded canonically
-   (RFC 3986 unreserved literal, everything else `%XX` upper case), so the path matched is the path sent.
+   (RFC 3986 unreserved characters and the path characters `:` and `@` literal, everything else `%XX` upper case), so the path matched is the path sent.
+   `:` stays literal because Google routes custom methods only on a literal colon: `documents:runQuery` reaches the method while `documents%3ArunQuery`
+   is a 404 like a made-up verb (probe `google.colon-encoding`, 2026-11-12). A rule naming a literal `:` segment therefore matches a request that sent `%3A`
+   too, and the request forwarded is the one the rule names.
 4. **Method and query.** The method comes from the request line only; `X-HTTP-Method-Override`, `X-HTTP-Method`, `X-Method-Override` give 400. The query is split on
    `&`; 400 for a malformed `%` escape, `%00`, a control or non-ASCII byte, a raw `;` or `#`, an empty key or a duplicate key; names and values are decoded once
    and a decoded name or value still holding `%`, `&`, `=` or a control byte is refused. Each allow rule lists the exact query keys it accepts, each with a value
