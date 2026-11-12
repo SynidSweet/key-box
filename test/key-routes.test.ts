@@ -757,6 +757,21 @@ test('KBOX-55 POST /api/retired naming the box key is rejected box_made before i
   assert.equal((await w.api(`/api/retired?platform=fake&project=shop&name=${BOX_NAME}`, { bytes: Buffer.from(`fk-${'ab'.repeat(16)}`) })).status, 201);
 });
 
+test('KBOX-34 KBOX-55 POST /api/keys and POST /api/retired naming the box key by platform and name are rejected box_made under any project: nothing written, nothing opened; another name is not box_made', async (t) => {
+  const w = await routesWorld(t, { source: boxMade() });
+  const before = allRows(w);
+  const created = await w.api('/api/keys', { json: body({ name: BOX_NAME, projects: ['shop'] }) });
+  assert.deepEqual([created.status, ...code(created)], [422, 'rejected', 'box_made'], created.body);
+  const retired = await w.api(`/api/retired?platform=fake&project=shop&name=${BOX_NAME}`, { bytes: Buffer.from(`fk-${'ab'.repeat(16)}`) });
+  assert.deepEqual([retired.status, ...code(retired)], [422, 'rejected', 'box_made'], retired.body);
+  assert.equal(allRows(w), before);
+  assert.equal(opened(w), 0);
+  assert.equal(w.rotation.store.key(`fake/shop/${BOX_NAME}`), undefined);
+  // Negative control: another name on the same platform is an ordinary key.
+  const other = await w.api('/api/keys', { json: body({ name: 'MAPS_KEY', projects: ['shop'] }) });
+  assert.notEqual(code(other)[1], 'box_made', other.body);
+});
+
 test('KBOX-55 a due box key whose current generation is unproven opens nothing and writes no notice; after markProved the next tick opens exactly one rotate_key approval', async (t) => {
   const w = await routesWorld(t, { source: boxMade() });
   storedBoxKey(w, w.clock.now());

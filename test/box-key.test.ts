@@ -549,6 +549,12 @@ test('KBOX-55 refuseBoxKeyAction rejects box_made for a grant, add_destination, 
   }
 });
 
+test('KBOX-34 KBOX-55 refuseBoxKeyAction rejects an add_key naming the box key by platform and name under any project; another name passes', () => {
+  const add = (name: string) => ({ kind: 'add_key', platform: 'google', name, projects: ['shop'], scope: { items: ['read'] } }) as const;
+  assert.throws(() => refuseBoxKeyAction(ENTRIES, add('OIDC_SIGNING_KEY')), { code: 'rejected', detail: { code: 'box_made' } });
+  assert.doesNotThrow(() => refuseBoxKeyAction(ENTRIES, add('MAPS_KEY')));
+});
+
 test('KBOX-55 refuseBoxKeyAction lets everything else through: rotate_key, a set_schedule with grace, a grant of another key, the same name under a project, revoke_grant', () => {
   const fine = [
     { kind: 'rotate_key', keyref: BOX_REF },
