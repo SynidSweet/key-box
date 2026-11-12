@@ -10,7 +10,7 @@ Every unit of stages 1 to 4 is built and integrated on main: `scaffold`, `forms`
 `src/main-core.ts` now wires everything: `startCore(env, runtime)` (exported; `main()` is `startCore` plus SIGTERM/SIGINT)
 serves the machine API, the share file and, when `KB_DOMAIN` is set, the phone app, approvals, the real `TrustPort`, the update
 intake and rotation (key routes, paste, deliveries, the hourly tick, the daily reconcile, the `rotate_key` and `add_key`
-executors). `src/platforms/registry.ts` is EMPTY until the adapter units add entries, so `add_key` is `rejected` at proposal time (no platform is registered),
+executors). `createRegistry(deps)` in `src/platforms/registry.ts` builds an EMPTY list until the adapter units add entries, so `add_key` is `rejected` at proposal time (no platform is registered),
 no key has a share shape and the relay forwards nothing. A registry entry now carries everything an adapter registers (unit
 `platforms`); `add_destination`, `set_allow_rules` and the two Vercel kinds stay `rejected` until their executors are built. Spec: `docs/spec.md` (Build units table at the end). Verdicts of each unit's
 adversary: `/home/petter/.local/share/lanes/key-box/<unit>.verdict.md`.
@@ -72,7 +72,7 @@ adversary: `/home/petter/.local/share/lanes/key-box/<unit>.verdict.md`.
 
 1. The six adapter units, parallel: `google` (KBOX-24, 41), `vercel` (26, 36), `supabase` (37), `openai` (38), `elevenlabs` (39),
    `paste` (40: Anthropic, Stripe). Each COMMITS A PROBE REPORT FIRST (`docs/probes/<id>.md`) of every UNVERIFIED endpoint named in
-   its rule, then code. An adapter adds ONLY `src/platforms/<id>/` and one `PlatformEntry` line in `src/platforms/registry.ts`:
+   its rule, then code. An adapter adds ONLY `src/platforms/<id>/` and one line in `createRegistry` (`src/platforms/registry.ts`), `create<Name>Entry(deps: RegistryDeps): PlatformEntry` with `deps.http` (the adapter HTTP client: the ONLY way to call the platform) and `deps.clock`. The entry also states `hosts` (exact lower-case DNS names its own calls reach, e.g. `api.vercel.com`; the egress gate refuses any other host for caller `adapter`; a relay-profile host needs no entry in `hosts`). Entry fields:
    `issuer`, `lister`, `relay` or `denyOnly`, `verifier`, `keyPageUrl`, `destinations` (`{destination, redeployer?}` per kind; the kind
    is `destination.kind`), `shape` (only with no issuer; else the issuer's own), `unverified` (ids its probe report marks STILL
    UNVERIFIED; `test/unverified-probes.test.ts` checks it against `docs/probes/<id>.md`). `platform-source`, `main-core` (shapes,
@@ -151,3 +151,15 @@ tick and reconcile, stop), `Orchestrator.stop`, retired generations in the share
 every generation status change, and this file. Before it: `rotate` (two adversary fix rounds; verdict "declared not done" named
 the wiring and J1/J3), `update` (verdict UNSOUND, fixes merged incl. spec revision 4: approver_add binds the new approver's key
 hashes), `relay` and `share` (SOUND WITH FIXES, fixes merged). Detail of those units is in their verdict files and git history.
+
+## Adapter HTTP (unit `adapter-http`)
+
+Port `src/ports/http.ts`: `AdapterHttp.request({method, url (absolute https, default port), headers?, body?, timeoutMs?}) -> {status, headers (lower-case, repeats joined), body}`.
+Every status (3xx too, never followed) is an answer; only a transport failure rejects, as `HttpTransportError` with `code` one of `refused | unreachable | timeout | too_large | malformed`
+(an adapter maps all to `unreachable`). Defaults: timeout `HTTP_TIMEOUT_MS` 30 s for the whole call, body cap `HTTP_BODY_CAP_BYTES` 8 MiB. No header, body or host is in any error. Shell: `src/shell/adapter-http.ts`
+(`createAdapterHttp({egress, scheduler, bodyCapBytes?})`, caller `adapter`, `node:http` over the gate's socket, no agent: `createConnection` is ignored when an agent is set).
+`refusingAdapterHttp` (ports) is kb-relay's client. Gate: `EgressDeps.registryHosts` (from `PlatformEntry.hosts`, `registryHostsOf`) serve caller `adapter` only; `adapterHosts` (relay profiles) serve relay and adapter.
+`checkHosts` (`bad_host`) is part of `checkRegistry`. `main-core` builds the gate lazily (`createLazyEgress`) because the client holds the gate and the registry holds the client.
+`REGISTRY` is still exported (built with the refusing client) only because `test/registry.test.ts` and `test/unverified-probes.test.ts` import it; switch them to `createRegistry` and delete it.
+Test kit: `test/kit/adapter-http.ts` `adapterHttpTo(target)` (exported from the kit index) sends each request to a loopback server (a `fakePlatform()`), records `sent[].originalHost`.
+Tests: `test/adapter-http.test.ts`.

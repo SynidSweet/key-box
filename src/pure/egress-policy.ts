@@ -18,11 +18,17 @@ export interface EgressHost {
 
 export type HostVerdict = 'allowed' | 'undeclared_host' | 'wrong_caller';
 
-export function hostVerdict(caller: Caller, host: string, adapterHosts: readonly string[], listed: readonly EgressHost[]): HostVerdict {
+/**
+ * `adapterHosts` are the relay profiles' hosts (relay and adapter calls); `registryHosts` are the hosts of the registry entries' own
+ * calls (adapter calls only).
+ */
+export function hostVerdict(caller: Caller, host: string, adapterHosts: readonly string[], listed: readonly EgressHost[], registryHosts: readonly string[] = []): HostVerdict {
   const adapter = adapterHosts.includes(host);
+  const own = registryHosts.includes(host);
   const entries = listed.filter((e) => hostAllowed(host, [e.host]));
-  if (!adapter && entries.length === 0) return 'undeclared_host';
-  if (caller === 'relay' || caller === 'adapter') return adapter ? 'allowed' : 'wrong_caller';
+  if (!adapter && !own && entries.length === 0) return 'undeclared_host';
+  if (caller === 'relay') return adapter ? 'allowed' : 'wrong_caller';
+  if (caller === 'adapter') return adapter || own ? 'allowed' : 'wrong_caller';
   return entries.some((e) => e.caller === caller) ? 'allowed' : 'wrong_caller';
 }
 

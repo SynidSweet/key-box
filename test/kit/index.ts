@@ -23,3 +23,5 @@ export { ensureSystemUsers } from './system-users.ts';
 export type { SystemUser, SystemUsers } from './system-users.ts';
 export { directives, missingDirectives, parseTmpfiles, words } from './unit-text.ts';
 export type { TmpfilesLine } from './unit-text.ts';
+export { adapterHttpTo } from './adapter-http.ts';
+export type { FakeAdapterHttp, SentRequest } from './adapter-http.ts';
