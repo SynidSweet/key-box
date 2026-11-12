@@ -36,6 +36,8 @@ export interface ApproveCoreDeps {
   readonly executors?: Partial<Readonly<Record<ActionKind, Executor>>>;
   /** What an install_update changes, for its page (the update unit counts it). */
   readonly updateChanges?: ApprovalsDeps['updateChanges'];
+  /** What a page needs of the key it is about (KBOX-60), from the unit that owns the check. */
+  readonly pageFacts?: ApprovalsDeps['pageFacts'];
   /** A proposal-time check that needs a platform call (KBOX-24's grant check), run by the proposal route before the proposal is made. */
   readonly precheck?: (action: Action) => Promise<void>;
 }
@@ -48,6 +50,12 @@ export interface ApproveCore {
   readonly executorKinds: ReadonlySet<ActionKind>;
   readonly routes: readonly Route[];
 }
+
+/**
+ * KBOX-60 F3: the kinds whose approval is picked up again by the unit that owns it: the updater resumes an `install_update`; a `rotate_key` or
+ * `add_key` that opened its run resumes as a run. Every other kind is recorded `interrupted` if it was cut off, never executed again.
+ */
+const RESUMES_ITSELF: readonly ActionKind[] = ['install_update', 'rotate_key', 'add_key'];
 
 /** The meta destination row of an action's destination: where the key goes and who can read it there. */
 const metaDestination = (d: Destination): { kind: string; target: string; readable_by: 'api' | 'runtime' } => ({
@@ -123,7 +131,10 @@ export function openApproveCore(deps: ApproveCoreDeps): ApproveCore {
     vet: deps.refuseUnwired === true ? vetWired(executorKinds, deps.vet) : deps.vet,
     executors,
     ...(deps.updateChanges === undefined ? {} : { updateChanges: deps.updateChanges }),
+    ...(deps.pageFacts === undefined ? {} : { pageFacts: deps.pageFacts }),
   });
+  // KBOX-60 F3: opening is the start, before anything is served. An approval cut off after it was approved is recorded and never run again.
+  approvals.interruptStranded(RESUMES_ITSELF);
   const tokens = createMachineTokens({ meta: parts.meta, events: parts.events, approvals, push: deps.push, audit: parts.audit, clock: deps.clock });
   return { approvals, approvers, tokens, executorKinds, routes: approveRoutes({ approvals, approvers, tokens, meta: parts.meta, push: deps.push, ...(deps.precheck === undefined ? {} : { precheck: deps.precheck }) }) };
 }

@@ -124,3 +124,22 @@ test('KBOX-8 an approver_add page hands the six words over as data beside the li
   assert.equal(page.lines[page.fingerprint?.at ?? -1], `Compare with the new phone: ${words}`, 'the line it stands for');
   assert.equal(renderPage(add, { requester: { kind: 'box' } }).fingerprint, undefined);
 });
+
+const BOX = { requester: { kind: 'box' } } as const;
+
+test('KBOX-60 a set_schedule page adds the apps line only for grace 0 on a key an app holds; any other schedule or key keeps the one sentence', () => {
+  const noGrace = action({ kind: 'set_schedule', keyref: 'stripe', rotate_every_days: 30, grace_hours: 0 });
+  const withGrace = action({ kind: 'set_schedule', keyref: 'stripe', rotate_every_days: 30, grace_hours: 1 });
+  const apps = 'Apps still holding the old key fail until they redeploy.';
+  assert.deepEqual(renderPage(noGrace, { ...BOX, runtimeDestination: true }).lines.slice(0, 2), ['Change the key stripe every 30 days, and switch the old one off 0 hours later.', apps]);
+  assert.equal(renderPage(noGrace, BOX).lines.includes(apps), false, 'no runtime destination');
+  assert.equal(renderPage(withGrace, { ...BOX, runtimeDestination: true }).lines.includes(apps), false, 'a grace is given');
+});
+
+test('KBOX-60 a demote page says what the fall to ordinary ends, and that a master stays admin; with no class told it keeps the one sentence', () => {
+  const page = (fallsTo?: 'ordinary' | 'admin' | 'master') => renderPage(action({ kind: 'demote', keyref: 'stripe' }), { ...BOX, ...(fallsTo === undefined ? {} : { fallsTo }) }).lines.slice(0, -1);
+  const lower = 'Lower the class of the key stripe, so it changes without asking you.';
+  assert.deepEqual(page('ordinary'), [lower, 'Machines granted it lose relay use, and the leak check on your workstations stops looking for its value. Its allow rules are kept.']);
+  assert.deepEqual(page('admin'), [lower, 'It stays an admin key.']);
+  assert.deepEqual(page(), [lower]);
+});

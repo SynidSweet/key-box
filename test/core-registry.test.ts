@@ -167,3 +167,18 @@ test('KBOX-23 over the real route, a proposal of a kind with no wired executor i
     assert.equal(notAllowed, !w.core.executorKinds.has(kind), `${kind}: ${reply.status} ${reply.body}`);
   }
 });
+
+test('KBOX-60 through the running core, the proposal check of set_schedule and demote runs before an approval opens: an unknown key and nothing to lower are 422, a known key opens one', async (t) => {
+  const w = await started(t, [pasteOnlyEntry(platform, SHAPE)], true);
+  assert.ok(w.core.executorKinds.has('set_schedule') && w.core.executorKinds.has('demote'), 'both kinds are wired');
+  const reason = (reply: { readonly body: string }): unknown => (JSON.parse(reply.body) as { error: { detail?: { code?: string } } }).error.detail?.code;
+  const unknown = await w.call('/api/proposals', { action: { kind: 'set_schedule', keyref: 'pasteonly/shop/NOPE', rotate_every_days: 30, grace_hours: 1 } });
+  assert.deepEqual([unknown.status, reason(unknown)], [422, 'unknown_key']);
+  const lowerUnknown = await w.call('/api/proposals', { action: { kind: 'demote', keyref: 'pasteonly/shop/NOPE' } });
+  assert.deepEqual([lowerUnknown.status, reason(lowerUnknown)], [422, 'unknown_key']);
+  // The stored admin key has no owner mark: its class is what its entry makes it, so there is nothing to lower.
+  const nothing = await w.call('/api/proposals', { action: { kind: 'demote', keyref: KEYREF } });
+  assert.deepEqual([nothing.status, reason(nothing)], [422, 'nothing_to_lower']);
+  const opened = await w.call('/api/proposals', { action: { kind: 'set_schedule', keyref: KEYREF, rotate_every_days: 30, grace_hours: 1 } });
+  assert.equal(opened.status, 201, opened.body);
+});

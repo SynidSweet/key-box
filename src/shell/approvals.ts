@@ -53,6 +53,8 @@ export interface ApprovalsDeps {
   readonly executors: Partial<Readonly<Record<ActionKind, Executor>>>;
   /** What an install_update changes against the running release, for its page (KBOX-6); the update unit counts it. */
   readonly updateChanges?: (action: Extract<Action, { readonly kind: 'install_update' }>) => UpdateChanges | undefined;
+  /** What a page needs of the box's state that the action does not say (KBOX-60: where a demote lands, whether apps hold a key). */
+  readonly pageFacts?: (action: Action) => Pick<PageContext, 'fallsTo' | 'runtimeDestination'>;
 }
 
 export interface Proposed {
@@ -93,6 +95,11 @@ export interface Approvals {
   pending(kind: ActionKind): readonly { readonly approvalId: string; readonly action: Action }[];
   /** Marks a waiting execution (an install root has answered) finished. */
   executed(approvalId: string, result: 'done' | 'failed', reason: string): void;
+  /**
+   * KBOX-60 F3: every approval that is `approved` with no result, except those of the kinds in `except` (which resume on their own), is recorded
+   * `failed` with reason `interrupted` and raises one `box.notice` naming its title. It runs no executor: the state the approval saw may be gone.
+   */
+  interruptStranded(except: readonly ActionKind[]): void;
   /** Expires every pending proposal older than 14 days. */
   sweep(): void;
 }
@@ -235,10 +242,10 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
   };
 
   /** The facts a page shows beside the stored action: the new phone's fingerprint, an update's changes. */
-  const pageFacts = (action: Action): Pick<PageContext, 'fingerprint' | 'update'> => {
+  const pageFacts = (action: Action): Pick<PageContext, 'fingerprint' | 'update' | 'fallsTo' | 'runtimeDestination'> => {
     if (action.kind === 'approver_add') return { fingerprint: deps.approvers.fingerprint(action) };
     const update = action.kind === 'install_update' ? deps.updateChanges?.(action) : undefined;
-    return update === undefined ? {} : { update };
+    return update === undefined ? (deps.pageFacts?.(action) ?? {}) : { update };
   };
 
   /** An approver_add page is shown, and can be approved, only while the device it names waits (KBOX-7: box-originated). */
@@ -271,12 +278,27 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
   };
 
   /** An approval that ends without being executed keeps no proof: root never spent it, so it must not outlive the approval. */
+  const recordResult = (approvalId: string, result: 'done' | 'failed', reason: string): void => {
+    db.prepare("UPDATE approvals SET result = ?, result_code = ?, proof_json = CASE WHEN ? = 'failed' THEN NULL ELSE proof_json END WHERE approval_id = ?").run(result, reason, result, approvalId);
+    insertEvent(db, deps.clock.now(), 'approval.executed', { approval_id: approvalId, result, reason_code: reason });
+  };
   const executed = (approvalId: string, result: 'done' | 'failed', reason: string): void => {
-    write(() => {
-      db.prepare("UPDATE approvals SET result = ?, result_code = ?, proof_json = CASE WHEN ? = 'failed' THEN NULL ELSE proof_json END WHERE approval_id = ?").run(result, reason, result, approvalId);
-      insertEvent(db, deps.clock.now(), 'approval.executed', { approval_id: approvalId, result, reason_code: reason });
-    });
+    write(() => recordResult(approvalId, result, reason));
     audit('approval.executed', approvalId, { result, reason_code: reason });
+  };
+
+  const interruptStranded: Approvals['interruptStranded'] = (except) => {
+    const marks = except.map(() => '?').join(', ');
+    const stranded = db
+      .prepare(`SELECT approval_id, title FROM approvals WHERE status = 'approved' AND result IS NULL ${except.length === 0 ? '' : `AND kind NOT IN (${marks})`} ORDER BY decided_at, approval_id`)
+      .all(...except) as unknown as { approval_id: string; title: string }[];
+    for (const { approval_id, title } of stranded) {
+      write(() => {
+        recordResult(approval_id, 'failed', 'interrupted');
+        insertEvent(db, deps.clock.now(), 'box.notice', { code: 'approval_interrupted', text: 'approval interrupted', title });
+      });
+      audit('approval.executed', approval_id, { result: 'failed', reason_code: 'interrupted' });
+    }
   };
 
   const decide: Approvals['decide'] = async (approvalId, decision, proof) => {
@@ -317,6 +339,7 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
     decide,
     executed,
     sweep,
+    interruptStranded,
     enrolStatus(tokenSha256) {
       sweep();
       if (db.prepare('SELECT 1 AS one FROM machines WHERE token_sha256 = ?').get(tokenSha256) !== undefined) return 'approved';

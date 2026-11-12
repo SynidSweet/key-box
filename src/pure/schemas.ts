@@ -145,7 +145,7 @@ export function parseUpstreamJson(textOf: string): unknown {
 
 // --- events (KBOX-31): the closed list of kinds and their data --------------------------------------------------------
 
-export const BOX_NOTICE_TEXTS = ['credential withheld', 'idle near', 'orphan key found', 'delivery unacknowledged', 'rotation skipped', 'grant suspended'] as const;
+export const BOX_NOTICE_TEXTS = ['credential withheld', 'idle near', 'orphan key found', 'delivery unacknowledged', 'rotation skipped', 'grant suspended', 'approval interrupted'] as const;
 
 export const EVENT_SCHEMAS = {
   'approval.opened': { approval_id: text(NAME), approval_kind: text(CODE), title: text(TITLE), slot: text(NAME), revision: int() },
@@ -160,7 +160,7 @@ export const EVENT_SCHEMAS = {
   'machine.changed': { label: text(LABEL), change: oneOf('enrolled', 'revoked') },
   'token.new_network': { label: text(LABEL), network: text(NETWORK) },
   'update.state': { approval_id: text(NAME), state: oneOf('pending', 'installed', 'rolled_back') },
-  'box.notice': { code: text(CODE), text: oneOf(...BOX_NOTICE_TEXTS) },
+  'box.notice': { code: text(CODE), text: oneOf(...BOX_NOTICE_TEXTS), title: optional(text(TITLE)) },
 } as const satisfies Readonly<Record<string, Schema>>;
 
 export type EventKind = keyof typeof EVENT_SCHEMAS;
@@ -205,6 +205,10 @@ export const AUDIT_SCHEMAS = {
   'token.revoked': {},
   'key.issued': {},
   'key.revoked': {},
+  /** KBOX-60: an approved set_schedule was written; the row's ref is the keyref. */
+  'key.schedule_set': { rotate_every_days: int(1), grace_hours: int() },
+  /** KBOX-60: an approved demote was written; the class the key had and the one it has now. */
+  'key.demoted': { from: oneOf('ordinary', 'admin', 'master'), to: oneOf('ordinary', 'admin', 'master') },
   /** KBOX-55: core did not make a box-made key at start because another master row of its platform exists; the row's ref is the box key. */
   'box_key.conflict': {},
   // rotate (KBOX-51, KBOX-17, KBOX-34): the row's ref is the key reference (a delivery id for `delivery.acked`).

@@ -44,8 +44,8 @@ export function keyConfigFor(source: PlatformSource, platform: string): KeyConfi
 }
 
 /** KBOX-15: the class of scope items at a location, never below the class without it, raised by the owner's mark. */
-export const classOfKey = (config: KeyConfig, items: readonly string[], at: KeyLocation, mark: KeyClass | undefined): KeyClass =>
-  flooredClass(config.classify({ items }, {}), config.classify({ items }, at), mark);
+export const classOfKey = (classify: KeyConfig['classify'], items: readonly string[], at: KeyLocation, mark: KeyClass | undefined): KeyClass =>
+  flooredClass(classify({ items }, {}), classify({ items }, at), mark);
 
 /** The location the action names, `{}` when it names none. */
 export const locationOf = (action: AddKey): KeyLocation => action.location ?? {};
@@ -56,7 +56,7 @@ export const locationOf = (action: AddKey): KeyLocation => action.location ?? {}
  */
 export function placedKey(config: KeyConfig, action: AddKey): { readonly klass: KeyClass; readonly at: KeyLocation } {
   const at = locationOf(action);
-  const klass = classOfKey(config, action.scope.items, at, action.mark_admin === true ? 'admin' : undefined);
+  const klass = classOfKey(config.classify, action.scope.items, at, action.mark_admin === true ? 'admin' : undefined);
   const verdict = checkLocation(config.location, at, klass, action.scope.items);
   if (verdict !== 'ok') throw new ApiError('rejected', verdict);
   return { klass, at };

@@ -3,7 +3,7 @@
 // plain text. The page is lines of plain text: the app shows each line as text, never as markup.
 import type { Action, Destination } from './actions.ts';
 import type { Requester } from './slots.ts';
-import type { KeyLocation } from '../ports/types.ts';
+import type { KeyClass, KeyLocation } from '../ports/types.ts';
 
 /** The fixed sentences of the spec's "Fixed words" list that this unit's pages carry. */
 export const FIXED = {
@@ -16,6 +16,12 @@ export const FIXED = {
   deviceKeyWarning: 'This phone keeps a device key that cannot be copied. If you reinstall the app or clear its data, you will need to recover.',
   withheld: 'response withheld: it carried a key',
   upstreamRefused: 'upstream refused the key',
+  /** KBOX-60: a set_schedule with no grace, on a key an app's runtime holds. */
+  noGraceApps: 'Apps still holding the old key fail until they redeploy.',
+  /** KBOX-60: a demote that ends in ordinary: relay use ends (the grants go), the workstation leak check stops watching its value (the share file drops it), the allow rules stay. */
+  demoteToOrdinary: 'Machines granted it lose relay use, and the leak check on your workstations stops looking for its value. Its allow rules are kept.',
+  /** KBOX-60: a demote of a master whose scope still makes it an admin key. */
+  demoteStaysAdmin: 'It stays an admin key.',
 } as const;
 
 /** KBOX-51 step 10 with neither a platform key id nor a retirer: the notice that asks the owner to end the old key (reason `owner_ends`). */
@@ -88,7 +94,7 @@ function sentences(action: Action, ctx: PageContext): string[] {
     case 'rotate_key':
       return [`Change the key ${action.keyref} for a new one.`];
     case 'demote':
-      return [`Lower the class of the key ${action.keyref}, so it changes without asking you.`];
+      return [`Lower the class of the key ${action.keyref}, so it changes without asking you.`, ...(ctx.fallsTo === 'ordinary' ? [FIXED.demoteToOrdinary] : ctx.fallsTo === 'admin' ? [FIXED.demoteStaysAdmin] : [])];
     case 'grant':
       return [`Let the machine ${action.machine} use the key ${action.keyref}.`];
     case 'revoke_grant':
@@ -103,7 +109,10 @@ function sentences(action: Action, ctx: PageContext): string[] {
         ...action.rules.map((r) => `${r.op}${Object.keys(r.params).length === 0 ? '' : ` (${Object.entries(r.params).map(([k, v]) => `${k} = ${v}`).join(', ')})`}`),
       ];
     case 'set_schedule':
-      return [`Change the key ${action.keyref} every ${action.rotate_every_days} days, and switch the old one off ${action.grace_hours} hours later.`];
+      return [
+        `Change the key ${action.keyref} every ${action.rotate_every_days} days, and switch the old one off ${action.grace_hours} hours later.`,
+        ...(action.grace_hours === 0 && ctx.runtimeDestination === true ? [FIXED.noGraceApps] : []),
+      ];
     case 'vercel_set_domain':
       return [
         action.op === 'add'
@@ -160,6 +169,10 @@ export interface PageContext {
   readonly fingerprint?: string;
   /** install_update: what it changes, counted against the running release. */
   readonly update?: UpdateChanges;
+  /** demote (KBOX-60): the class the key falls to; absent when the box could not tell. */
+  readonly fallsTo?: KeyClass;
+  /** set_schedule (KBOX-60): the key has a destination the apps' runtime reads. */
+  readonly runtimeDestination?: true;
 }
 
 /** The approving phone compares this line with the new phone; without a fingerprint the page says not to approve. */

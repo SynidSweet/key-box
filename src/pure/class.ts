@@ -22,6 +22,11 @@ export function raiseClass(current: KeyClass, requested: KeyClass): { readonly o
   return RANK[requested] >= RANK[current] ? { ok: true, class: requested } : { ok: false };
 }
 
+/** KBOX-60: the class a demote lands on: `computed` (the class without the owner's mark) when it is below `current`; undefined when there is nothing to lower. */
+export function lowerClass(current: KeyClass, computed: KeyClass): KeyClass | undefined {
+  return RANK[computed] < RANK[current] ? computed : undefined;
+}
+
 /** A destination whose own API can read the value back may hold an ordinary key only. */
 export function admitDestination(klass: KeyClass, readableBy: 'api' | 'runtime'): boolean {
   return klass === 'ordinary' || readableBy === 'runtime';

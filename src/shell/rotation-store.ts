@@ -244,6 +244,13 @@ export interface RotationStore {
   /** Sets the status the snapshot shows (and the current generation) and writes `key.changed`. */
   setStatus(keyref: string, status: MetaKey['status'], genCurrent?: number): void;
   markRotated(keyref: string, at: number): void;
+  /** KBOX-60: the key's schedule (`rotate_every_days`, `grace_hours`) and its `key.changed`, in one transaction. `not_found` for no such key; nothing else is touched. */
+  setSchedule(keyref: string, rotateEveryDays: number, graceHours: number): void;
+  /**
+   * KBOX-60: a demote in one transaction: the owner's mark is cleared, the key is stored with class `to`, a fall to `ordinary` drops the key's
+   * grants (its allow rules stay), and `key.changed` is written. `not_found` for no such key.
+   */
+  demoteKey(keyref: string, to: KeyClass): void;
 
   putGen(gen: NewGen): void;
   /** Records the first successful STS exchange signed with the generation: writes only while `provedAt` is null, so a second call keeps the first time. `not_found` for no such generation. */
@@ -391,6 +398,20 @@ export function createRotationStore(db: DatabaseSync, clock: Clock, hub: EventSi
     },
     markRotated(keyref, at) {
       write(() => void db.prepare('UPDATE rotation_keys SET rotated_at = ? WHERE keyref = ?').run(at, keyref));
+    },
+    setSchedule(keyref, rotateEveryDays, graceHours) {
+      write(() => {
+        if (db.prepare('UPDATE keys SET rotate_every_days = ?, grace_hours = ? WHERE keyref = ?').run(rotateEveryDays, graceHours, keyref).changes === 0) throw new ApiError('not_found');
+        keyChanged(keyref);
+      });
+    },
+    demoteKey(keyref, to) {
+      write(() => {
+        if (db.prepare('UPDATE keys SET class = ? WHERE keyref = ?').run(to, keyref).changes === 0) throw new ApiError('not_found');
+        db.prepare('UPDATE rotation_keys SET mark_admin = 0 WHERE keyref = ?').run(keyref);
+        if (to === 'ordinary') db.prepare('DELETE FROM grants WHERE keyref = ?').run(keyref);
+        keyChanged(keyref);
+      });
     },
 
     putGen(gen) {

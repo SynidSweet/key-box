@@ -244,6 +244,10 @@ export function createShareWriter(deps: ShareWriterDeps): ShareWriter {
 
   function follow(): void {
     let cursor = deps.events.head();
+    const adminOrMaster = (): Set<string> => new Set(deps.meta.snapshot().keys.filter((k) => k.class !== 'ordinary').map((k) => k.keyref));
+    // The keys last seen as admin or master (KBOX-60): a key that stops being one (a demote) is no longer in the file's next version, so its
+    // change is a change to watch although the key is now ordinary.
+    let seen = adminOrMaster();
     stopListening = deps.hub.subscribe(() => {
       const rows = deps.events.after(cursor);
       const last = rows[rows.length - 1];
@@ -254,9 +258,11 @@ export function createShareWriter(deps: ShareWriterDeps): ShareWriter {
       const classes = new Map(deps.meta.snapshot().keys.map((k) => [k.keyref, k.class]));
       // A key the box no longer lists may have been an admin key: look.
       const watched = changed.some((r) => {
-        const keyClass = classes.get(String(r.data['keyref']));
-        return keyClass === undefined || keyClass === 'admin' || keyClass === 'master';
+        const keyref = String(r.data['keyref']);
+        const keyClass = classes.get(keyref);
+        return keyClass === undefined || keyClass === 'admin' || keyClass === 'master' || seen.has(keyref);
       });
+      seen = adminOrMaster();
       if (!watched) return;
       stale = true;
       inBackground();
