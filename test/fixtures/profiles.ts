@@ -133,5 +133,19 @@ export const projectProfile: RelayProfile = {
   envForClients: (relayUrl: string): Record<string, string> => ({ PROJPLAT_URL: relayUrl }),
 };
 
-/** The relay test registry plus the project-host fixture platform. */
-export const PROJECT_REGISTRY: readonly PlatformEntry[] = [...TEST_REGISTRY, { id: 'projplat', relay: projectProfile, shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] }];
+/**
+ * The relay test registry plus the project-host fixture platform. As KBOX-23 requires of a project-host profile's entry, it declares `project`
+ * naming the host (a ref of the profile's length), and so a prover; nothing in the relay tests proposes a key, so the prover is never asked.
+ */
+export const PROJECT_REGISTRY: readonly PlatformEntry[] = [
+  ...TEST_REGISTRY,
+  {
+    id: 'projplat',
+    relay: projectProfile,
+    shape: NO_ISSUER_SHAPE,
+    classify: NO_ISSUER_CLASSIFY,
+    location: { project: { pattern: /^[a-z]{8}$/, requiredFor: ['ordinary', 'admin'], namesHost: true } },
+    locationProver: { prove: () => Promise.reject(new Error('the project-host fixture proves no location')) },
+    unverified: [],
+  },
+];

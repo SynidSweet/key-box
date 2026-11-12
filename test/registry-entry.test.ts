@@ -8,7 +8,7 @@ import { checkRegistry } from '../src/pure/profile.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
 import { fakeEntry, pasteOnlyEntry } from './fakes/platform-entry.ts';
 import { RecordingDestination } from './fakes/recording-destination.ts';
-import { pathProfile } from './fixtures/profiles.ts';
+import { pathProfile, projectProfile } from './fixtures/profiles.ts';
 import { seededRandom } from './kit/index.ts';
 
 const SHAPE: KeyShape = { prefix: 'po-', alphabet: 'hex', coreLength: { min: 32, max: 32 }, random: true };
@@ -69,4 +69,17 @@ test('KBOX-23 KBOX-57 an entry whose location names a host has a locationProver:
 test('KBOX-23 KBOX-57 each masterItems entry is a scope-item prefix ending in a colon: team: passes, a bare word, a lone colon or a bad character fails', () => {
   assert.equal(failure([fakeEntry(w, { masterItems: ['team:'] })]), 'passed');
   for (const bad of ['team', ':', 'te am:', 'team:x', '']) assert.equal(failure([fakeEntry(w, { masterItems: ['team:', bad] })]), 'master_items_bad fake', JSON.stringify(bad));
+});
+
+test('KBOX-23 KBOX-57 an entry whose relay profile has a project-host origin declares project naming a host: none, a project naming no host, or only a region fails, naming the platform', () => {
+  const relay = { ...projectProfile, platform: 'fake' };
+  const prover = { prove: () => Promise.resolve('seen' as const) };
+  const hostProject = { pattern: /^[a-z]{8}$/, requiredFor: ['admin' as const], namesHost: true as const };
+  assert.equal(failure([fakeEntry(w, { relay, location: { project: hostProject }, locationProver: prover })]), 'passed');
+  assert.equal(failure([fakeEntry(w, { relay, location: {} })]), 'project_host_without_location fake', 'no location');
+  assert.equal(failure([fakeEntry(w, { relay })]), 'project_host_without_location fake', 'a region that names no host');
+  assert.equal(failure([fakeEntry(w, { relay, location: { project: { pattern: /^[a-z]{8}$/, requiredFor: ['admin'] } } })]), 'project_host_without_location fake', 'a project naming no host');
+  assert.equal(failure([fakeEntry(w, { relay, location: { region: hostProject }, locationProver: prover })]), 'project_host_without_location fake', 'a host-naming region is not the project');
+  // Positive control: a relay profile with a fixed origin needs no location.
+  assert.equal(failure([fakeEntry(w, { relay: { ...pathProfile, platform: 'fake' }, location: {} })]), 'passed');
 });
