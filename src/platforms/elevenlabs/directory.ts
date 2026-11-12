@@ -48,14 +48,16 @@ export async function readServiceAccounts(http: AdapterHttp, region: Region, mas
  * other kind stops the run, since a region that could not be read proves nothing. Throws `rejected` when every region refused.
  */
 export async function inEachRegion<T>(regions: readonly Region[], read: (region: Region) => Promise<T>): Promise<{ readonly region: Region; readonly value: T }[]> {
-  const answered: { region: Region; value: T }[] = [];
-  for (const region of regions) {
+  const attempt = async (region: Region): Promise<{ readonly region: Region; readonly value: T } | 'refused'> => {
     try {
-      answered.push({ region, value: await read(region) });
+      return { region, value: await read(region) };
     } catch (e) {
-      if (!(e instanceof ElevenLabsError && e.code === 'rejected')) throw e;
+      if (e instanceof ElevenLabsError && e.code === 'rejected') return 'refused';
+      throw e;
     }
-  }
+  };
+  const attempts = await Promise.all(regions.map(attempt));
+  const answered = attempts.flatMap((a) => (a === 'refused' ? [] : [a]));
   if (answered.length === 0) throw new ElevenLabsError('rejected');
   return answered;
 }

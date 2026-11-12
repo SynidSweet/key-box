@@ -61,19 +61,20 @@ const json = (res: ServerResponse, status: number, body: unknown): void => {
 const refusal = (res: ServerResponse, presented: string): void =>
   json(res, 401, { detail: { type: 'authentication_error', code: 'unauthorized', message: `Invalid API key: ${presented}`, status: 'invalid_api_key', request_id: 'req-fake' } });
 
-function bodyOf(req: IncomingMessage): Promise<unknown> {
-  return new Promise((resolve) => {
+const parsed = (text: string): unknown => {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return 'not json';
+  }
+};
+
+const bodyOf = (req: IncomingMessage): Promise<unknown> =>
+  new Promise((resolve) => {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => void chunks.push(c));
-    req.on('end', () => {
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown);
-      } catch {
-        resolve(undefined);
-      }
-    });
+    req.on('end', () => resolve(parsed(Buffer.concat(chunks).toString('utf8'))));
   });
-}
 
 function handle(state: RegionState, req: IncomingMessage, res: ServerResponse, body: unknown): void {
   const presented = String(req.headers['xi-api-key'] ?? '');

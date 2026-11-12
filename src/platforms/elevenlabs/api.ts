@@ -21,16 +21,18 @@ export class ElevenLabsError extends Error {
 
 export interface Answer {
   readonly status: number;
-  /** The body as JSON, or undefined when it is not JSON. */
+  /** The body as JSON, or `NOT_JSON` when it is not JSON. */
   readonly json: unknown;
 }
+
+/** The `json` of an answer whose body is not JSON: an answer with no readable content; the caller decides what that means for its call. */
+export const NOT_JSON: unique symbol = Symbol('not-json');
 
 const parseBody = (body: Uint8Array): unknown => {
   try {
     return JSON.parse(Buffer.from(body).toString('utf8')) as unknown;
   } catch {
-    // A body that is not JSON is an answer with no readable content; the caller decides what that means for its call.
-    return undefined;
+    return NOT_JSON;
   }
 };
 
@@ -57,7 +59,7 @@ export const isRefusal = (answer: Answer): boolean => answer.status === 401 || a
 /** The answer's JSON when the status is 2xx; otherwise the fixed failure of its status class. */
 export function expectJson(answer: Answer): unknown {
   if (answer.status >= 200 && answer.status < 300) {
-    if (answer.json === undefined) throw new ElevenLabsError('malformed');
+    if (answer.json === NOT_JSON) throw new ElevenLabsError('malformed');
     return answer.json;
   }
   throw new ElevenLabsError(isRefusal(answer) ? 'rejected' : 'platform_error', answer.status);

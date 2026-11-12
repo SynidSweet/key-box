@@ -1,7 +1,7 @@
 // KBOX-39: the ElevenLabs adapter. Master = a workspace admin's key with service-account rights, pasted. Every call goes through `deps.http`.
 import { readFileSync } from 'node:fs';
 import type { PlatformEntry } from '../../ports/platform.ts';
-import type { RegistryDeps } from '../registry.ts';
+import type { AdapterHttp } from '../../ports/http.ts';
 import { ELEVENLABS_MUST_DENY } from './deny.ts';
 import { createIssuer } from './issuer.ts';
 import { createLister } from './lister.ts';
@@ -14,7 +14,7 @@ function loadUnverified(): readonly string[] {
   return parsed;
 }
 
-export function createElevenLabsEntry(deps: RegistryDeps): PlatformEntry {
+export function createElevenLabsEntry(deps: { readonly http: AdapterHttp }): PlatformEntry {
   return {
     id: 'elevenlabs',
     issuer: createIssuer(deps.http),
