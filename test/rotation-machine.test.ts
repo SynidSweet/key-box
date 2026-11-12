@@ -130,3 +130,18 @@ test('KBOX-51 an intent key is absent only on a complete listing of the key loca
   assert.equal(intentAbsent({ complete: true, at: { region: 'us', project: 'shop' }, keys: [other] }, at, named.name), false, 'a listing of another region');
   assert.equal(intentAbsent(undefined, at, named.name), false, 'a listing that failed');
 });
+
+test('KBOX-51 a ref long enough to hit the cap gives a name of exactly 63 characters that keeps its _g<N>_<run8> suffix (Google displayName takes 63)', () => {
+  const name = intentName(`google/${'a'.repeat(120)}/OPENAI_KEY`, 12, 'run_0123456789abcdef');
+  assert.equal(name.length, 63);
+  assert.ok(name.startsWith('kbox_google_aaa') && name.endsWith('_g12_01234567'));
+});
+
+test('KBOX-51 property: whatever the ref, the name is at most 63 characters', () => {
+  const seed = seedFor(process.env);
+  checkProperty(seed, 200, (rng) => {
+    const ref = Array.from({ length: 1 + rng.int(150) }, () => 'abcXYZ019/._-'[rng.int(13)] ?? 'a').join('');
+    const run = `run_${Buffer.from(rng.bytes(8)).toString('hex')}`;
+    assert.ok(intentName(ref, 1 + rng.int(100000), run).length <= 63);
+  });
+});

@@ -13,6 +13,7 @@ import type { PlatformEntry } from '../src/ports/platform.ts';
 import type { RelayProfile } from '../src/ports/relay-profile.ts';
 import type { KeyLocation, Lent } from '../src/ports/types.ts';
 import { matchesShape } from '../src/pure/class.ts';
+import { intentAbsent, intentName } from '../src/pure/rotation-machine.ts';
 import { checkRegistry } from '../src/pure/profile.ts';
 import { GoogleError } from '../src/platforms/google/errors.ts';
 import { createGoogleEntry } from '../src/platforms/google/index.ts';
@@ -843,4 +844,16 @@ test('KBOX-59 KBOX-41 a key whose scope holds an sa: item is refused by the issu
   const failed = world.events('rotation.failed');
   assert.deepEqual(failed.map((e) => [e.data['step'], e.data['reason_code']]), [['issuing', 'issue_failed']]);
   assert.equal(w.calls().length, 0, 'no mint and no call: the issuer refused the scope first');
+});
+
+test('KBOX-51 KBOX-59 a long keyref\'s intent name is sent whole as displayName and listed back as the same name, so reconcile finds the key (intentAbsent is false)', async () => {
+  w.reset();
+  const name = intentName(`google/${P1}/${'LONG_KEY_NAME_'.repeat(8)}`, 2, 'run_0123456789abcdef');
+  assert.equal(name.length, 63);
+  const issued = await issuerOf().issue({ scope: SCOPE, at: at(P1) }, name, w.master);
+  assert.equal(w.fake.apis.keysOf(P1)[0]?.displayName, name, 'sent whole');
+  const listing = await listerOf().listAt(at(P1), w.master);
+  assert.equal(listing.keys[0]?.name, name);
+  assert.equal(intentAbsent(listing, at(P1), name), false);
+  assert.ok(issued);
 });

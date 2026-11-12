@@ -32,9 +32,10 @@ export function defaultGraceHours(readableBy: readonly ('api' | 'runtime')[]): n
   return readableBy.includes('runtime') ? 24 : 1;
 }
 
-const INTENT_MAX = 64;
+// Google's `displayName` takes 63 characters and reconcile matches the name exactly, so no intent name may be longer.
+const INTENT_MAX = 63;
 
-/** `kbox_<ref>_g<N>_<run8>`: lower case, only `[a-z0-9_]`, at most 64 characters; the ref part gives way so the suffix stays whole. */
+/** `kbox_<ref>_g<N>_<run8>`: lower case, only `[a-z0-9_]`, at most 63 characters; the ref part gives way so the suffix stays whole. */
 export function intentName(keyref: string, gen: number, runId: string): string {
   const suffix = `_g${gen}_${runId.slice('run_'.length, 'run_'.length + 8)}`;
   const ref = keyref.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
