@@ -429,7 +429,7 @@ update page carries the fixed sentence byte for byte; the hash matches a vector 
 
 **`KBOX-21` Not looking idle.** Source: design §8. Oracle may reclaim an Always Free instance when, over 7 days, CPU p95, network and (A1 only) memory are all
 under 20% (VERIFIED); whether pay-as-you-go accounts are exempt is UNVERIFIED, so the box assumes they are not. The A1 box is 1 OCPU and 2 GB. kb-core keeps a
-touched working reserve so memory use stays above 30% of `MemTotal` (the design says above 25%; the 5 points of margin are decided here); it computes
+touched working reserve so memory use stays above 30% of `MemTotal` (the design says above 25%; the 5 points of margin are decided here). Core's idle watch reads the `/proc` files its runtime names (the system runtime names `/proc`); a core started with a runtime that names none (an in-process test core) runs no idle watch and holds no reserve. It computes
 the same three figures over a rolling 7 days from `/proc` (CPU from `/proc/stat`, memory from `/proc/meminfo`, network from `/proc/net/dev` against the nominal
 link speed in `deploy/runtime.config.json`) and sends a Web Push if all three come within 5 points of the 20% line. How Oracle computes its network figure and
 whether the figures here match its `MemoryUtilization` metric are UNVERIFIED; the builder measures them on the real instance and reports (design §12). The box
