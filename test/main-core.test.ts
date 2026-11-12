@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import type { KeyRow } from '../src/ports/meta.ts';
 import type { KeyLister } from '../src/ports/issuer.ts';
+import type { KeyShape } from '../src/ports/types.ts';
 import type { PlatformEntry } from '../src/ports/platform.ts';
 import { intentName } from '../src/pure/rotation-machine.ts';
 import { hashToken, newToken } from '../src/pure/tokens.ts';
@@ -381,4 +382,35 @@ test('KBOX-57 core as the service wires it resolves a project-host key to its st
   });
   const resolved = await createLendClient(w.lendSocket).resolve({ op: 'resolve', token_hash: hashToken(pass), keyref: 'projkey01', network: '203.0.113.0/24' });
   assert.deepEqual(resolved, { ok: true, label: 'laptop', platform: 'projplat', project: 'abcdefgh' });
+});
+
+test('KBOX-58 KBOX-33 core scores each key of the share file under its own shape: an acct master under the shape its issuer gives acct keys, an admin key under the platform shape', async (t) => {
+  const tk: KeyShape = { prefix: 'tk-', alphabet: 'hex', coreLength: { min: 32, max: 32 }, random: true };
+  const acct: KeyShape = { prefix: 'ac-', alphabet: 'hex', coreLength: { min: 40, max: 40 }, random: true };
+  const has = (scope: { readonly [k: string]: unknown }, item: string): boolean => Array.isArray(scope['items']) && scope['items'].includes(item);
+  const platform = new FakePlatformWorld(seededRandom(4));
+  const issuer = issuerWith(platform.issuer, {
+    shape: tk,
+    classify: (scope) => (has(scope, 'acct') ? 'master' : 'admin'),
+    shapeFor: (scope) => (has(scope, 'acct') ? acct : undefined),
+  });
+  const entry: PlatformEntry = { id: 'twokind', issuer, lister: platform.lister, verifier: platform.verifier, unverified: [] };
+  const keys = [
+    { keyref: 'twokind/shop/ACCT_TOKEN', name: 'ACCT_TOKEN', class: 'master', items: ['acct'], value: `ac-${'3f9a1c07be'.repeat(4)}` },
+    { keyref: 'twokind/shop/ADMIN_KEY', name: 'ADMIN_KEY', class: 'admin', items: ['admin'], value: `tk-${'7d20e5b9c1a48f36'.repeat(2)}` },
+  ] as const;
+  const w = await started(t, {
+    registry: [entry],
+    seed: ({ meta, vault, clock, rotation }) => {
+      for (const k of keys) {
+        meta.putKey({ ...adminRow(k.keyref), platform: 'twokind', name: k.name, class: k.class });
+        vault.put(k.keyref, 1, Buffer.from(k.value));
+        rotation.putKeyInfo(k.keyref, { scopeItems: k.items, location: {}, rotatedAt: clock.now(), markAdmin: false });
+      }
+    },
+  });
+  const reply = await w.call('/api/share');
+  assert.equal(reply.status, 200, reply.body);
+  const body = JSON.parse(Buffer.from((JSON.parse(reply.body) as { body_b64: string }).body_b64, 'base64').toString('utf8')) as { coverage: { name: string; tier: string }[] };
+  assert.deepEqual(body.coverage.map((c) => [c.name, c.tier]).sort(), [['ACCT_TOKEN', 'windowed'], ['ADMIN_KEY', 'windowed']]);
 });

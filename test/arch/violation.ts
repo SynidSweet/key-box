@@ -43,6 +43,8 @@ export type ViolationCode =
   | 'probe-missing'
   | 'unverified-list'
   | 'probe-item-missing'
+  // KBOX-58: a kit's or entry's verifier is read only through verifierFor
+  | 'verifier-read'
   // KBOX-23
   | 'adapter-imports-registry'
   // the checks could not read the tree they were given

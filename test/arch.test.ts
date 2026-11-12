@@ -25,6 +25,7 @@ import {
 } from './arch/index.ts';
 import type { Violation, ViolationCode } from './arch/index.ts';
 import { checkAdapterRegistryImport } from './arch/adapter-registry.ts';
+import { checkVerifierReads } from './arch/verifier-reads.ts';
 import { GOOD_PACKAGE, GOOD_TSCONFIG, REPO_ROOT, goodTree, materialise, withChanges, withPackage, withTsconfig } from './arch/fixture.ts';
 import type { Tree } from './arch/fixture.ts';
 
@@ -500,6 +501,7 @@ const REPO_CHECKS: [string, string, Check][] = [
   ['KBOX-56', 'migrations', checkMigrations],
   ['KBOX-27', 'tsc --noEmit', checkTypecheck],
   ['KBOX-23', 'adapter registry imports', checkAdapterRegistryImport],
+  ['KBOX-58', 'verifier reads', checkVerifierReads],
 ];
 
 for (const [rule, name, check] of REPO_CHECKS) {
@@ -665,5 +667,39 @@ test('KBOX-56 an additive migration (new nullable column, new NOT NULL column wi
       'CREATE INDEX IF NOT EXISTS extra_id ON extra (id)',
     ]),
     checkMigrations,
+  );
+});
+
+// ---------------------------------------------------------------- KBOX-58 (a kit's verifier is read only through verifierFor)
+
+/** The two kit types and `verifierFor`, as the ports and the rotation shell declare them; a planted file reads a verifier beside them. */
+const KIT_TYPES: Record<string, string> = {
+  'src/ports/issuer.ts': 'export interface Verifier {\n  verify(v: string): Promise<string>;\n  appliesTo?(items: readonly string[]): boolean;\n}\n',
+  'src/ports/platform.ts': "import type { Verifier } from './issuer.ts';\nexport interface PlatformEntry {\n  readonly id: string;\n  readonly verifier?: Verifier;\n}\n",
+  'src/shell/rotation-ports.ts':
+    "import type { Verifier } from '../ports/issuer.ts';\nexport interface PlatformKit {\n  readonly verifier?: Verifier;\n}\nexport const verifierFor = (kit: Pick<PlatformKit, 'verifier'> | undefined, items: readonly string[]): Verifier | undefined => {\n  const v = kit?.verifier;\n  return v?.appliesTo?.(items) === false ? undefined : v;\n};\n",
+  'src/shell/platform-source.ts': "import type { PlatformEntry } from '../ports/platform.ts';\nimport type { PlatformKit } from './rotation-ports.ts';\nexport const kitOf = (e: PlatformEntry): PlatformKit => (e.verifier === undefined ? {} : { verifier: e.verifier });\n",
+};
+const withKitRead = (code: string): Tree => withChanges({ ...KIT_TYPES, 'src/shell/x.ts': code });
+const KIT_IMPORTS = "import type { PlatformKit } from './rotation-ports.ts';\nimport type { PlatformEntry } from '../ports/platform.ts';\n";
+
+for (const [name, code] of [
+  ['a property access on a kit', 'export const f = (kit: PlatformKit) => kit.verifier;\n'],
+  ['an optional property access on a kit that may be undefined', 'export const f = (kit: PlatformKit | undefined) => kit?.verifier?.verify(\'v\');\n'],
+  ['an element access on an entry', "export const f = (e: PlatformEntry) => e['verifier'];\n"],
+  ['a destructuring of a kit', 'export const f = (kit: PlatformKit) => {\n  const { verifier } = kit;\n  return verifier;\n};\n'],
+  ['a renaming destructuring of an entry parameter', 'export const f = ({ verifier: v }: PlatformEntry) => v;\n'],
+  ['a property access on a Pick of a kit', "export const f = (kit: Pick<PlatformKit, 'verifier'>) => kit.verifier;\n"],
+] as const) {
+  test(`KBOX-58 a direct read of a kit's or entry's verifier outside verifierFor is refused: ${name}`, async (t) => {
+    await refuses(t, withKitRead(`${KIT_IMPORTS}${code}`), checkVerifierReads, 'verifier-read');
+  });
+}
+
+test('KBOX-58 a read through verifierFor, a verifier member of another type, and the kit builders and verifierFor themselves pass', async (t) => {
+  await accepts(
+    t,
+    withKitRead(`${KIT_IMPORTS}import { verifierFor } from './rotation-ports.ts';\nexport const f = (kit: PlatformKit) => verifierFor(kit, ['a']);\nexport const g = (o: { verifier: number }) => o.verifier + o['verifier'];\nexport const h = (e: PlatformEntry) => e.id;\nexport type K = PlatformKit;\n`),
+    checkVerifierReads,
   );
 });
