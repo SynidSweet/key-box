@@ -1,10 +1,10 @@
-// The rotation shell's view of the platform registry (KBOX-23): the adapters of a registered platform and its master key. The registry
-// holds issuers and listers only; each adapter unit that adds a verifier, a key page or a destination kind extends `PlatformEntry` and the
-// two lines here that read it.
+// The rotation shell's view of the platform registry (KBOX-23): the kit of a registered platform (issuer, lister, verifier, key page, shape), the
+// destination kit of a kind, and the platform's master key. An adapter unit adds only its registry entry; nothing here changes with it.
 import type { MetaStore } from '../ports/meta.ts';
 import type { PlatformEntry } from '../ports/platform.ts';
 import type { Lent } from '../ports/types.ts';
 import type { Vault } from '../ports/vault.ts';
+import { adapterKindOf } from '../pure/destination-kind.ts';
 import { ApiError } from '../pure/errors.ts';
 import { tryLend } from './rotation-ports.ts';
 import type { PlatformKit, PlatformSource } from './rotation-ports.ts';
@@ -18,6 +18,9 @@ export interface PlatformSourceDeps {
 const kitOf = (entry: PlatformEntry): PlatformKit => ({
   ...(entry.issuer === undefined ? {} : { issuer: entry.issuer }),
   ...(entry.lister === undefined ? {} : { lister: entry.lister }),
+  ...(entry.verifier === undefined ? {} : { verifier: entry.verifier }),
+  ...(entry.keyPageUrl === undefined ? {} : { keyPageUrl: entry.keyPageUrl }),
+  ...(entry.shape === undefined ? {} : { shape: entry.shape }),
 });
 
 export function createPlatformSource(deps: PlatformSourceDeps): PlatformSource {
@@ -26,8 +29,11 @@ export function createPlatformSource(deps: PlatformSourceDeps): PlatformSource {
       const entry = deps.registry.find((e) => e.id === id);
       return entry === undefined ? undefined : kitOf(entry);
     },
-    // No destination adapter exists yet: a destination kind has a kit once an adapter unit registers one.
-    destination: () => undefined,
+    // The kit of the one entry that registered this kind (the registry check refuses two); the workstation and unknown text have none.
+    destination: (kind) => {
+      const adapterKind = adapterKindOf(kind);
+      return adapterKind === undefined ? undefined : deps.registry.flatMap((e) => e.destinations ?? []).find((k) => k.destination.kind === adapterKind);
+    },
     // The platform's master key is the current generation of a master-class key row (the owner pastes it once, KBOX-36). A row whose current
     // generation the vault cannot lend (a failed create leaves its row) does not qualify; the key's own project's row wins over others; two
     // that still qualify are refused, never chosen by row order (review N5).

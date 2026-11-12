@@ -5,11 +5,14 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import type { AuditEvent } from './ports/audit.ts';
 import type { Clock, Scheduler } from './ports/clock.ts';
+import type { PlatformEntry } from './ports/platform.ts';
 import type { Random } from './ports/random.ts';
 import { DOMAIN_NAME } from './pure/actions.ts';
 import type { Action } from './pure/actions.ts';
 import { parseWordlist } from './pure/codes.ts';
 import { RegistryRefused, assertRegistry } from './pure/profile.ts';
+import { shapeOfPlatform } from './pure/platform-shape.ts';
+import { vetAction } from './pure/proposal-vet.ts';
 import { osErrorCode } from './pure/errors.ts';
 import { decodeJsonBody } from './pure/schemas.ts';
 import { openApproveCore } from './shell/approve-core.ts';
@@ -67,13 +70,6 @@ function readConfig(env: NodeJS.ProcessEnv): Config {
   return { stateDir, socket, lendSocket, domain, staging, installResults, current };
 }
 
-/** The kinds whose proposal check needs a platform adapter's profile; with none registered they are refused. */
-const NEEDS_ADAPTER: ReadonlySet<Action['kind']> = new Set(['add_key', 'add_destination', 'set_allow_rules', 'vercel_set_domain', 'vercel_set_team_setting']);
-const vetWithoutAdapters = (action: Action): 'ok' | 'rejected' => (NEEDS_ADAPTER.has(action.kind) ? 'rejected' : 'ok');
-
-/** No platform adapter registers its key shape yet, so no admin or master key is watched; each adapter unit adds its `shape` here. */
-const noShapeYet = (): undefined => undefined;
-
 const SWEEP_EVERY_MS = 60 * 60_000;
 /** How often core looks for root's answer to an install it waits for. */
 const SETTLE_EVERY_MS = 5_000;
@@ -101,6 +97,8 @@ export interface CoreRuntime {
   readonly journal: (code: string) => void;
   /** The platform adapters rotation is given; production derives them from the registry (a test passes its own). */
   readonly platforms?: PlatformSource;
+  /** The platform registry the box runs with; production uses `REGISTRY`, a test passes its own. */
+  readonly registry?: readonly PlatformEntry[];
 }
 
 const systemRuntime: CoreRuntime = {
@@ -126,7 +124,8 @@ export interface StartedCore {
 export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = systemRuntime): Promise<StartedCore> {
   const { clock, scheduler, random, journal } = runtime;
   const config = readConfig(env);
-  assertRegistry(REGISTRY);
+  const registry = runtime.registry ?? REGISTRY;
+  assertRegistry(registry);
   const parts = openCore({ stateDir: config.stateDir, clock, scheduler, random });
   const privateStore = openPrivateDatabase(join(config.stateDir, 'private.db'));
   let approve: ReturnType<typeof openApproveCore> | undefined;
@@ -154,7 +153,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   if (config.domain === undefined) journal('no_domain');
   else {
     const trust = createTrustInstaller({ stagingDir: config.staging, resultsDir: config.installResults, random, clock, wait });
-    const push = createPush({ store: privateStore, transport: createHttpPushTransport(createSystemEgress(REGISTRY)), scheduler, clock, random, audit: parts.audit, subject: `https://keys.${config.domain}` });
+    const push = createPush({ store: privateStore, transport: createHttpPushTransport(createSystemEgress(registry)), scheduler, clock, random, audit: parts.audit, subject: `https://keys.${config.domain}` });
     const wordlist = parseWordlist(readFileSync(new URL('./data/wordlist.txt', import.meta.url), 'utf8'));
     idle = createIdleWatch({ files: { stat: '/proc/stat', meminfo: '/proc/meminfo', netdev: '/proc/net/dev' }, clock, push, linkMbps: linkMbps(), notifier: { notice: journal } });
     // Rotation needs the approvals and approvers that need its executors: the executors reach it once it is open (an approval is decided long after start).
@@ -172,11 +171,11 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
       random,
       domain: config.domain,
       wordlist,
-      vet: vetWithoutAdapters,
+      vet: vetAction(registry),
       executors: { install_update: updater.executor, rotate_key: viaRotation('rotate_key'), add_key: viaRotation('add_key') },
       updateChanges: (action) => updater.changes(action),
     });
-    const source = runtime.platforms ?? createPlatformSource({ registry: REGISTRY, meta: parts.meta, vault: parts.vault });
+    const source = runtime.platforms ?? createPlatformSource({ registry, meta: parts.meta, vault: parts.vault });
     rotation = openRotation({ parts, approvals: approve.approvals, approvers: approve.approvers, push, clock, scheduler, random, audit: parts.audit, source });
   }
   const rotationStore = rotation?.store;
@@ -184,7 +183,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
     dir: join(config.stateDir, 'share'),
     meta: parts.meta,
     signingKey: parts.share.signingKey,
-    source: createMetaShareSource({ meta: parts.meta, values: parts.share.values, shapeOf: noShapeYet, ...(rotationStore === undefined ? {} : { generations: (keyref: string) => rotationStore.gens(keyref) }) }),
+    source: createMetaShareSource({ meta: parts.meta, values: parts.share.values, shapeOf: (platform) => shapeOfPlatform(registry, platform), ...(rotationStore === undefined ? {} : { generations: (keyref: string) => rotationStore.gens(keyref) }) }),
     events: parts.events,
     hub: parts.hub,
     clock,
@@ -207,7 +206,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   // Platform adapters register the short-lived values they mint here, so the scanner holds them while they live (KBOX-14).
   const minted = createMintedValues(clock);
   const lend = createLendServer(
-    createLendHandler({ meta: parts.meta, tokens: approve?.tokens.tokenStore ?? parts.meta, vault: parts.vault, audit: parts.audit, events: parts.events, registry: REGISTRY, shapes: loadCredentialShapes(), clock, minted, journal }),
+    createLendHandler({ meta: parts.meta, tokens: approve?.tokens.tokenStore ?? parts.meta, vault: parts.vault, audit: parts.audit, events: parts.events, registry, shapes: loadCredentialShapes(), clock, minted, journal }),
     journal,
   );
   if (config.lendSocket === undefined) journal('no_lend_socket');

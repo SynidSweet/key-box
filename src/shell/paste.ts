@@ -12,6 +12,7 @@ import type { Random } from '../ports/random.ts';
 import { actionDigest, pasteChallenge } from '../pure/challenge.ts';
 import { matchesShape } from '../pure/class.ts';
 import { ApiError } from '../pure/errors.ts';
+import { shapeOf } from '../pure/platform-shape.ts';
 import { decideSlot, parseRequester, requesterText, slotOf } from '../pure/slots.ts';
 import type { Requester } from '../pure/slots.ts';
 import { FIXED, renderPage, titleOf } from '../pure/words.ts';
@@ -138,10 +139,10 @@ export function createPaste(deps: PasteDeps): Paste {
   /** The value checks of KBOX-12, in order: the floor, the strict shape, the platform verifier. Names only. */
   async function checkValue(platform: string, value: string): Promise<void> {
     const kit = deps.source.platform(platform);
-    const caps = kit?.issuer?.capabilities();
-    if (kit === undefined || caps === undefined) throw rejected('unknown_platform');
+    const shape = shapeOf(kit);
+    if (kit === undefined || shape === undefined) throw rejected('unknown_platform');
     if (Buffer.byteLength(value, 'utf8') < PASTE_FLOOR_BYTES) throw rejected('too_short');
-    if (!matchesShape(caps.shape, value)) throw rejected('bad_shape');
+    if (!matchesShape(shape, value)) throw rejected('bad_shape');
     if (kit.verifier === undefined) return;
     const bytes = Uint8Array.from(Buffer.from(value, 'utf8'));
     const lent = makeLent('paste:1', () => Uint8Array.from(bytes));

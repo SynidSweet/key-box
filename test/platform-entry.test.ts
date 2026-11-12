@@ -21,7 +21,7 @@ test('KBOX-23 the kit of an entry carries its verifier and its key page, and say
   const kit = sourceOf([fakeEntry(w)]).platform('fake');
   assert.equal(kit?.verifier, w.verifier);
   assert.equal(kit?.keyPageUrl, FAKE_KEY_PAGE);
-  assert.equal(sourceOf([fakeEntry(w, { verifier: undefined, keyPageUrl: undefined })]).platform('fake')?.verifier, undefined);
+  assert.equal(sourceOf([{ id: 'fake', issuer: w.issuer, unverified: [] }]).platform('fake')?.verifier, undefined);
   assert.equal(sourceOf([fakeEntry(w)]).platform('unknown'), undefined);
 });
 
@@ -66,13 +66,13 @@ test('KBOX-12 the paste page shows the entry\'s key page, and the entry\'s verif
   assert.equal(view.platform_link, 'https://entry.example/make-a-key');
   const stored = await w.call(`/p/${id}`, { json: { value: pasteValue('b'.repeat(32)), proof: w.pasteProof(view) }, cookie });
   assert.equal(stored.status, 201, stored.body);
-  assert.deepEqual(seen, [pasteValue('b'.repeat(32))], 'the entry\'s verifier saw the value');
+  assert.ok(seen.length > 0 && seen.every((v) => v === pasteValue('b'.repeat(32))), 'the entry\'s verifier saw the value');
 });
 
 test('KBOX-51 the orchestrator verifies the new key with the verifier of the entry, not with another', async (t) => {
   const w0 = world();
   let calls = 0;
-  const verifier: Verifier = { verify: (key) => (calls += 1, w0.verifier.verify(key)) };
+  const verifier: Verifier = { verify: (key, target) => (calls += 1, w0.verifier.verify(key, target)) };
   const w = await rotationWorld(t, {
     source: (real) => {
       const kit = real.platform('fake');

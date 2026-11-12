@@ -34,3 +34,9 @@ export interface Redeployer {
   redeploy(t: DestinationTarget, master: Lent): Promise<DeployRef>;
   ready(r: DeployRef): Promise<'ready' | 'failed'>;
 }
+
+/** What a platform registers for one destination kind (KBOX-23): the adapter and, for a kind that needs one, its redeployer. */
+export interface DestinationKit {
+  readonly destination: Destination;
+  readonly redeployer?: Redeployer;
+}

@@ -1,8 +1,8 @@
 // What the rotation shell is given: the adapters of a platform and of a destination kind, the master key and the one seam where a
 // test stops the process. Adapters register these when they are built (the adapter units).
-import type { Destination, Redeployer } from '../ports/destination.ts';
+import type { DestinationKit } from '../ports/destination.ts';
 import type { Issuer, KeyLister, Verifier } from '../ports/issuer.ts';
-import type { Lent, PlatformId } from '../ports/types.ts';
+import type { KeyShape, Lent, PlatformId } from '../ports/types.ts';
 import type { Vault } from '../ports/vault.ts';
 import type { Step } from '../pure/rotation-machine.ts';
 
@@ -16,11 +16,14 @@ export interface PlatformKit {
   readonly verifier?: Verifier;
   /** The platform's own page for making a key, shown on a paste page (never taken from mission control). */
   readonly keyPageUrl?: string;
+  /** The key shape a paste-only platform states (no issuer); `shapeOf` reads the one shape of a kit. */
+  readonly shape?: KeyShape;
 }
 
-/** A platform whose keys are made on the phone (KBOX-12, KBOX-34): the box cannot issue one, so it never runs an api run for it. */
+/** A registered platform whose keys are made on the phone (KBOX-12, KBOX-34), one with no issuer or an issuer that says `paste`: the box cannot issue one, so it never runs an api run for it. */
 export function isPasteSource(source: Pick<PlatformSource, 'platform'>, platform: PlatformId): boolean {
-  return source.platform(platform)?.issuer?.capabilities().create === 'paste';
+  const kit = source.platform(platform);
+  return kit !== undefined && (kit.issuer === undefined || kit.issuer.capabilities().create === 'paste');
 }
 
 /** Whether the platform can hold two valid keys at once (true when it says nothing: there is then no one-credential order to follow). */
@@ -45,11 +48,6 @@ export function tryLend(vault: Pick<Vault, 'lend'>, keyref: string, gen: number)
   } catch {
     return { ok: false };
   }
-}
-
-export interface DestinationKit {
-  readonly destination: Destination;
-  readonly redeployer?: Redeployer;
 }
 
 /**

@@ -3,6 +3,8 @@
 // check uses the same parse and the same engine, so what the box refuses at startup is exactly what the relay would let through.
 import type { PlatformEntry } from '../ports/platform.ts';
 import type { AllowRule, DenyRule, RelayProfile, SampleRequest } from '../ports/relay-profile.ts';
+import { checkDestinationKinds, checkShapeSource } from './registry-entry.ts';
+import type { EntryFailure } from './registry-entry.ts';
 import { compileTemplate, matchTemplate, queryFits } from './rule-match.ts';
 import type { Template } from './rule-match.ts';
 import { HTTP_METHODS } from './schemas.ts';
@@ -202,7 +204,9 @@ export type RegistryFailure =
   | 'partial_content_header'
   | 'relay_owned_header'
   | 'deny_only_with_relay'
+  | 'deny_only_not_listed'
   | 'deny_only_without_must_deny'
+  | EntryFailure
   | 'reveal_once_without_lister'
   | 'duplicate_platform'
   | 'platform_mismatch';
@@ -234,8 +238,10 @@ function checkRelay(profile: RelayProfile): RegistryFailure | undefined {
   return undefined;
 }
 
-function checkEntry(entry: PlatformEntry): RegistryFailure | undefined {
+function checkRelaySide(entry: PlatformEntry): RegistryFailure | undefined {
   if (entry.issuer?.capabilities().revealOnce === true && entry.lister === undefined) return 'reveal_once_without_lister';
+  if (entry.relay !== undefined && entry.denyOnly !== undefined) return 'deny_only_with_relay';
+  if (entry.denyOnly !== undefined && !RELAY_DENY_ONLY.includes(entry.id)) return 'deny_only_not_listed';
   if (RELAY_DENY_ONLY.includes(entry.id)) {
     if (entry.relay !== undefined) return 'deny_only_with_relay';
     if (!hasSamples(entry.denyOnly)) return 'deny_only_without_must_deny';
@@ -247,6 +253,8 @@ function checkEntry(entry: PlatformEntry): RegistryFailure | undefined {
   return checkRelay(entry.relay);
 }
 
+const checkEntry = (entry: PlatformEntry): RegistryFailure | undefined => checkRelaySide(entry) ?? checkShapeSource(entry);
+
 /** KBOX-23: every check the box runs before it starts; the first failure names its platform. */
 export function checkRegistry(entries: readonly PlatformEntry[]): RegistryCheck {
   const seen = new Set<string>();
@@ -256,6 +264,8 @@ export function checkRegistry(entries: readonly PlatformEntry[]): RegistryCheck 
     const code = checkEntry(entry);
     if (code !== undefined) return { ok: false, code, platform: entry.id };
   }
+  const repeated = checkDestinationKinds(entries);
+  if (repeated !== undefined) return { ok: false, ...repeated };
   return { ok: true };
 }
 

@@ -5,7 +5,7 @@
 // still holds the new one's replacement unconfirmed, and the new one is never revoked while a destination still holds it.
 import type { Audit } from '../ports/audit.ts';
 import type { Clock, Scheduler } from '../ports/clock.ts';
-import type { PushOutcome } from '../ports/destination.ts';
+import type { DestinationKit, PushOutcome } from '../ports/destination.ts';
 import type { EventLog } from '../ports/events.ts';
 import type { IssuedKey } from '../ports/issuer.ts';
 import type { MetaStore } from '../ports/meta.ts';
@@ -19,7 +19,7 @@ import { intentName, nextStep, retryDelayMs } from '../pure/rotation-machine.ts'
 import type { Step } from '../pure/rotation-machine.ts';
 import { revokeAndConfirm } from './revoke-confirm.ts';
 import { isPasteSource, overlapOf, setterOf, tryLend } from './rotation-ports.ts';
-import type { DestinationKit, PlatformKit, PlatformSource, Point } from './rotation-ports.ts';
+import type { PlatformKit, PlatformSource, Point } from './rotation-ports.ts';
 import type { DestinationRow, KeyHead, Receipt, RotationStore, RunOrigin, RunRow } from './rotation-store.ts';
 
 const HOUR_MS = 3600_000;

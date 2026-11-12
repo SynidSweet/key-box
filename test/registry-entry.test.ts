@@ -24,12 +24,12 @@ test('KBOX-23 an entry with an issuer, and a paste-only entry that states its sh
 
 test('KBOX-23 a shape stated next to an issuer (two sources) fails, and so does neither', () => {
   assert.equal(failure([fakeEntry(w, { shape: SHAPE })]), 'shape_twice fake');
-  assert.equal(failure([pasteOnlyEntry(w, SHAPE, { shape: undefined })]), 'shape_missing pasteonly');
+  assert.equal(failure([{ id: 'pasteonly', verifier: w.verifier, unverified: [] }]), 'shape_missing pasteonly');
 });
 
 test('KBOX-23 two entries with one id fail, and an issuer that reveals once without a lister fails', () => {
   assert.equal(failure([fakeEntry(w), fakeEntry(w)]), 'duplicate_platform fake');
-  assert.equal(failure([fakeEntry(w, { lister: undefined })]), 'reveal_once_without_lister fake');
+  assert.equal(failure([{ id: 'fake', issuer: w.issuer, unverified: [] }]), 'reveal_once_without_lister fake');
 });
 
 test('KBOX-23 a destination kind that two entries provide fails, naming the second; one entry giving a kind twice fails too', () => {
