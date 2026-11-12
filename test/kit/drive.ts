@@ -25,7 +25,9 @@ export function drive(socketPath: string): Driver {
       new Promise((resolve, reject) => {
         const target = new URL(req.path, 'http://box.invalid');
         const call = request(
-          { socketPath, method: req.method ?? 'GET', path: target.pathname + target.search, headers: { ...req.headers } },
+          // A fresh connection per request: reusing a pooled keep-alive socket races the server's 5 s idle close and gives ECONNRESET
+          // under load (KBOX-52 core test, 2026-11-12).
+          { socketPath, agent: false, method: req.method ?? 'GET', path: target.pathname + target.search, headers: { ...req.headers } },
           (res) => {
             const chunks: Buffer[] = [];
             res.on('data', (c: Buffer) => chunks.push(c));
