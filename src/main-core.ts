@@ -40,7 +40,7 @@ import type { Executor } from './shell/approvals.ts';
 import { createPlatformSource } from './shell/platform-source.ts';
 import { openRotation } from './shell/rotation.ts';
 import { createRotationStore, readKeyInfo } from './shell/rotation-store.ts';
-import { createKeyActions } from './shell/key-executors.ts';
+import { createAllowRuleActions, createKeyActions } from './shell/key-executors.ts';
 import { createVercelOps, vercelRoutes } from './shell/vercel-routes.ts';
 import { kindOfStored, kitFor } from './shell/rotation-ports.ts';
 import type { Rotation } from './shell/rotation.ts';
@@ -216,12 +216,15 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
     const source = runtime.platforms ?? registrySource;
     const checks = createGrantChecks({ registry, meta: parts.meta, keyInfo: storedRecord, master: (platform, at, items) => source.master(platform, at, items), audit: parts.audit, events: parts.events, clock });
     grantChecks = checks;
-    const keyActions = createKeyActions({ registry, source, store: createRotationStore(parts.db, clock, parts.hub), audit: parts.audit, clock });
+    const keyStore = createRotationStore(parts.db, clock, parts.hub);
+    const keyActions = createKeyActions({ registry, source, store: keyStore, audit: parts.audit, clock });
+    const allowRules = createAllowRuleActions({ registry, store: keyStore, meta: parts.meta, audit: parts.audit, clock });
     const vercelOps = createVercelOps({ registry, source, audit: parts.audit, clock });
-    // Every proposal route runs this chain before an approval opens (F2): the box key, a key's own checks, a Vercel action's typed parameters, a grant's check.
+    // Every proposal route runs this chain before an approval opens (F2): the box key, a key's own checks, a key's allow rules, a Vercel action's typed parameters, a grant's check.
     const precheck = async (action: Action): Promise<void> => {
       refuseBoxKeyAction(registry, action);
       keyActions.precheck(action);
+      allowRules.precheck(action);
       vercelOps.precheck(action);
       await checks.atProposal(action);
     };
@@ -236,7 +239,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
       wordlist,
       vet: vetAction(registry),
       refuseUnwired: true,
-      executors: { install_update: updater.executor, rotate_key: viaRotation('rotate_key'), add_key: viaRotation('add_key'), ...keyActions.executors, ...vercelOps.executors },
+      executors: { install_update: updater.executor, rotate_key: viaRotation('rotate_key'), add_key: viaRotation('add_key'), ...keyActions.executors, set_allow_rules: allowRules.executor, ...vercelOps.executors },
       updateChanges: (action) => updater.changes(action),
       pageFacts: keyActions.pageFacts,
       precheck,

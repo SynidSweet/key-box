@@ -220,6 +220,8 @@ export const AUDIT_SCHEMAS = {
   'vercel.team_setting_changed': { setting: text(/^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$/), value: optional(text(/^[\x20-\x7e]{1,256}$/)) },
   /** KBOX-26: a project was created at Vercel with the master; the row's ref is the project name, its actor the token label. */
   'vercel.project_created': { name: text(PROJECT_NAME) },
+  /** KBOX-61: an approved set_allow_rules was written; how many rule ids the key's set holds now (0 = the whole profile). The row's ref is the keyref. */
+  'key.allow_rules_set': { count: int() },
   /** KBOX-55: core did not make a box-made key at start because another master row of its platform exists; the row's ref is the box key. */
   'box_key.conflict': {},
   // rotate (KBOX-51, KBOX-17, KBOX-34): the row's ref is the key reference (a delivery id for `delivery.acked`).

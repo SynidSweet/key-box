@@ -15,7 +15,8 @@ export const DOMAIN_NAME = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)
 const SETTING = /^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$/;
 const SETTING_VALUE = /^[\x20-\x7e]{0,256}$/;
 const TARGET = /^[A-Za-z0-9_./:@-]{0,256}$/;
-const OP = /^[a-z][a-z0-9_]{0,63}$/;
+/** KBOX-61: the shape of a relay profile's allow-rule id (`gcs-list`), which is what an `op` names. */
+const OP = /^[a-z][a-z0-9_-]{0,63}$/;
 const PARAM_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 const PARAM_VALUE = /^[\x20-\x7e]{0,256}$/;
 export const APPROVER_ID = /^ap-[A-Za-z0-9_-]{8,64}$/;

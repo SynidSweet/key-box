@@ -1,8 +1,9 @@
-// KBOX-60: the executors of `set_schedule` and `demote`, and the one check each kind makes. The proposal runs the check before an approval
+// KBOX-60, KBOX-61: the executors of `set_schedule`, `demote` and `set_allow_rules`, and the one check each kind makes. The proposal runs the check before an approval
 // opens (F2); the executor runs the same check again on the state it finds, before it writes (F1): a proposal waits up to 14 days, and
 // another approval or an update can change a key meanwhile. A refusal at execution is a recorded `failed` with the proposal's code.
 import type { Audit } from '../ports/audit.ts';
 import type { Clock } from '../ports/clock.ts';
+import type { MetaStore } from '../ports/meta.ts';
 import type { PlatformEntry } from '../ports/platform.ts';
 import type { KeyClass } from '../ports/types.ts';
 import type { Action } from '../pure/actions.ts';
@@ -124,4 +125,60 @@ export function createKeyActions(deps: KeyActionsDeps): KeyActions {
   };
 
   return { executors: { set_schedule: setSchedule, demote }, precheck, pageFacts };
+}
+
+type SetAllowRules = Extract<Action, { readonly kind: 'set_allow_rules' }>;
+
+export interface AllowRuleDeps {
+  /** The registry, for each platform's relay profile. */
+  readonly registry: readonly PlatformEntry[];
+  readonly store: Pick<RotationStore, 'key'>;
+  readonly meta: Pick<MetaStore, 'replaceAllowRules'>;
+  readonly audit: Audit;
+  readonly clock: Clock;
+}
+
+export interface AllowRuleActions {
+  readonly executor: Executor;
+  /** F2: throws `ApiError('rejected', <code>)` when a `set_allow_rules` proposal must not open. Other kinds pass. */
+  precheck(action: Action): void;
+}
+
+/**
+ * KBOX-61: a key's own allow set is a subset of its profile's rules (empty = all of them), so a set is checked against the key and the
+ * profile as they are now. The one check behind both the proposal and the execution; the reason code, or nothing when it passes.
+ */
+export function createAllowRuleActions(deps: AllowRuleDeps): AllowRuleActions {
+  const check = (action: SetAllowRules): string | undefined => {
+    const head = deps.store.key(action.keyref);
+    if (head === undefined) return 'unknown_key';
+    if (head.class === 'master') return 'never_relayed';
+    const profile = deps.registry.find((e) => e.id === head.platform)?.relay;
+    if (profile === undefined) return 'no_profile';
+    const seen = new Set<string>();
+    for (const rule of action.rules) {
+      if (Object.keys(rule.params).length > 0) return 'params_unsupported';
+      if (!profile.allow.some((r) => r.id === rule.op)) return 'unknown_op';
+      if (seen.has(rule.op)) return 'duplicate_op';
+      seen.add(rule.op);
+    }
+    return undefined;
+  };
+
+  const precheck: AllowRuleActions['precheck'] = (action) => {
+    const code = action.kind === 'set_allow_rules' ? check(action) : undefined;
+    if (code !== undefined) throw new ApiError('rejected', code);
+  };
+
+  const executor: Executor = (approval) => {
+    const action = approval.action;
+    if (action.kind !== 'set_allow_rules') return Promise.resolve({ result: 'failed', reason: 'wrong_kind' });
+    const code = check(action);
+    if (code !== undefined) return Promise.resolve({ result: 'failed', reason: code });
+    deps.meta.replaceAllowRules(action.keyref, action.rules.map((r) => r.op));
+    deps.audit.append({ action: 'key.allow_rules_set', subject: action.keyref, at: deps.clock.now(), detail: { count: action.rules.length } });
+    return Promise.resolve({ result: 'done' });
+  };
+
+  return { executor, precheck };
 }

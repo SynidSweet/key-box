@@ -1,13 +1,11 @@
 // KBOX-23: the proposal check. A proposal whose executor or adapter does not exist is `rejected` before an approval is asked for.
 import type { PlatformEntry } from '../ports/platform.ts';
 import type { Action, ActionKind } from './actions.ts';
+import { platformOfKeyref } from './class.ts';
 import { adapterKindOf } from './destination-kind.ts';
 
 type Vet = (action: Action) => 'ok' | 'rejected';
 type VetEntry = Pick<PlatformEntry, 'id' | 'relay' | 'destinations'>;
-
-/** The platform a key reference names: the first segment of `<platform>/<project>/<NAME>`. */
-const platformOfKeyref = (keyref: string): string => keyref.split('/', 1)[0] ?? '';
 
 /**
  * The adapter condition of each kind: `add_key` needs its platform registered (with an issuer or paste-only); a destination other than the

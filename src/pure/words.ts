@@ -2,6 +2,7 @@
 // action; nothing mission control sends becomes page text except the requester's reason, which is set apart as unchecked
 // plain text. The page is lines of plain text: the app shows each line as text, never as markup.
 import type { Action, Destination } from './actions.ts';
+import { platformOfKeyref } from './class.ts';
 import type { Requester } from './slots.ts';
 import type { KeyClass, KeyLocation } from '../ports/types.ts';
 
@@ -104,6 +105,8 @@ function sentences(action: Action, ctx: PageContext): string[] {
     case 'remove_destination':
       return [`Take the key ${action.keyref} out of ${where(action.destination)}.`];
     case 'set_allow_rules':
+      // KBOX-61: the empty list is the whole profile; it must not read as "only these" with nothing under it.
+      if (action.rules.length === 0) return [`Let the relay pass every request the ${platformOfKeyref(action.keyref)} profile allows with the key ${action.keyref}.`];
       return [
         `Let the relay pass only these requests with the key ${action.keyref}:`,
         ...action.rules.map((r) => `${r.op}${Object.keys(r.params).length === 0 ? '' : ` (${Object.entries(r.params).map(([k, v]) => `${k} = ${v}`).join(', ')})`}`),
