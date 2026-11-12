@@ -1,5 +1,6 @@
 // KBOX-36: the Vercel adapter. `create<Name>Entry` is what the registry line calls. Master = a classic team-scoped token pasted once
-// (`selfRotate`); project tokens are ordinary keys the box makes, rotates and delivers. No relay profile in v1: only the deny list.
+// (`selfRotate`). A key's project is its stored location (KBOX-57); under the KBOX-15 floor a project token classes master too and enters by
+// paste until a rule lets a confirmed project lower it. No relay profile in v1: only the deny list.
 import type { PlatformEntry, RegistryDeps } from '../../ports/platform.ts';
 import { createVercelApi, VERCEL_HOST } from './api.ts';
 import { VERCEL_MUST_DENY } from './deny.ts';
@@ -7,6 +8,7 @@ import { createVercelEnvDestination } from './env-destination.ts';
 import { createVercelIssuer } from './issuer.ts';
 import { createVercelLister } from './lister.ts';
 import { createVercelRedeployer } from './redeployer.ts';
+import { PLAIN_ID } from './scope.ts';
 import { createVercelVerifier } from './verifier.ts';
 
 /** What the registry hands every adapter (`RegistryDeps`), and the optional pause. */
@@ -34,6 +36,8 @@ export function createVercelEntry(deps: VercelDeps): PlatformEntry {
     verifier: createVercelVerifier(api),
     keyPageUrl: 'https://vercel.com/account/tokens',
     destinations: [{ destination: createVercelEnvDestination(api), redeployer: createVercelRedeployer({ api, clock: deps.clock, pause: deps.pause ?? realPause }) }],
+    // KBOX-57: the project a token belongs to is the key's one stored location, required of no class (a team-wide token names none).
+    location: { project: { pattern: PLAIN_ID, requiredFor: [] } },
     hosts: [VERCEL_HOST],
     unverified: UNVERIFIED,
   };

@@ -486,10 +486,10 @@ test('KBOX-15 KBOX-57 at the route every Vercel token classes master, a project 
   box.w = w;
   fresh();
   const before = http.sent.length;
-  for (const location of [{ project: PROJECT }, {}]) {
-    const reply = await w.api('/api/keys', { json: { platform: 'vercel', name: 'VERCEL_TOKEN', projects: ['shop'], scope: { items: [] }, location } });
+  for (const placed of [{ location: { project: PROJECT } }, {}]) {
+    const reply = await w.api('/api/keys', { json: { platform: 'vercel', name: 'VERCEL_TOKEN', projects: ['shop'], scope: { items: ['team:team_abc'] }, ...placed } });
     assert.equal(reply.status, 422, reply.body);
-    assert.equal((reply.json() as { error: { detail?: { code?: string } } }).error.detail?.code, 'master_not_issuable', JSON.stringify(location));
+    assert.equal((reply.json() as { error: { detail?: { code?: string } } }).error.detail?.code, 'master_not_issuable', JSON.stringify(placed));
   }
   assert.deepEqual(sentSince(before), []);
   assert.equal(w.parts.meta.snapshot().keys.length, 0);
