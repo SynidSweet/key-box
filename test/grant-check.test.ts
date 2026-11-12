@@ -377,7 +377,8 @@ async function core(t: TestContext, options: CoreOptions = {}): Promise<Core> {
   const token = newToken(random);
   const prepared = openCore({ stateDir, clock, scheduler: clock, random });
   prepared.meta.addMachine({ label: 'mc', scope: 'control', tokenSha256: hashToken(token), enrolledAt: NOW });
-  seed(prepared, clock);
+  // Its projects name another valid service account: a target read from them would check the wrong one (negative control).
+  seed(prepared, clock, { projects: [OTHER_SA] });
   options.beforeStart?.(prepared);
   prepared.close();
   const env = { KB_STATE_DIR: stateDir, KB_SOCKET: socket, KB_INSTALL_RESULTS: join(dir, 'results'), KB_CURRENT: join(dir, 'current'), KB_DOMAIN: DOMAIN, KB_OIDC_AUDIENCE: PROVIDER };
