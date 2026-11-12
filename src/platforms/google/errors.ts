@@ -1,4 +1,4 @@
-// KBOX-14, KBOX-41: every failure of the Google identity is one fixed code (and the HTTP status Google gave, when it gave one). No error
+// KBOX-14, KBOX-41, KBOX-59: every failure of the Google adapters is one fixed code (and the HTTP status Google gave, when it gave one). No error
 // here carries a platform's text, a token, a key, a target or a cause.
 
 export type GoogleErrorCode =
@@ -20,6 +20,20 @@ export type GoogleErrorCode =
   | 'target_reserved'
   /** An admin token was asked for a location that names no project id (KBOX-57). */
   | 'bad_location'
+  /** An API key was asked for with a scope that has no `api:` item, or any item that is not an `api:<service>.googleapis.com` one (the box never makes an unrestricted key). */
+  | 'bad_scope'
+  /** A stored key id that is not `projects/<project>/locations/global/keys/<key id>`. */
+  | 'bad_key_id'
+  /** A Secret Manager target that is not `projects/<project>/secrets/<secret>`. */
+  | 'bad_secret_target'
+  /** The answer to a create names a place that is not the stored project (by id or by its number); the key Google made is left. */
+  | 'location_unconfirmed'
+  /** API Keys answered 4xx, or an Operation done with an error. */
+  | 'apikeys_refused'
+  /** API Keys answered anything else that is no success. */
+  | 'apikeys_failed'
+  /** The destination cannot remove a value it never learned the version of. */
+  | 'remove_unsupported'
   /** A relay token was asked with `cloud-platform`. */
   | 'cloud_platform_for_relay'
   /** A relay token was asked with a scope its profile does not name. */

@@ -14,7 +14,7 @@ import type { Lent } from '../src/ports/types.ts';
 import { matchesShape } from '../src/pure/class.ts';
 import { classifierOf, shapeOf } from '../src/pure/platform-shape.ts';
 import { checkRegistry } from '../src/pure/profile.ts';
-import { adapterHttpTo, bytesOf, canary, lent } from './kit/index.ts';
+import { adapterHttpTo, bytesOf, canary, lent, listAll } from './kit/index.ts';
 import type { FakeAdapterHttp } from './kit/index.ts';
 import { fakeAnthropic } from './fakes/anthropic-api.ts';
 import type { FakeAnthropic } from './fakes/anthropic-api.ts';
@@ -338,7 +338,7 @@ test('KBOX-40 Anthropic lister: every page is read, a key the platform holds swi
   assert.deepEqual(listing.keys.map((k) => [k.name, k.disabled === true]), [['one', false], ['two', true], ['three', true], ['four', true], ['five', false]]);
   assert.equal(api.log.filter((l) => l.startsWith('GET /v1/organizations/api_keys')).length, 3, 'three pages of two');
   assert.match(api.log[1] ?? '', /after_id=apikey_fake0002/);
-  assert.deepEqual((await lister.list(L(ADMIN))).map((k) => k.name), ['one', 'five'], 'the plain list is the live keys');
+  assert.deepEqual((await listAll(lister, L(ADMIN))).map((k) => k.name), ['one', 'five'], 'the plain list is the live keys');
 });
 
 test('KBOX-40 Anthropic lister: a page that cannot be read after the first makes the listing incomplete, keeping what was read; the first page failing throws', async (t) => {
@@ -450,13 +450,13 @@ test('KBOX-14 a platform answer that quotes the key never reaches an error: veri
   };
   const caught = async (name: string, call: () => Promise<unknown>): Promise<void> => note(name, await outcome(call));
   await caught('anthropic verify', () => verifierOf(entry).verify(L(secret), ANTHROPIC));
-  await caught('anthropic list', () => listerOf(entry).list(L(secret)));
+  await caught('anthropic list', () => listAll(listerOf(entry), L(secret)));
   await caught('anthropic listAt', () => listerOf(entry).listAt({}, L(secret)));
   await caught('anthropic retire', () => createAnthropicRetirer({ http }).retire(L(ordinary('OLD3')), {}, L(secret)));
   api.admins.add(secret);
   api.add(ordinary('OLD3'), 'old');
   api.failPagesFrom(1);
-  await caught('anthropic list 500', () => listerOf(entry).list(L(secret)));
+  await caught('anthropic list 500', () => listAll(listerOf(entry), L(secret)));
   await caught('anthropic retire 500', () => createAnthropicRetirer({ http }).retire(L(ordinary('OLD3')), {}, L(secret)));
   await caught('stripe verify', () => verifierOf(stripeWorld.entry).verify(L(`rk_live_${Buffer.from(c.bytes).toString('hex')}`), STRIPE));
   assert.ok(api.log.length > 0 && stripeWorld.api.log.length > 0, 'the fakes were reached');
@@ -564,9 +564,9 @@ test('KBOX-40 KBOX-51 Anthropic lister: the plain list is a failure, not a short
   api.add(ordinary('0001'), 'one');
   api.add(ordinary('0002'), 'two');
   api.failPagesFrom(2);
-  await assert.rejects(() => lister.list(L(ADMIN)), /anthropic: http_error/);
+  await assert.rejects(() => listAll(lister, L(ADMIN)), /anthropic: http_error/);
   api.failPagesFrom(100);
-  assert.deepEqual((await lister.list(L(ADMIN))).map((k) => k.name), ['one', 'two']);
+  assert.deepEqual((await listAll(lister, L(ADMIN))).map((k) => k.name), ['one', 'two']);
 });
 
 test('KBOX-40 Anthropic lister: a cursor seen twice (A, B, A) ends the listing as incomplete instead of looping', async () => {

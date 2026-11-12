@@ -1,7 +1,7 @@
 // KBOX-34, KBOX-15, KBOX-19: the routes that issue keys, rotate them, hand over retired values and deliver ordinary keys.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { bytesOf, canary } from './kit/index.ts';
+import { bytesOf, canary, listAll } from './kit/index.ts';
 import { ApiError } from '../src/pure/errors.ts';
 import { PASTE_PLATFORM, routesWorld } from './support/routes-world.ts';
 import type { RoutesWorld } from './support/routes-world.ts';
@@ -49,7 +49,7 @@ test('KBOX-15 an ordinary request whose scope the adapter classes admin gets an 
   assert.deepEqual(members(reply), ['approval_id', 'class', 'keyref']);
   const answer = reply.json() as { class: string; approval_id: string };
   assert.equal(answer.class, 'admin');
-  assert.equal((await w.platform.lister.list(w.platform.master())).length, 0, 'nothing issued');
+  assert.equal((await listAll(w.platform.lister, w.platform.master())).length, 0, 'nothing issued');
   assert.equal(w.rotation.store.key(KEYREF), undefined);
   const queue = await w.queue();
   assert.deepEqual(queue.map((q) => [q.approval_id, q.kind]), [[answer.approval_id, 'add_key']]);
@@ -62,7 +62,7 @@ test('KBOX-15 an approved add_key issues the admin key, as admin, with the class
   const action = { kind: 'add_key', platform: 'fake', name: 'OPENAI_KEY', projects: ['shop'], scope: { items: ['admin'] } } as const;
   assert.deepEqual(await execute({ approvalId: 'apr_x', revision: 1, action, requester: { kind: 'box' }, proof: undefined }), { result: 'done' });
   assert.equal(w.parts.meta.snapshot().keys.find((k) => k.keyref === KEYREF)?.class, 'admin');
-  assert.equal((await w.platform.lister.list(w.platform.master())).length, 1);
+  assert.equal((await listAll(w.platform.lister, w.platform.master())).length, 1);
   assert.deepEqual(await execute({ approvalId: 'apr_x', revision: 1, action, requester: { kind: 'box' }, proof: undefined }), { result: 'failed', reason: 'key_exists' });
 });
 
@@ -73,7 +73,7 @@ test('KBOX-15 a master scope is never issued through POST /api/keys: a paste tas
   // KBOX-34 (shared-2 U6): a master result opens a paste task (202) instead of the former `master_not_issuable`; still nothing is issued.
   assert.equal(reply.status, 202, reply.body);
   assert.deepEqual([(reply.json() as { class: string }).class, typeof (reply.json() as { paste_task_id: unknown }).paste_task_id], ['master', 'string']);
-  assert.equal((await w.platform.lister.list(w.platform.master())).length, 0);
+  assert.equal((await listAll(w.platform.lister, w.platform.master())).length, 0);
   assert.equal((await w.queue()).length, 0);
 });
 
@@ -437,7 +437,7 @@ test('KBOX-57 the schedule\'s skip of a due key whose stored location the entry 
 const HOST_ENTRY = { project: { pattern: /[a-z]{20}/, requiredFor: ['ordinary', 'admin'], namesHost: true } } as const;
 const allRows = (w: RoutesWorld): string => JSON.stringify([w.parts.db.prepare('SELECT * FROM keys').all(), w.parts.db.prepare('SELECT * FROM rotation_keys').all()]);
 const answering = (result: ReturnType<PlatformSource['master']>) => (real: PlatformSource): PlatformSource => ({ ...real, master: () => result });
-const issuedCount = async (w: RoutesWorld): Promise<number> => (await w.platform.lister.list(w.platform.master())).length;
+const issuedCount = async (w: RoutesWorld): Promise<number> => (await listAll(w.platform.lister, w.platform.master())).length;
 
 test('KBOX-57 where a proposal needs the master (a key the issuer makes by run), none is rejected no_master and two master_ambiguous: nothing proposed, opened, issued or written', async (t) => {
   for (const code of ['no_master', 'master_ambiguous'] as const) {

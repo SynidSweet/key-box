@@ -27,6 +27,16 @@ Do every step on your phone, in this order. Nothing here is done from the workst
 
 These limits do not stop an approved update that is malicious.
 
+## For each Google Cloud project the box makes API keys in (KBOX-59)
+
+Done in the Google Cloud console on your phone, once per project:
+
+1. **A service account named `kbox-keys`** in the project, with the box's workload identity pool principal as Token Creator on it (the box acts as it; there is no downloadable key).
+2. **Its roles:** API Keys Admin (makes, lists, reads and deletes keys), Secret Manager Secret Version Adder (only if a key is delivered to a Secret Manager secret there), and Browser (lets it read the project's number, which the box uses to know that an answer names this project).
+3. **Two permissions the verifier needs**, `apikeys.keys.lookup` and `resourcemanager.projects.get`: that API Keys Admin and Browser hold them is from Google's documentation and UNVERIFIED (`google.apikey-verify-call`). If a verification answers "unreachable" for every key, check these first.
+
+The APIs `apikeys.googleapis.com`, `cloudresourcemanager.googleapis.com`, `iamcredentials.googleapis.com` and `secretmanager.googleapis.com` must be enabled in the project. A key the box makes there is restricted to the services you approve, and is only ever made in the project you entered with it.
+
 ## Plainly
 
 - The free name can be withdrawn. Then setup is redone on a new name.

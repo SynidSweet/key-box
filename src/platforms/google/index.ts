@@ -1,17 +1,24 @@
-// KBOX-41 (identity half), KBOX-24, KBOX-55: the `google` registry entry. This unit registers the box's own identity toward Google Cloud: the
-// OIDC documents core serves, the grant check, and the box's signing key, which the box makes itself (`boxKey`), as the platform's one key class
-// and shape. The API-key issuer, its lister and verifier, the Secret Manager destination and the relay profile are added by the next Google unit
-// (google-b, KBOX-59), which then takes the class and shape from its issuer.
+// KBOX-41, KBOX-24, KBOX-55, KBOX-59: the `google` registry entry. It registers the box's own identity toward Google Cloud (the OIDC documents core
+// serves, the grant check, and the box's signing key, which the box makes itself: `boxKey`, with its own class and shape through `kitFor`) and the
+// API-key adapter: the issuer, its lister and verifier, the Secret Manager destination and the relay profile. The adapters are built with
+// `{http, minter}` only, never RegistryDeps, so none can read a stored key's record; each mints the admin token of its call's stored project.
 import type { BoxIdentity, BoxMadeKey, PlatformEntry, RegistryDeps } from '../../ports/platform.ts';
 import type { MintedSink } from '../../ports/minted.ts';
 import type { Lent } from '../../ports/types.ts';
 import { GoogleError } from './errors.ts';
 import type { GoogleErrorCode } from './errors.ts';
+import { APIKEYS_HOST } from './admin.ts';
 import { createGrantCheck, RESOURCE_MANAGER_HOST } from './grant-check.ts';
+import { createIssuer } from './issuer.ts';
+import { createLister } from './lister.ts';
 import { createMinter, IAM_CREDENTIALS_HOST, STS_HOST } from './minter.ts';
 import type { Minter } from './minter.ts';
 import { JWKS_PUBLISH_LEAD_MS, discoveryDocument, jwksDocument } from './oidc.ts';
+import { googleRelayProfile } from './relay.ts';
+import { SECRET_MANAGER_HOST, createSecretDestination } from './secret-destination.ts';
+import { GOOGLE_ID } from './scope.ts';
 import { SIGNING_KEYREF, SIGNING_KEY_NAME, SIGNING_KEY_SHAPE, checkSigningKey, generateSigningKey } from './signing-key.ts';
+import { createVerifier } from './verifier.ts';
 
 /** The ids docs/probes/google.md still marks STILL UNVERIFIED (KBOX-42). */
 const UNVERIFIED = [
@@ -22,6 +29,8 @@ const UNVERIFIED = [
   'google.aiza-length',
   'google.must-deny-discovery',
   'google.apikeys-admin-scope',
+  'google.apikeys-create-answer',
+  'google.apikey-verify-call',
 ] as const;
 
 /**
@@ -62,16 +71,30 @@ const signingKey = (minter: Minter): BoxMadeKey => ({
   prove: (pending, identity, minted) => proveAtSts(minter, pending, identity, minted),
 });
 
-export function createGoogleEntry(deps: RegistryDeps): PlatformEntry {
+/** What the registry hands every adapter (`RegistryDeps`), and the optional pause. */
+export interface GoogleDeps extends RegistryDeps {
+  /** Waits `ms` between two reads of an Operation; the real timer when absent. */
+  readonly pause?: (ms: number) => Promise<void>;
+}
+
+const realPause = (ms: number): Promise<void> => new Promise((resolve) => void setTimeout(resolve, ms));
+
+export function createGoogleEntry(deps: GoogleDeps): PlatformEntry {
   // The minter takes the deps whole: the stored-record reader is read there and nowhere else (the arch check `key info reads`).
   const minter = createMinter(deps);
+  const admin = { http: deps.http, minter };
   return {
     id: 'google',
-    hosts: [STS_HOST, IAM_CREDENTIALS_HOST, RESOURCE_MANAGER_HOST],
+    hosts: [STS_HOST, IAM_CREDENTIALS_HOST, RESOURCE_MANAGER_HOST, APIKEYS_HOST, SECRET_MANAGER_HOST],
     unverified: UNVERIFIED,
-    // The only key this unit knows is the box's signing key, so every Google key is master class (never lent to the relay, KBOX-3).
-    shape: SIGNING_KEY_SHAPE,
-    classify: () => 'master',
+    // KBOX-59: the API-key issuer states the class and shape of every key it makes; the signing key's own are the box key's (`kitFor`, KBOX-55).
+    issuer: createIssuer({ ...admin, clock: deps.clock, pause: deps.pause ?? realPause }),
+    lister: createLister(admin),
+    verifier: createVerifier(admin),
+    destinations: [{ destination: createSecretDestination(admin) }],
+    relay: googleRelayProfile,
+    // KBOX-57: the project of an API key is its one stored location, required of an ordinary key; it names no host.
+    location: { project: { pattern: GOOGLE_ID, requiredFor: ['ordinary'] } },
     identity: { discovery: discoveryDocument, jwks: jwksDocument },
     grantCheck: createGrantCheck({ http: deps.http, minter }),
     boxKey: signingKey(minter),

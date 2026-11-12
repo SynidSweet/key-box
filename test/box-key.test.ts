@@ -23,6 +23,7 @@ import { ensureBoxKeys, refuseBoxKeyAction } from '../src/shell/box-keys.ts';
 import { openCore } from '../src/shell/core.ts';
 import type { CoreParts } from '../src/shell/core.ts';
 import { createPlatformSource } from '../src/shell/platform-source.ts';
+import { shapeOf } from '../src/pure/platform-shape.ts';
 import { isPasteSource, kitFor, rotatesByPaste, verifierFor } from '../src/shell/rotation-ports.ts';
 import type { PlatformSource } from '../src/shell/rotation-ports.ts';
 import { createRotationStore } from '../src/shell/rotation-store.ts';
@@ -31,7 +32,7 @@ import { createMetaShareSource } from '../src/shell/share-source.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
 import { issuerWith, sourceOf } from './fakes/platform-entry.ts';
 import { rotationWorld } from './support/rotation-world.ts';
-import { TimedClock, bytesOf, drive, lent, seededRandom, tempDir } from './kit/index.ts';
+import { TimedClock, bytesOf, drive, lent, listAll, seededRandom, tempDir } from './kit/index.ts';
 import { adapterHttpTo } from './kit/adapter-http.ts';
 import { fakeGoogle } from './fakes/google.ts';
 import { BOX_SUBJECT } from '../src/platforms/google/oidc.ts';
@@ -148,7 +149,7 @@ function googleWithApiKeys(world: FakePlatformWorld, deps: RegistryDeps = google
   const lister: KeyLister = {
     list: (master) => {
       calls.list += 1;
-      return world.lister.list(master);
+      return listAll(world.lister, master);
     },
     listAt: (at, master) => {
       calls.listAt += 1;
@@ -203,8 +204,8 @@ test('KBOX-55 a key whose kit makes it by box is never a paste source, and rotat
   const source = sourceOf([entry]);
   assert.equal(isPasteSource(source, { platform: 'google', keyref: BOX_REF }), false);
   assert.equal(rotatesByPaste(source, { platform: 'google', keyref: BOX_REF, class: 'master' }), false);
-  // Negative control: another key of the same platform (no issuer yet) is still a paste source and rotates by paste.
-  assert.equal(isPasteSource(source, { platform: 'google', keyref: 'google/p/MAPS_KEY' }), true);
+  // Negative control: another key of the same platform has the API-key issuer (KBOX-59): no longer a paste source, and a master of its class still rotates by paste.
+  assert.equal(isPasteSource(source, { platform: 'google', keyref: 'google/p/MAPS_KEY' }), false);
   assert.equal(rotatesByPaste(source, { platform: 'google', keyref: 'google/p/MAPS_KEY', class: 'master' }), true);
 });
 
@@ -509,14 +510,15 @@ test('KBOX-55 KBOX-33 the share file watches a box key\'s pending generation (no
     parts.meta.putKey({ ...googleRow(keyref, keyref === BOX_REF ? 'master' : 'admin'), projects: [] });
     store.putKeyInfo(keyref, { scopeItems: [], location: {}, rotatedAt: NOW, markAdmin: false });
     for (const [gen, status] of [[1, 'current'], [2, 'pending']] as const) {
-      parts.vault.put(keyref, gen, Buffer.from(scalarText(`${keyref}-${gen}`), 'latin1'));
+      // The box key's value is a scalar; another Google key's has the API-key shape (KBOX-59: its issuer states it).
+      parts.vault.put(keyref, gen, Buffer.from(keyref === BOX_REF ? scalarText(`${keyref}-${gen}`) : `AIza${scalarText(`${keyref}-${gen}`).slice(0, 35)}`, 'latin1'));
       store.putGen({ keyref, gen, status, platformKeyId: null, location: {} });
     }
   }
   const share = createMetaShareSource({
     meta: parts.meta,
     values: parts.share.values,
-    shapeOf: (platform, keyref) => kitFor(source, { platform, keyref })?.shape,
+    shapeOf: (platform, keyref) => shapeOf(kitFor(source, { platform, keyref })),
     boxMade: (platform, keyref) => kitFor(source, { platform, keyref })?.boxKey !== undefined,
     generations: (keyref) => store.gens(keyref),
   });

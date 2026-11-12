@@ -1,4 +1,5 @@
-// KBOX-51: reconcile, on start and daily. For every platform with a lister it lists the keys the platform holds. A `kbox_` key that matches
+// KBOX-51: reconcile, on start and daily. For every platform with a lister it lists the keys the platform holds (a lister with no platform-wide
+// `list`: the keys at each distinct stored location of the platform's keys, once per master that covers it). A `kbox_` key that matches
 // the intent of an unleased run with no stored generation is an orphan from a crash between create and store: revoked, confirmed, audited, and
 // the run goes again under a new run id. A `kbox_` key that matches no intent and no generation raises one notice. A key whose run holds a
 // lease is never touched: that run is working on it right now. An unleased `issuing` run that stored nothing goes again only when a
@@ -7,11 +8,12 @@ import type { Audit } from '../ports/audit.ts';
 import type { Clock } from '../ports/clock.ts';
 import type { EventLog } from '../ports/events.ts';
 import type { PlatformKeyInfo } from '../ports/issuer.ts';
-import type { PlatformId } from '../ports/types.ts';
+import type { KeyLocation, PlatformId } from '../ports/types.ts';
 import type { Orchestrator } from './orchestrator.ts';
+import { covers, sameLocation } from '../pure/location.ts';
 import { intentAbsent } from '../pure/rotation-machine.ts';
 import { revokeAndConfirm } from './revoke-confirm.ts';
-import { kitFor } from './rotation-ports.ts';
+import { kitFor, storedPlacement } from './rotation-ports.ts';
 import type { MasterResult, PlatformSource } from './rotation-ports.ts';
 import type { RotationStore, RunRow } from './rotation-store.ts';
 
@@ -36,20 +38,43 @@ export function createReconciler(deps: ReconcileDeps): Reconciler {
     deps.audit.append({ action: 'rotation.drive_failed', subject, at: deps.clock.now(), detail: { run_id: runId, code } });
   };
 
+  /** Every distinct stored location of the platform's keys that can have an orphan listed there: a key whose kit has a lister and whose stored place still passes its entry. */
+  function listableLocations(platform: PlatformId): readonly KeyLocation[] {
+    const places: KeyLocation[] = [];
+    for (const head of store.keys()) {
+      const info = store.keyInfo(head.keyref);
+      if (head.platform !== platform || info === undefined || kitFor(deps, head)?.lister === undefined || storedPlacement(deps, head, info) !== 'ok') continue;
+      if (!places.some((place) => sameLocation(place, info.location))) places.push(info.location);
+    }
+    return places;
+  }
+
   /**
    * KBOX-57: what the platform holds, listed once per master row (each master sees its own place); a listing that fails audits `list_failed`
-   * for that row only and the others still count. A key two masters both see is listed once.
+   * for that row only and the others still count. A key two masters both see is listed once. A lister with no platform-wide `list` is asked
+   * `listAt` for each distinct stored location of the platform's keys, by each master row that covers it: a `kbox_` key in a place no stored key
+   * names is not found.
    */
   async function listed(platform: PlatformId): Promise<readonly PlatformKeyInfo[] | undefined> {
     const lister = deps.platform(platform)?.lister;
     if (lister === undefined) return undefined;
     const seen = new Map<string, PlatformKeyInfo>();
-    for (const master of deps.masters(platform)) {
+    const read = async (call: () => Promise<readonly PlatformKeyInfo[]>): Promise<void> => {
       try {
-        for (const key of await lister.list(master.value)) if (!seen.has(key.platformKeyId)) seen.set(key.platformKeyId, key);
+        for (const key of await call()) if (!seen.has(key.platformKeyId)) seen.set(key.platformKeyId, key);
       } catch {
+        // A listing that failed: one `list_failed` row for the one master (and location) it was asked of; the others still count.
         deps.audit.append({ action: 'rotation.drive_failed', subject: platform, at: deps.clock.now(), detail: { run_id: 'reconcile', code: 'list_failed' } });
       }
+    };
+    const masters = deps.masters(platform);
+    const { list } = lister;
+    if (list !== undefined) {
+      for (const master of masters) await read(() => list.call(lister, master.value));
+      return [...seen.values()];
+    }
+    for (const place of listableLocations(platform)) {
+      for (const master of masters.filter((row) => covers(row.at, place))) await read(async () => (await lister.listAt(place, master.value)).keys);
     }
     return [...seen.values()];
   }

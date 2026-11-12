@@ -17,7 +17,7 @@ import { createPlatformSource } from '../src/shell/platform-source.ts';
 import { issuerContract } from './contracts/issuer.contract.ts';
 import { listerContract } from './contracts/lister.contract.ts';
 import { verifierContract } from './contracts/verifier.contract.ts';
-import { bytesOf } from './kit/index.ts';
+import { bytesOf, listAll } from './kit/index.ts';
 import { routesWorld } from './support/routes-world.ts';
 import type { RoutesWorld } from './support/routes-world.ts';
 import { unverifiedDisagreement } from './support/probe-status.ts';
@@ -69,7 +69,7 @@ test('KBOX-36 every call goes to api.vercel.com over https', async () => {
   fresh();
   const before = http.sent.length;
   const made = await issuer.issue({ scope: {}, at: { project: PROJECT } }, 'kbox_a', master());
-  await lister.list(master());
+  await listAll(lister, master());
   await verifier.verify(made.value, { platform: 'vercel', at: {} });
   await issuer.revoke(made.platformKeyId, master());
   const hosts = new Set(http.sent.slice(before).map((s) => s.originalHost));
@@ -213,7 +213,7 @@ test('KBOX-36 list reads every page of /v6/user/tokens and shows names and proje
   for (const [i, project] of [PROJECT, OTHER_PROJECT, PROJECT, undefined, PROJECT].entries()) {
     made.push(await issuer.issue({ scope: {}, at: project === undefined ? {} : { project } }, `kbox_n${i}`, master()));
   }
-  const listed = await lister.list(master());
+  const listed = await listAll(lister, master());
   assert.deepEqual(listed.map((k) => k.name).sort(), ['kbox_n0', 'kbox_n1', 'kbox_n2', 'kbox_n3', 'kbox_n4']);
   assert.deepEqual(listed.find((k) => k.name === 'kbox_n1')?.location, { project: OTHER_PROJECT });
   assert.equal(listed.find((k) => k.name === 'kbox_n3')?.location, undefined);
@@ -249,7 +249,7 @@ test('KBOX-51 KBOX-36 a listing whose later page cannot be read is incomplete, a
     assert.equal(listing?.complete, false);
     assert.equal(listing?.keys.length, 2, 'the first page is still shown');
     const again = world.entryOver(asHttp(afterCalls(1, later)));
-    await assert.rejects(() => again.lister?.list(master()) ?? Promise.reject(new Error('no lister')), /vercel: (unreachable|server_error)/);
+    await assert.rejects(() => again.lister === undefined ? Promise.reject(new Error('no lister')) : listAll(again.lister, master()), /vercel: (unreachable|server_error)/);
   }
 });
 
@@ -265,10 +265,10 @@ test('KBOX-36 the next page is asked with until=<cursor> and a refused master li
   fresh();
   for (let i = 0; i < 3; i++) await issuer.issue({ scope: {}, at: {} }, `kbox_c${i}`, master());
   const before = http.sent.length;
-  await lister.list(master());
+  await listAll(lister, master());
   assert.deepEqual(sentSince(before)[0], 'GET /v6/user/tokens');
   assert.match(sentSince(before)[1] ?? '', /^GET \/v6\/user\/tokens\?until=\d+$/);
-  await assert.rejects(() => lister.list(lentText(WRONG_TEXT)), /vercel: rejected/);
+  await assert.rejects(() => listAll(lister, lentText(WRONG_TEXT)), /vercel: rejected/);
 });
 
 // ---------------------------------------------------------------- verifier
@@ -401,7 +401,7 @@ test('KBOX-14 KBOX-36 a key that cannot be a header value is refused with no cal
   const before = http.sent.length;
   for (const bad of ['vcp_a\nb', 'vcp_a b', 'vcp_\u0001x', 'vcp_é', '']) {
     assert.equal(await verifier.verify(lentText(bad), { platform: 'vercel', at: {} }), 'rejected', JSON.stringify(bad));
-    await assert.rejects(() => lister.list(lentText(bad)), /vercel: bad_key/);
+    await assert.rejects(() => listAll(lister, lentText(bad)), /vercel: bad_key/);
     await assert.rejects(() => issuer.revoke('tok_x', lentText(bad)), /vercel: bad_key/);
   }
   assert.deepEqual(sentSince(before), []);

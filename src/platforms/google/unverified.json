@@ -9,5 +9,7 @@
   "google.gocspx-length",
   "google.aiza-length",
   "google.must-deny-discovery",
-  "google.apikeys-admin-scope"
+  "google.apikeys-admin-scope",
+  "google.apikeys-create-answer",
+  "google.apikey-verify-call"
 ]

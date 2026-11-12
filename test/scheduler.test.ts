@@ -2,7 +2,7 @@
 // ever later than the unstaggered one.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { checkProperty, seedFor } from './kit/index.ts';
+import { checkProperty, listAll, seedFor } from './kit/index.ts';
 import { PASTE_PLATFORM, pasteValue, routesWorld } from './support/routes-world.ts';
 import type { RoutesWorld } from './support/routes-world.ts';
 import type { SeededRandom } from './kit/index.ts';
@@ -121,7 +121,7 @@ test('KBOX-52 a due admin key opens exactly one approval, with the old key still
   w.rotation.tick();
   assert.deepEqual((await w.queue()).map((q) => [q.kind, q.revision]), [['rotate_key', 1]], 'no second approval and no new revision that would void the assertion');
   assert.equal(rotatePushes(w).length, 1);
-  assert.equal((await w.platform.lister.list(w.platform.master())).length, 1, 'the old key keeps working while it waits');
+  assert.equal((await listAll(w.platform.lister, w.platform.master())).length, 1, 'the old key keeps working while it waits');
 });
 
 test('KBOX-52 a due admin key on a paste-source platform opens exactly one paste task, and a second tick opens none', async (t) => {

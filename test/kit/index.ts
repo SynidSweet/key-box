@@ -27,3 +27,4 @@ export { directives, missingDirectives, parseTmpfiles, words } from './unit-text
 export type { TmpfilesLine } from './unit-text.ts';
 export { adapterHttpTo } from './adapter-http.ts';
 export type { FakeAdapterHttp, SentRequest } from './adapter-http.ts';
+export { listAll } from './list-all.ts';

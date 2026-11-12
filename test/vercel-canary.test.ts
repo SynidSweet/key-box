@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { inspect } from 'node:util';
 import type { Canary } from './kit/index.ts';
-import { bytesOf, canary, lent } from './kit/index.ts';
+import { bytesOf, canary, lent, listAll } from './kit/index.ts';
 import { PROJECT, lentText, vercelWorld } from './support/vercel-world.ts';
 
 const hexOf = (c: Canary): string => Buffer.from(c.bytes).toString('hex');
@@ -27,7 +27,7 @@ test('KBOX-14 a master the platform refuses, quoted back in the 403 message, is 
   const runs: Record<string, () => Promise<unknown>> = {
     issue: () => world.issuer.issue({ scope: {}, at: { project: PROJECT } }, 'kbox_a', bad),
     revoke: () => world.issuer.revoke('t', bad),
-    list: () => world.lister.list(bad),
+    list: () => listAll(world.lister, bad),
     listAt: () => world.lister.listAt({ project: PROJECT }, bad),
     remove: () => dest.remove(target, 'K', bad),
     redeploy: () => world.kit.redeployer?.redeploy(target, bad) ?? Promise.reject(new Error('no redeployer')),
@@ -55,7 +55,7 @@ test('KBOX-14 a create response carrying the canary gives a Lent that prints as 
   assert.equal(Buffer.from(await bytesOf(made.value)).toString('utf8'), tokenOf(c), 'the value is still usable inside use()');
   // The new token, used as a master and refused (the platform quotes it), leaks nowhere either.
   world.fake.forceStatus(403);
-  for (const run of [() => world.lister.list(made.value), () => world.issuer.revoke('t', made.value), () => world.issuer.issue({ scope: {}, at: {} }, 'kbox_b', made.value)]) {
+  for (const run of [() => listAll(world.lister, made.value), () => world.issuer.revoke('t', made.value), () => world.issuer.issue({ scope: {}, at: {} }, 'kbox_b', made.value)]) {
     c.assertAbsent(surfacesOf(await failure(run)));
   }
   world.fake.forceStatus(undefined);

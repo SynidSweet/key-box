@@ -79,8 +79,11 @@ export interface KeyListing {
 
 /** Required when `revealOnce` is true. */
 export interface KeyLister {
-  /** Every key the master can see (reconcile's sweep for `kbox_` names). */
-  list(master: Lent): Promise<PlatformKeyInfo[]>;
+  /**
+   * Every key the master can see (reconcile's sweep for `kbox_` names). Absent on a platform no one master sees whole (Google: a master sees
+   * the projects it is an admin in): reconcile then lists each distinct stored location of the platform's keys with `listAt` (KBOX-51).
+   */
+  list?(master: Lent): Promise<PlatformKeyInfo[]>;
   /** The keys at one location (region and project), saying whether the listing is complete: what confirms a revoke (KBOX-51 step 10). */
   listAt(at: KeyLocation, master: Lent): Promise<KeyListing>;
 }
@@ -91,10 +94,20 @@ export interface VerifyTarget {
   readonly at: KeyLocation;
   /** The read call the owner chose for this key from the entry's `verifyHints` (KBOX-40); none: the verifier's own order. */
   readonly hint?: string;
+  /**
+   * KBOX-58: the platform's master core chose for the key (KBOX-57), lent; present only for a verifier that declares `needsMaster`, and only when
+   * the master was chosen. Built by one function (`verifyTargetOf`, src/shell/rotation-ports.ts); no other verifier is ever handed one.
+   */
+  readonly master?: Lent;
 }
 
 export interface Verifier {
   verify(key: Lent, target: VerifyTarget): Promise<'ok' | 'rejected' | 'unreachable'>;
+  /**
+   * KBOX-58: this call reaches its platform with a token minted from the platform's master (Google's key lookup), so core hands it the master
+   * chosen for the key (`VerifyTarget.master`). Absent: it is never handed one.
+   */
+  readonly needsMaster?: true;
   /**
    * KBOX-58: whether this call can test a key with this stored scope and location. Absent: every key of the platform. Pure; never sees a value or
    * a class. Read only through `verifierFor` (src/shell/rotation-ports.ts).

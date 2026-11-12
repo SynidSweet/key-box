@@ -3,11 +3,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
-import { bytesOf, lent, seededRandom } from './kit/index.ts';
+import { bytesOf, lent, listAll, seededRandom } from './kit/index.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
 import { newKeyOf } from '../src/shell/new-key.ts';
 import type { PlatformSource } from '../src/shell/rotation-ports.ts';
-import type { Retirer } from '../src/ports/issuer.ts';
+import type { KeyLister, Retirer, Verifier, VerifyTarget } from '../src/ports/issuer.ts';
+import type { KeyRow } from '../src/ports/meta.ts';
+import type { BoxMadeKey } from '../src/ports/platform.ts';
 import type { KeyLocation, Lent } from '../src/ports/types.ts';
 import { ApiError } from '../src/pure/errors.ts';
 import { HOUR, MINUTE, rotationWorld } from './support/rotation-world.ts';
@@ -57,7 +59,7 @@ test('KBOX-51 the intent row is written before the platform is called, and carri
   assert.equal(run.state, 'issuing');
   await w.orch.idle();
   assert.ok(w.trace.includes('issue'), 'the fake platform refuses to create when the intent row is missing, so this run passing proves the order');
-  const listed = await w.platform.lister.list(w.platform.master());
+  const listed = await listAll(w.platform.lister, w.platform.master());
   assert.ok(listed.some((k) => k.name === run.intentName), 'the platform key carries the intent name');
 });
 
@@ -1449,4 +1451,237 @@ test('KBOX-57 KBOX-51 reconcile\'s retake of an issuing run that stored nothing 
   assert.throws(() => w.orch.retake(run.runId), (e: unknown) => e instanceof ApiError && e.code === 'rejected' && JSON.stringify(e.detail) === JSON.stringify({ code: 'location_field_unknown' }));
   assert.equal(w.store.run(run.runId)?.state, 'issuing', 'not abandoned');
   assert.equal(w.store.runs().length, runsBefore + 1, 'no second run: only the interrupted one was added');
+});
+
+// --- KBOX-51 (google-b): a lister with only `listAt`, swept once per stored location and covering master ------------------------------
+
+interface ListAsk {
+  readonly at: KeyLocation;
+  readonly master: string;
+}
+
+/**
+ * The fake platform's lister with `list` taken away (Google has none: no master sees the platform whole): it answers `listAt` only. Every ask is
+ * recorded with the master's value; `throwAt` makes the listing of that region throw. `withList` keeps `list` and records its calls instead.
+ */
+function listerShape(asks: ListAsk[], over: { readonly throwAt?: string; readonly withList?: { calls: number } } = {}) {
+  const counting = over.withList;
+  return (real: PlatformSource): PlatformSource => ({
+    ...real,
+    platform: (id) => {
+      const kit = real.platform(id);
+      const inner = kit?.lister;
+      if (kit === undefined || inner === undefined) return kit;
+      const lister: KeyLister = {
+        ...(counting === undefined ? {} : { list: async (master: Lent) => { counting.calls += 1; return inner.list?.(master) ?? []; } }),
+        listAt: async (at, master) => {
+          asks.push({ at, master: asText(await bytesOf(master)) });
+          if (at.region !== undefined && at.region === over.throwAt) throw new Error('listing refused');
+          return inner.listAt(at, master);
+        },
+      };
+      return { ...kit, lister };
+    },
+  });
+}
+
+const BOX_REF = 'fake/p/BOX';
+const STUB_BOX: BoxMadeKey = { name: 'BOX', shape: { prefix: null, alphabet: 'hex', coreLength: { min: 8, max: 8 }, random: true }, publishLeadMs: 0, generate: () => new Uint8Array(8), check: () => Promise.resolve('ok'), prove: () => Promise.resolve('ok') };
+/** The platform's kit with a box-made key declared (so the key `fake/p/BOX` gets a kit with no lister). */
+const withBoxKey = (real: PlatformSource): PlatformSource => ({ ...real, platform: (id) => { const kit = real.platform(id); return kit === undefined ? undefined : { ...kit, boxKey: STUB_BOX }; } });
+const boxRow = (): KeyRow => ({ keyref: BOX_REF, platform: 'fake', name: 'BOX', projects: [], class: 'master', status: 'works', gen_current: 1, schedule: { rotate_every_days: 90, grace_hours: 1, next_due_at: null, expires_at: null }, coverage: null, last_use_at: null });
+
+const KEY_US = 'fake/shop2/OTHER_KEY';
+
+/** Two keys, one stored at region eu and one at us, and a box-made key at `{}`; the platform's masters are the working one (covers all) and a stranger's (covers us). */
+async function twoLocations(t: TestContext, asks: ListAsk[], over: Parameters<typeof listerShape>[1] = {}) {
+  const box: { stranger?: Lent } = {};
+  const shaped = listerShape(asks, over);
+  const world = await rotationWorld(t, {
+    source: (real) => {
+      const base = shaped(withBoxKey(real));
+      return { ...base, masters: (platform) => [...base.masters(platform), ...(box.stranger === undefined ? [] : [{ at: { region: 'us' }, value: box.stranger }])] };
+    },
+  });
+  box.stranger = world.platform.stranger();
+  const eu = await world.seedKey();
+  const us = await world.seedKey({ keyref: KEY_US, name: 'OTHER_KEY', projects: ['shop2'], location: { region: 'us' } });
+  world.parts.meta.putKey(boxRow());
+  world.store.putKeyInfo(BOX_REF, { scopeItems: [], location: {}, rotatedAt: world.clock.now(), markAdmin: false });
+  return { w: world, eu, us, box };
+}
+
+/** The first run of `keyref` stops after the platform made its key and before the box stored it: an orphan, and the process starts again. */
+async function crashedAfterIssue(w: RotationWorld, keyref: string): Promise<void> {
+  w.checkpoints.arm('issued');
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.checkpoints.crashAt = undefined;
+  w.build();
+}
+
+test('KBOX-51 KBOX-59 a lister with only listAt is swept once per distinct stored location and covering master: the orphan at a stored location is revoked with the same audit row, a master the platform refuses audits list_failed for itself, and a box-made key\'s location is never listed', async (t) => {
+  const asks: ListAsk[] = [];
+  const { w, eu } = await twoLocations(t, asks);
+  assert.equal(w.platform.lister.list !== undefined, true, 'the fake platform itself still has a list: the sweep must not use it');
+  await crashedAfterIssue(w, eu);
+  assert.equal((await w.live()).length, 3, 'the platform holds the orphan beside the two keys');
+  asks.length = 0;
+  await w.reconciler.run();
+  const master = asText(w.platform.masterBytes);
+  const stranger = asText(await bytesOf(w.platform.stranger()));
+  assert.deepEqual(
+    asks.slice(0, 3).map((a) => `${a.at.region}:${a.master === master ? 'working' : a.master === stranger ? 'stranger' : '?'}`).sort(),
+    ['eu:working', 'us:stranger', 'us:working'],
+    'eu once (two keys of one location are one listing), us once for each master that covers it',
+  );
+  assert.ok(asks.every((a) => a.at.region !== undefined), 'the box key\'s location {} is never listed');
+  const audit = w.parts.audit.read(0).entries;
+  assert.equal(audit.filter((e) => e.action === 'rotation.orphan_revoked').length, 1, 'the same audit row as a lister with list');
+  assert.equal(audit.filter((e) => e.detail['code'] === 'list_failed').length, 1, 'the stranger\'s listing of us: one row, for that master only');
+  await w.settle();
+  assert.equal((await w.live()).length, 2, 'the orphan is gone and the run made its new key');
+});
+
+test('KBOX-51 KBOX-59 a listAt that throws for one stored location audits list_failed and the other location still sweeps its orphan', async (t) => {
+  const asks: ListAsk[] = [];
+  const { w, eu } = await twoLocations(t, asks, { throwAt: 'us' });
+  await crashedAfterIssue(w, eu);
+  await w.reconciler.run();
+  const audit = w.parts.audit.read(0).entries;
+  assert.ok(audit.filter((e) => e.detail['code'] === 'list_failed').length >= 1, 'the refused location is reported');
+  assert.equal(audit.filter((e) => e.action === 'rotation.orphan_revoked').length, 1, 'eu was still swept');
+});
+
+test('KBOX-51 KBOX-59 a kbox_ key in a location no stored key names is not found: no orphan_revoked row, no orphan notice, and it stays live (the stated residual)', async (t) => {
+  const asks: ListAsk[] = [];
+  const { w, eu } = await twoLocations(t, asks);
+  const known = await w.live();
+  w.faults.answerAt = { region: 'ap' };
+  await crashedAfterIssue(w, eu);
+  w.faults.answerAt = undefined;
+  const orphan = (await w.live()).find((id) => !known.includes(id));
+  assert.ok(orphan !== undefined, 'the platform made the key');
+  await w.reconciler.run();
+  assert.ok(asks.some((a) => a.at.region === 'eu'), 'the stored locations were listed');
+  assert.ok(asks.every((a) => a.at.region !== 'ap'), 'ap is no stored key\'s location');
+  assert.equal(w.parts.audit.read(0).entries.filter((e) => e.action === 'rotation.orphan_revoked').length, 0);
+  assert.equal(w.events('box.notice').filter((e) => e.data['code'] === 'orphan_key').length, 0);
+  await w.settle();
+  assert.ok((await w.live()).includes(orphan), 'nothing ended it');
+});
+
+test('KBOX-51 a lister that has list is swept by list only (negative control): one call per master row, and no listAt for the sweep', async (t) => {
+  const asks: ListAsk[] = [];
+  const withList = { calls: 0 };
+  const { w } = await twoLocations(t, asks, { withList });
+  asks.length = 0;
+  await w.reconciler.run();
+  assert.equal(withList.calls, 2, 'one per master row: the working master and the stranger');
+  assert.deepEqual(asks, [], 'no run is open, so nothing else lists');
+});
+
+// --- KBOX-58 (google-b): a verifier that needs the master is handed it, resolved at that step; no other verifier is ----------------
+
+/** The fake platform's verifier, recording every target it is asked about; `needsMaster` marks it as Google's is. */
+function recordingVerifierSource(targets: VerifyTarget[], needsMaster: boolean) {
+  return (real: PlatformSource): PlatformSource => ({
+    ...real,
+    platform: (id) => {
+      const kit = real.platform(id);
+      const inner = kit?.verifier;
+      if (kit === undefined || inner === undefined) return kit;
+      const verifier: Verifier = {
+        ...(needsMaster ? { needsMaster: true as const } : {}),
+        verify: (key, target) => {
+          targets.push(target);
+          return inner.verify(key, target);
+        },
+      };
+      return { ...kit, verifier };
+    },
+  });
+}
+
+test('KBOX-58 a verifier without needsMaster is never handed a master, at steps 5, 8 and 10 or in a rollback, and needs none at steps 5 and 8', async (t) => {
+  const targets: VerifyTarget[] = [];
+  const { w, keyref } = await seeded(t, { source: recordingVerifierSource(targets, false) });
+  w.checkpoints.hook = async (point) => {
+    if (point === 'redeployed') w.faults.noMaster = true;
+  };
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.checkpoints.hook = undefined;
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'grace', 'step 8 passed with no master row: this verifier needs none');
+  w.faults.noMaster = false;
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  assert.equal(genOf(w, keyref, 1)?.status, 'retired', 'step 10 confirmed through the verifier');
+  w.faults.verifyAt = 1;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  await w.settle();
+  assert.ok(w.events('rotation.failed').length >= 1, 'the rollback ran');
+  assert.ok(targets.length >= 6, `${targets.length} verifications`);
+  for (const target of targets) assert.equal(Object.hasOwn(target, 'master'), false, 'no master member');
+});
+
+test('KBOX-58 a verifier with needsMaster is handed the master core chooses for the key, at steps 5, 8 and 10 and in a rollback', async (t) => {
+  const targets: VerifyTarget[] = [];
+  const { w, keyref } = await seeded(t, { source: recordingVerifierSource(targets, true) });
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  w.faults.verifyAt = 1;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.ok(targets.length >= 6, `${targets.length} verifications`);
+  for (const target of targets) {
+    assert.ok(target.master !== undefined, 'a master member');
+    assert.equal(asText(await bytesOf(target.master)), asText(w.platform.masterBytes));
+  }
+});
+
+test('KBOX-58 KBOX-57 a master that goes away between steps 4 and 5 fails the run at verifying with no_master and one notice; the rollback waits for one and then ends the new key; two rows fail it master_ambiguous', async (t) => {
+  for (const [fault, code] of [['noMaster', 'no_master'], ['masterAmbiguous', 'master_ambiguous']] as const) {
+    const targets: VerifyTarget[] = [];
+    const { w, keyref } = await seeded(t, { source: recordingVerifierSource(targets, true) });
+    w.checkpoints.hook = async (point) => {
+      if (point === 'stored') w.faults[fault] = true;
+    };
+    const before = targets.length;
+    w.orch.start({ keyref, origin: 'owner' });
+    await w.orch.idle();
+    w.checkpoints.hook = undefined;
+    const failed = w.events('rotation.failed');
+    assert.equal(failed.length, 1, `${code}: one notice`);
+    assert.deepEqual([failed[0]?.data['step'], failed[0]?.data['reason_code']], ['verifying', code]);
+    assert.equal(targets.length, before, 'the value was never lent to the verifier');
+    assert.equal(w.store.activeRunOf(keyref)?.state, 'rolling_back', 'the rollback waits for a master');
+    w.faults[fault] = false;
+    await w.settle(2 * MINUTE);
+    assert.equal(w.events('rotation.failed').length, 1, 'no second notice');
+    assert.equal((await w.live()).length, 1, 'the new key was ended once a master was there again');
+  }
+});
+
+// --- KBOX-51 (google-b): a step-10 stall of a key the box ends writes one audit row per run ---------------------------------------
+
+test('KBOX-51 a step-10 stall of a key the box ends itself writes one rotation.revoke_unconfirmed row for the run however often it is retried, and still raises one notice', async (t) => {
+  const { w, keyref } = await seeded(t, {
+    source: (real) => ({ ...real, platform: (id) => { const kit = real.platform(id); return kit === undefined ? undefined : { ...kit, verifier: { verify: () => Promise.resolve('ok' as const) } }; } }),
+  });
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  for (const minutes of [1, 2, 4, 8, 16, 32]) {
+    w.clock.advance(minutes * MINUTE);
+    await w.orch.idle();
+  }
+  assert.equal(genOf(w, keyref, 1)?.status, 'grace');
+  assert.ok((w.store.activeRunOf(keyref)?.attempts ?? 0) >= 6, 'it was retried');
+  assert.equal(w.parts.audit.read(0).entries.filter((e) => e.action === 'rotation.revoke_unconfirmed').length, 1);
+  assert.equal(w.events('rotation.old_key_still_on').length, 1);
 });

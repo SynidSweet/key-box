@@ -8,7 +8,11 @@ import type { SampleRequest } from '../src/ports/relay-profile.ts';
 import { RegistryRefused, assertRegistry, checkRegistry } from '../src/pure/profile.ts';
 import { REGISTRY } from '../src/platforms/registry.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
-import { seededRandom } from './kit/index.ts';
+import { lent, seededRandom } from './kit/index.ts';
+import { checkLocation } from '../src/pure/location.ts';
+import { boxKeyrefOf, kitFor, verifyTargetOf } from '../src/shell/rotation-ports.ts';
+import { API_KEY_SHAPE } from '../src/platforms/google/scope.ts';
+import { SIGNING_KEY_SHAPE } from '../src/platforms/google/signing-key.ts';
 import { hostProfile, leakyProfile, pathProfile } from './fixtures/profiles.ts';
 import { NO_ISSUER_CLASSIFY, NO_ISSUER_SHAPE, PATH_HOST, variants } from './fixtures/profiles.ts';
 
@@ -119,4 +123,68 @@ test('KBOX-23 two entries with the same id, or an entry whose relay profile name
 test('KBOX-23 startup refuses a failing registry with a fixed message naming the code and the platform', () => {
   assert.throws(() => assertRegistry([{ id: 'leaky', relay: leakyProfile, unverified: [] }]), (e: unknown) => e instanceof RegistryRefused && e.message === 'registry check failed: allow_matches_must_deny (leaky)');
   assert.doesNotThrow(() => assertRegistry(REGISTRY));
+});
+
+// --- KBOX-59 and KBOX-58: the Google entry's place in the registry --------------------------------------------------------------------
+
+const googleEntry = (): PlatformEntry => {
+  const found = REGISTRY.find((e) => e.id === 'google');
+  assert.ok(found !== undefined);
+  return found;
+};
+
+test('KBOX-58 only the Google verifier needs the master, and through verifyTargetOf no other entry\'s verifier is handed one', () => {
+  const master = lent(Buffer.from('a master'), 'master');
+  const target = { platform: 'x', at: {} };
+  assert.deepEqual(REGISTRY.filter((e) => e.verifier?.needsMaster === true).map((e) => e.id), ['google']);
+  for (const entry of REGISTRY) {
+    if (entry.verifier === undefined) continue;
+    assert.equal(Object.hasOwn(verifyTargetOf(entry.verifier, target, master), 'master'), entry.id === 'google', entry.id);
+    assert.equal(Object.hasOwn(verifyTargetOf(entry.verifier, target, undefined), 'master'), false, `${entry.id}: a master that was not chosen is never made up`);
+  }
+});
+
+test('KBOX-59 KBOX-47 the Google entry\'s own calls reach exactly the three hosts of the identity half and the API Keys and Secret Manager hosts', () => {
+  assert.deepEqual([...(googleEntry().hosts ?? [])].sort(), ['apikeys.googleapis.com', 'cloudresourcemanager.googleapis.com', 'iamcredentials.googleapis.com', 'secretmanager.googleapis.com', 'sts.googleapis.com']);
+  assert.ok(googleEntry().unverified.includes('google.apikeys-create-answer') && googleEntry().unverified.includes('google.apikey-verify-call'));
+});
+
+test('KBOX-57 KBOX-59 the Google entry declares the location `project` only: a project id, required of an ordinary key, naming no host, proven by no prover', () => {
+  const { location, locationProver } = googleEntry();
+  assert.deepEqual(Object.keys(location ?? {}), ['project']);
+  assert.deepEqual(location?.project?.requiredFor, ['ordinary']);
+  assert.equal(location?.project?.namesHost, undefined);
+  assert.equal(locationProver, undefined);
+  const items = ['api:firestore.googleapis.com'];
+  assert.equal(checkLocation(location, { project: 'p-proj1' }, 'ordinary', items), 'ok');
+  assert.equal(checkLocation(location, {}, 'ordinary', items), 'location_missing');
+  for (const project of ['P1', 'p1', 'p-proj1/x', 'projects/p-proj1', '']) assert.equal(checkLocation(location, { project }, 'ordinary', items), 'location_bad_value', project);
+  assert.equal(checkLocation(location, { region: 'global' }, 'ordinary', items), 'location_field_unknown');
+  assert.equal(checkLocation(location, { project: 'p-proj1' }, 'ordinary', ['project:p-proj1']), 'location_in_scope');
+});
+
+test('KBOX-55 KBOX-59 the API-key issuer classifies no scope master and the entry states no class or shape of its own; the box key keeps master and its shape through kitFor, every other Google keyref gets the issuer', () => {
+  const entry = googleEntry();
+  assert.equal(entry.shape, undefined);
+  assert.equal(entry.classify, undefined);
+  assert.ok(entry.issuer !== undefined && entry.boxKey !== undefined);
+  for (const items of [[], ['master'], ['admin'], ['api:firestore.googleapis.com'], ['sa:p-proj1/acct1x']]) {
+    for (const at of [{}, { project: 'p-proj1' }]) assert.equal(entry.issuer.capabilities().classify({ items }, at), 'ordinary', JSON.stringify(items));
+  }
+  const source = { platform: (id: string) => REGISTRY.find((e) => e.id === id) };
+  const box = kitFor(source, { platform: 'google', keyref: boxKeyrefOf('google', entry.boxKey) });
+  assert.equal(box?.issuer, undefined);
+  assert.deepEqual(box?.shape, SIGNING_KEY_SHAPE);
+  assert.equal(box?.classify?.({ items: [] }, { project: 'p-proj1' }), 'master');
+  const api = kitFor(source, { platform: 'google', keyref: 'google/p-proj1/GEMINI_KEY' });
+  assert.equal(api?.issuer, entry.issuer);
+  assert.equal(api?.boxKey, undefined);
+  assert.deepEqual(api?.issuer?.capabilities().shape, API_KEY_SHAPE);
+});
+
+test('KBOX-16 KBOX-59 the Google entry provides the Secret Manager destination, readable by the API (ordinary keys only), and no redeployer', () => {
+  const kits = googleEntry().destinations ?? [];
+  assert.deepEqual(kits.map((k) => k.destination.kind), ['google-secret-manager']);
+  assert.equal(kits[0]?.redeployer, undefined);
+  assert.equal(kits[0]?.destination.properties().readableBy, 'api');
 });

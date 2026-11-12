@@ -25,7 +25,7 @@ import { afterProof, intentName, nextStep, retryDelayMs } from '../pure/rotation
 import type { KeyMachine, ProofVerdict, Step } from '../pure/rotation-machine.ts';
 import { enderOf, revokeAndConfirm } from './revoke-confirm.ts';
 import type { Ender } from './revoke-confirm.ts';
-import { isPasteSource, kindOfStored, kitFor, overlapOf, setterOf, storedPlacement, tryLend, verifierFor } from './rotation-ports.ts';
+import { isPasteSource, kindOfStored, kitFor, overlapOf, setterOf, storedPlacement, tryLend, verifierFor, verifyTargetOf } from './rotation-ports.ts';
 import type { MasterResult, PlatformKit, PlatformSource, Point } from './rotation-ports.ts';
 import type { DestinationRow, KeyHead, KeyInfo, Receipt, RotationStore, RunOrigin, RunRow } from './rotation-store.ts';
 
@@ -416,10 +416,14 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   async function verifyNew(run: RunRow, head: KeyHead, kit: PlatformKit, stepName: 'verifying' | 'checking', word: 'verify' | 'check'): Promise<Next> {
     const verifier = verifierFor(kit, kindOfStored(store.keyInfo(run.keyref)));
     if (verifier !== undefined) {
+      // KBOX-58: a verifier that needs the master gets the one chosen now, before the value is lent (a restart between steps resolves afresh).
+      const chosen = verifier.needsMaster === true ? masterFor(head) : undefined;
+      if (chosen !== undefined && !chosen.ok) return fail(run, stepName, chosen.code);
       const value = lendOrUndefined(run.keyref, run.genNew);
       if (value === undefined) return fail(run, stepName, `${word}_failed`);
       const at = store.gen(run.keyref, run.genNew)?.location ?? store.keyInfo(run.keyref)?.location ?? {};
-      const verdict = await attempt0(() => verifier.verify(value, { platform: head.platform, at, ...hintOf(run.keyref) }));
+      const asked = verifyTargetOf(verifier, { platform: head.platform, at, ...hintOf(run.keyref) }, chosen?.ok === true ? chosen.value : undefined);
+      const verdict = await attempt0(() => verifier.verify(value, asked));
       if (verdict !== 'ok') return fail(run, stepName, verdict === 'rejected' ? `${word}_rejected` : `${word}_unreachable`);
     }
     return advance(run, stepName);
@@ -566,7 +570,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     const attempts = run.attempts + 1;
     store.update(run.runId, { attempts });
     const reason = ender === 'owner' ? { reason: 'owner_ends' } : {};
-    deps.audit.append({ action: 'rotation.revoke_unconfirmed', subject: run.keyref, at: now(), detail: { run_id: run.runId, gen: run.genOld, attempt: attempts, ...reason } });
+    // A stall of a key the box ends itself (an issuer) is one audit row per run: its retries, hourly at the cap, add nothing the first did not say.
+    if (ender !== 'issuer' || attempts === 1) deps.audit.append({ action: 'rotation.revoke_unconfirmed', subject: run.keyref, at: now(), detail: { run_id: run.runId, gen: run.genOld, attempt: attempts, ...reason } });
     noticeStillOn(run, ender === 'owner' ? head : undefined);
     later(run.runId, retryDelayMs(attempts - 1));
     return 'wait';

@@ -26,7 +26,7 @@ import { relayProfileContract } from './contracts/relay-profile.contract.ts';
 import { verifierContract } from './contracts/verifier.contract.ts';
 import { MASTER_TEXT, OTHER_REF, REF, WRONG_TEXT, startFakeSupabase } from './fakes/supabase.ts';
 import { TEST_REGISTRY, variants } from './fixtures/profiles.ts';
-import { adapterHttpTo, bytesOf, canary, lent } from './kit/index.ts';
+import { adapterHttpTo, bytesOf, canary, lent, listAll } from './kit/index.ts';
 import type { FakeAdapterHttp } from './kit/index.ts';
 import { relayWorld } from './support/relay-world.ts';
 import { routesWorld } from './support/routes-world.ts';
@@ -295,12 +295,12 @@ test('KBOX-14 a refusing platform is rejected, a limit is rate_limited, a fault 
   assert.equal(await codeOf(() => s.issuer.issue({ scope: SECRET, at: AT }, 'kbox_abcd', stranger())), 'rejected');
   fake.mode = '429';
   assert.equal(await codeOf(() => s.issuer.issue({ scope: SECRET, at: AT }, 'kbox_abcd', master())), 'rate_limited');
-  assert.equal(await codeOf(() => s.lister.list(master())), 'rate_limited');
+  assert.equal(await codeOf(() => listAll(s.lister, master())), 'rate_limited');
   fake.mode = '500';
   assert.equal(await codeOf(() => s.issuer.issue({ scope: SECRET, at: AT }, 'kbox_abcd', master())), 'server');
   assert.equal(await codeOf(() => s.issuer.revoke(`${REF}:00000000-0000-4000-8000-000000000001`, master())), 'server');
   fake.mode = 'malformed';
-  assert.equal(await codeOf(() => s.lister.list(master())), 'bad_answer');
+  assert.equal(await codeOf(() => listAll(s.lister, master())), 'bad_answer');
 });
 
 test('KBOX-14 a transport failure is unreachable for issuer and lister, and a push that could not be answered is unknown, never refused', async () => {
@@ -318,14 +318,14 @@ test('KBOX-14 the canary: a key echoed by a create answer and a 401 body that qu
   const hex = Buffer.from(c.bytes).toString('hex');
   fake.plant = hex;
   const issued = await s.issuer.issue({ scope: SECRET, at: AT }, 'kbox_abcd', master());
-  const listed = await s.lister.list(master());
+  const listed = await listAll(s.lister, master());
   c.assertAbsent({ issued: JSON.stringify(issued) + String(issued.value), listed: JSON.stringify(listed) });
   const bad = lent(Buffer.from(hex), 'canary:1');
   const thrown: unknown[] = [];
   for (const run of [
     () => s.issuer.issue({ scope: SECRET, at: AT }, 'kbox_abce', bad),
     () => s.issuer.revoke(issued.platformKeyId, bad),
-    () => s.lister.list(bad),
+    () => listAll(s.lister, bad),
     () => s.prover.prove(AT, bad),
     () => s.destination.remove({ kind: 'supabase-secret', id: REF }, 'API_KEY', bad),
   ]) {

@@ -23,7 +23,7 @@ import { FAKE_LOCATION } from '../fakes/platform-entry.ts';
 import { FakePush } from '../fakes/push.ts';
 import { RecordingDestination, RecordingRedeployer } from '../fakes/recording-destination.ts';
 import type { DestinationCall } from '../fakes/recording-destination.ts';
-import { TimedClock, bytesOf, lent, seededRandom, tempDir } from '../kit/index.ts';
+import { TimedClock, bytesOf, lent, listAll, seededRandom, tempDir } from '../kit/index.ts';
 
 export const HOUR = 3600_000;
 export const MINUTE = 60_000;
@@ -192,11 +192,11 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
       : {}),
   };
   const lister: KeyLister = {
-    list: async (master: Lent): Promise<PlatformKeyInfo[]> => (await platform.lister.list(master)).map((k) => ({ ...k, location: { region: regionOf.get(k.platformKeyId) ?? 'eu' } satisfies KeyLocation })),
+    list: async (master: Lent): Promise<PlatformKeyInfo[]> => (await listAll(platform.lister, master)).map((k) => ({ ...k, location: { region: regionOf.get(k.platformKeyId) ?? 'eu' } satisfies KeyLocation })),
     listAt: async (at: KeyLocation, master: Lent): Promise<KeyListing> => {
       seenAt.listAt.push(at);
       const where = faults.listerAt ?? at;
-      const keys = (await lister.list(master)).filter((k) => k.location?.region === where.region && k.location?.project === where.project);
+      const keys = (await listAll(lister, master)).filter((k) => k.location?.region === where.region && k.location?.project === where.project);
       return { complete: !faults.listingIncomplete, at: where, keys };
     },
   };
@@ -328,7 +328,7 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
       return key.keyref;
     },
     async live() {
-      return (await platform.lister.list(platform.master())).map((k) => k.platformKeyId);
+      return (await listAll(platform.lister, platform.master())).map((k) => k.platformKeyId);
     },
     async valueOf(keyref, gen) {
       return Buffer.from(await bytesOf(parts.vault.lend(keyref, gen))).toString('utf8');

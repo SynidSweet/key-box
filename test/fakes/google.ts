@@ -1,11 +1,17 @@
-// A loopback server that plays the three Google hosts the box's identity reaches, as docs/probes/google.md describes them: STS token
+// A loopback server that plays the Google hosts the box reaches, as docs/probes/google.md describes them: STS token
 // exchange (`POST /v1/token`, form-encoded, `{error, error_description}` on a 400), IAM Credentials `generateAccessToken` and Cloud Resource
 // Manager `testIamPermissions`. It checks the box's JWT on its own (WebCrypto against the JWKS the test hands it), so a test sees what
 // Google would accept. Reached through `adapterHttpTo(fake)`; the path tells the hosts apart. Run directly, this file does nothing.
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { TestContext } from 'node:test';
+import { fakeApis } from './google-apis.ts';
+import type { ApisRoute, FakeApis } from './google-apis.ts';
+
+/** Anything that runs a cleanup when its test or suite ends: a TestContext, or a suite-level hook's own list. */
+export interface Cleanups {
+  after(fn: () => unknown): void;
+}
 
 export interface GoogleRequest {
   readonly method: string;
@@ -30,7 +36,7 @@ export type Override =
   | { readonly kind: 'hang' }
   | { readonly kind: 'cut' };
 
-export type GoogleRoute = 'sts' | 'impersonate' | 'test-permissions';
+export type GoogleRoute = 'sts' | 'impersonate' | 'test-permissions' | ApisRoute;
 
 export interface FakeGoogle {
   readonly url: string;
@@ -48,6 +54,14 @@ export interface FakeGoogle {
   /** The claims of the last JWT STS accepted. */
   readonly lastClaims: Readonly<Record<string, unknown>> | undefined;
   readonly lastHeader: Readonly<Record<string, unknown>> | undefined;
+  /** The API Keys, Cloud Resource Manager v3 and Secret Manager halves (google-apis.ts). */
+  readonly apis: FakeApis;
+  /** A bearer the fake takes as this service account's token, without the exchange (a test that needs no minter). */
+  admit(token: string, serviceAccount: string): void;
+  /** Forgets every request, override, key and secret; keeps what STS trusts and who may impersonate. */
+  reset(): void;
+  /** Forgets the requests seen so far and nothing else. */
+  clearRequests(): void;
 }
 
 export interface FakeGoogleOptions {
@@ -80,12 +94,13 @@ const decodeSegment = (s: string): Record<string, unknown> => {
   }
 };
 
-export async function fakeGoogle(t: TestContext, options: FakeGoogleOptions): Promise<FakeGoogle> {
+export async function fakeGoogle(t: Cleanups, options: FakeGoogleOptions): Promise<FakeGoogle> {
   const requests: GoogleRequest[] = [];
   let trusted: readonly TrustedJwk[] = [];
   let creators = new Set<string>();
   const held = new Map<string, readonly string[]>();
   const overrides = new Map<GoogleRoute, Override>();
+  const apis = fakeApis();
   const federated = new Set<string>();
   const saTokens = new Map<string, string>();
   let planted: string | undefined;
@@ -158,14 +173,18 @@ export async function fakeGoogle(t: TestContext, options: FakeGoogleOptions): Pr
     return json(res, 200, holding.length === 0 ? {} : { permissions: holding });
   };
 
-  const routeOf = (path: string): GoogleRoute | undefined => (path === STS ? 'sts' : IMPERSONATE.test(path) ? 'impersonate' : TEST_PERMISSIONS.test(path) ? 'test-permissions' : undefined);
+  const routeOf = (method: string, pathname: string): GoogleRoute | undefined => {
+    if (method === 'POST') return pathname === STS ? 'sts' : IMPERSONATE.test(pathname) ? 'impersonate' : TEST_PERMISSIONS.test(pathname) ? 'test-permissions' : apis.routeOf(method, pathname);
+    return apis.routeOf(method, pathname);
+  };
 
   const handle = async (incoming: IncomingMessage, res: ServerResponse, body: string): Promise<void> => {
     const path = incoming.url ?? '';
     const req: GoogleRequest = { method: incoming.method ?? '', path, authorization: incoming.headers.authorization, contentType: incoming.headers['content-type'], body };
     requests.push(req);
-    const route = routeOf(path);
-    if (incoming.method !== 'POST' || route === undefined) {
+    const url = new URL(path, 'http://fake.invalid');
+    const route = routeOf(incoming.method ?? '', url.pathname);
+    if (route === undefined) {
       res.writeHead(404, { 'content-type': 'text/html' });
       res.end('<html>404</html>');
       return;
@@ -181,6 +200,11 @@ export async function fakeGoogle(t: TestContext, options: FakeGoogleOptions): Pr
       res.writeHead(override.status, { 'content-type': 'application/json' });
       res.end(override.body);
       return;
+    }
+    const apisRoute = apis.routeOf(req.method, url.pathname);
+    if (apisRoute !== undefined) {
+      const answered = apis.answer(apisRoute, { method: req.method, pathname: url.pathname, query: url.searchParams, body }, saTokens.get(bearer(req)));
+      return json(res, answered.status, answered.body);
     }
     if (route === 'sts') return sts(req, res);
     const sa = IMPERSONATE.exec(path)?.[1];
@@ -218,6 +242,15 @@ export async function fakeGoogle(t: TestContext, options: FakeGoogleOptions): Pr
     },
     get lastHeader() {
       return lastHeader;
+    },
+    apis,
+    admit: (token, serviceAccount) => void saTokens.set(token, serviceAccount),
+    clearRequests: () => void (requests.length = 0),
+    reset: () => {
+      requests.length = 0;
+      overrides.clear();
+      apis.reset();
+      planted = undefined;
     },
   };
 }

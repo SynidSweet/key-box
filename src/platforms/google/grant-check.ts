@@ -52,6 +52,13 @@ function refusalOf(code: GoogleErrorCode): string {
     case 'identity_malformed':
     case 'signing_key_unreadable':
     case 'bad_location':
+    case 'bad_scope':
+    case 'bad_key_id':
+    case 'bad_secret_target':
+    case 'location_unconfirmed':
+    case 'apikeys_refused':
+    case 'apikeys_failed':
+    case 'remove_unsupported':
     case 'cloud_platform_for_relay':
     case 'scope_not_in_profile':
     case 'scope_malformed':

@@ -21,7 +21,7 @@ import { verifierContract } from './contracts/verifier.contract.ts';
 import { HOST_OF, startElevenLabsWorld } from './fakes/elevenlabs.ts';
 import type { ElevenLabsWorld, Region } from './fakes/elevenlabs.ts';
 import { variants } from './fixtures/profiles.ts';
-import { bytesOf, canary, lent } from './kit/index.ts';
+import { bytesOf, canary, lent, listAll } from './kit/index.ts';
 import { routesWorld } from './support/routes-world.ts';
 import type { RoutesWorld } from './support/routes-world.ts';
 
@@ -223,9 +223,9 @@ test('KBOX-39 revoke finds a key in whichever region holds it, and answers absen
 test('KBOX-39 a master only one region knows still lists and revokes: the other region\'s refusal is skipped, a refusal from both throws', async () => {
   world.reset();
   const issued = await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'k', world.master());
-  assert.equal((await listerOf().list(world.master())).length, 1);
+  assert.equal((await listAll(listerOf(), world.master())).length, 1);
   assert.equal(await issuerOf().revoke(issued.platformKeyId, world.master()), 'revoked');
-  await assert.rejects(() => listerOf().list(world.stranger()), /elevenlabs: rejected/);
+  await assert.rejects(() => listAll(listerOf(), world.stranger()), /elevenlabs: rejected/);
 });
 
 test('KBOX-39 / KBOX-51 list reads both regions and records each key\'s region; listAt of one region reads that host only; listAt with no region reads both', async () => {
@@ -234,7 +234,7 @@ test('KBOX-39 / KBOX-51 list reads both regions and records each key\'s region; 
   await issuerOf().issue({ scope: { items: [] }, at: { region: 'us' } }, 'in-us', world.master());
   await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'in-global', world.master());
   world.clearSent();
-  const all = await listerOf().list(world.master());
+  const all = await listAll(listerOf(), world.master());
   assert.deepEqual(all.map((k) => [k.name, k.location?.region]).sort(), [['in-global', 'global'], ['in-us', 'us']]);
   world.clearSent();
   const us = await listerOf().listAt({ region: 'us' }, world.master());
@@ -253,7 +253,7 @@ test('KBOX-39 a key the platform holds switched off is listed with disabled: tru
   await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'on', world.master());
   await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'off', world.master());
   for (const k of world.regions.global.accounts.get('sa-test-1')?.keys.values() ?? []) if (k.name === 'off') k.disabled = true;
-  const listed = await listerOf().list(world.master());
+  const listed = await listAll(listerOf(), world.master());
   assert.deepEqual(listed.map((k) => [k.name, k.disabled]).sort(), [['off', true], ['on', undefined]]);
 });
 
@@ -318,13 +318,13 @@ test('KBOX-14 KBOX-39 canary: a create response carrying a canary key and a plat
   const m = canary(24);
   const master = lent(Buffer.from(`sk_${Buffer.from(m.bytes).toString('hex')}`), 'master:canary');
   await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'c', master).catch((e: unknown) => failures.push(e));
-  await listerOf().list(master).catch((e: unknown) => failures.push(e));
+  await listAll(listerOf(), master).catch((e: unknown) => failures.push(e));
   await listerOf().listAt({ region: 'us' }, master).catch((e: unknown) => failures.push(e));
   await issuerOf().revoke('key-x', master).catch((e: unknown) => failures.push(e));
   world.regions.global.failWith = 500;
   world.regions.us.failWith = 500;
   await issuerOf().issue({ scope: { items: [] }, at: GLOBAL }, 'd', master).catch((e: unknown) => failures.push(e));
-  await listerOf().list(master).catch((e: unknown) => failures.push(e));
+  await listAll(listerOf(), master).catch((e: unknown) => failures.push(e));
   assert.equal(failures.length, 7);
   for (const e of failures) {
     c.assertAbsent(surfaces(e));

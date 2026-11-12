@@ -5,7 +5,7 @@
 import type { KeyLocation, Lent, PlatformId, PlatformKeyId } from '../ports/types.ts';
 import { confirmDead } from '../pure/rotation-machine.ts';
 import type { Evidence } from '../pure/rotation-machine.ts';
-import { verifierFor } from './rotation-ports.ts';
+import { verifierFor, verifyTargetOf } from './rotation-ports.ts';
 import type { PlatformKit } from './rotation-ports.ts';
 
 type Settled<T> = { readonly ok: true; readonly value: T } | { readonly ok: false };
@@ -64,7 +64,8 @@ async function confirm(target: RevokeTarget): Promise<boolean> {
   const { kit, id, value } = target;
   const verifier = verifierFor(kit, { scopeItems: target.scopeItems, at: target.at });
   if (verifier !== undefined && value !== undefined) {
-    const verdict = await settled(() => verifier.verify(value, { platform: target.platform, at: target.at, ...(target.hint === undefined ? {} : { hint: target.hint }) }));
+    const asked = verifyTargetOf(verifier, { platform: target.platform, at: target.at, ...(target.hint === undefined ? {} : { hint: target.hint }) }, target.master);
+    const verdict = await settled(() => verifier.verify(value, asked));
     const evidence: Evidence = { by: 'verifier', verdict: verdict.ok ? verdict.value : 'unreachable' };
     return confirmDead(evidence);
   }

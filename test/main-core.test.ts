@@ -23,7 +23,7 @@ import { REGISTRY } from '../src/platforms/registry.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
 import { PROJECT_REGISTRY } from './fixtures/profiles.ts';
 import { issuerWith } from './fakes/platform-entry.ts';
-import { TimedClock, bytesOf, drive, lent, seededRandom, tempDir, waitUntil } from './kit/index.ts';
+import { TimedClock, bytesOf, drive, lent, listAll, seededRandom, tempDir, waitUntil } from './kit/index.ts';
 
 const DAY = 24 * 3600_000;
 
@@ -348,7 +348,7 @@ test('KBOX-57 core builds its platform source over the stored record of each mas
   const lister: KeyLister = {
     list: async (master) => {
       listedWith.push(Buffer.from(await bytesOf(master)).toString('utf8'));
-      return platform.lister.list(master);
+      return listAll(platform.lister, master);
     },
     listAt: (at, master) => platform.lister.listAt(at, master),
   };

@@ -258,12 +258,11 @@ test('KBOX-24 an unreachable or failing check fails closed: the grant is refused
   }
 });
 
-test('KBOX-24 without the box\'s identity, without a stored record, or with no or two signing keys, an sa: grant is refused before any call and suspended daily with one notice', async (t) => {
+test('KBOX-24 without the box\'s identity, without a stored record or with no signing key (two rows are no longer ambiguous as of the API-key issuer), an sa: grant is refused before any call and suspended daily with one notice', async (t) => {
   const cases: [ShellOptions, string][] = [
     [{ identity: null }, 'grant_check_no_identity'],
     [{ scope: null }, 'grant_check_no_key_info'],
     [{ masters: 0 }, 'grant_check_no_master'],
-    [{ masters: 2 }, 'grant_check_master_ambiguous'],
   ];
   for (const [options, code] of cases) {
     const s = await shell(t, options);
@@ -274,6 +273,12 @@ test('KBOX-24 without the box\'s identity, without a stored record, or with no o
     assert.deepEqual(s.notices(), [{ code: 'grant_suspended', text: 'grant suspended' }], code);
     assert.equal(s.http.sent.length, 0, code);
   }
+});
+
+test('KBOX-24 KBOX-59 a second row labelled master is no second signing key: the API-key issuer classifies every Google key but the box key ordinary, so two rows are not ambiguous and the check is made with the box key', async (t) => {
+  const s = await shell(t, { masters: 2 });
+  await s.checks.atProposal(grantOf());
+  assert.deepEqual(testedProjects(s.http), ['/v1/projects/kbox-test-proj:testIamPermissions']);
 });
 
 test('KBOX-24 a platform\'s appliesTo that throws counts as applies (fail closed): the check is asked with the key and its stored location', async (t) => {

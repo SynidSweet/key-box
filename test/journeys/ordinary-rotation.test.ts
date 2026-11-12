@@ -2,7 +2,7 @@
 // journey needs the platform registry that the adapter units build; this one runs the same routes, store and orchestrator on the core's socket.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { bytesOf } from '../kit/index.ts';
+import { bytesOf, listAll } from '../kit/index.ts';
 import { routesWorld } from '../support/routes-world.ts';
 
 const HOUR = 3600_000;
@@ -30,7 +30,7 @@ test('J3 KBOX-34 an ordinary key is made, delivered and acknowledged, rotated on
   w.clock.advance(24 * HOUR);
   await w.rotation.orchestrator.idle();
   assert.equal(w.rotation.store.gen(KEYREF, 1)?.status, 'retired');
-  assert.deepEqual((await w.platform.lister.list(w.platform.master())).map((k) => k.name.startsWith('kbox_')), [true], 'only the new key is on the platform');
+  assert.deepEqual((await listAll(w.platform.lister, w.platform.master())).map((k) => k.name.startsWith('kbox_')), [true], 'only the new key is on the platform');
   assert.equal((await w.api(`/api/deliveries/${second[0]?.delivery_id}/ack`, { method: 'POST' })).status, 200);
   const meta = (await w.api('/api/meta')).json() as { keys: { keyref: string; status: string; gen_current: number }[] };
   assert.deepEqual(meta.keys.map((k) => [k.keyref, k.status, k.gen_current]), [[KEYREF, 'works', 2]]);

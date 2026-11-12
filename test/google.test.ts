@@ -511,7 +511,7 @@ test('KBOX-55 prove: an audience that is no workload identity provider is refuse
 
 // --- the entry ----------------------------------------------------------------------------------------------------------------------
 
-test('KBOX-41 KBOX-23 the google entry declares exactly sts, iamcredentials and cloudresourcemanager, the hosts its own calls reach, and states the signing key as its one class and shape', async (t) => {
+test('KBOX-41 KBOX-23 the google entry declares the hosts its own calls reach (sts, iamcredentials and cloudresourcemanager for the identity half, apikeys and secretmanager for KBOX-59), and the API-key issuer states the class and shape of its keys', async (t) => {
   const google = await fakeGoogle(t, { audience: PROVIDER, issuer: IDENTITY.issuer, subject: BOX_SUBJECT });
   google.trust([trusted(KEY)]);
   google.creatorOn([SA]);
@@ -520,11 +520,11 @@ test('KBOX-41 KBOX-23 the google entry declares exactly sts, iamcredentials and 
   assert.equal(entry.id, 'google');
   assert.ok(entry.grantCheck !== undefined && entry.identity !== undefined);
   assert.deepEqual(await entry.grantCheck.check({ keyref: A, at: {} }, KEY.lent), { verdict: 'pass' });
-  assert.deepEqual([...(entry.hosts ?? [])].sort(), ['cloudresourcemanager.googleapis.com', 'iamcredentials.googleapis.com', 'sts.googleapis.com']);
-  assert.deepEqual([...new Set(http.sent.map((s) => s.originalHost))].sort(), [...(entry.hosts ?? [])].sort());
-  assert.equal(entry.issuer, undefined, 'the API-key issuer is google-b\'s');
-  assert.deepEqual(entry.shape, SIGNING_KEY_SHAPE);
-  assert.equal(entry.classify?.({ items: [] }, {}), 'master');
+  assert.deepEqual([...(entry.hosts ?? [])].sort(), ['apikeys.googleapis.com', 'cloudresourcemanager.googleapis.com', 'iamcredentials.googleapis.com', 'secretmanager.googleapis.com', 'sts.googleapis.com']);
+  assert.deepEqual([...new Set(http.sent.map((s) => s.originalHost))].sort(), ['cloudresourcemanager.googleapis.com', 'iamcredentials.googleapis.com', 'sts.googleapis.com'], 'the grant check reaches the identity half\'s three');
+  assert.notStrictEqual(entry.issuer, undefined, 'the API-key issuer is google-b\'s');
+  assert.equal(entry.shape, undefined, 'one source of a shape: the issuer\'s');
+  assert.equal(entry.classify, undefined, 'one source of a class: the issuer\'s');
 });
 
 test('KBOX-24 the entry\'s grant check applies only to a key that acts as a service account', () => {

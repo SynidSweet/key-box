@@ -1,7 +1,7 @@
 // What the rotation shell is given: the adapters of a platform and of a destination kind, the master key and the one seam where a
 // test stops the process. Adapters register these when they are built (the adapter units).
 import type { DestinationKit } from '../ports/destination.ts';
-import type { Issuer, KeyKind, KeyLister, LocationProver, Retirer, Verifier } from '../ports/issuer.ts';
+import type { Issuer, KeyKind, KeyLister, LocationProver, Retirer, Verifier, VerifyTarget } from '../ports/issuer.ts';
 import type { BoxMadeKey } from '../ports/platform.ts';
 import type { KeyClass, KeyLocation, KeyShape, Lent, LocationSchema, PlatformId, Scope } from '../ports/types.ts';
 import type { Vault } from '../ports/vault.ts';
@@ -114,6 +114,14 @@ export function verifierFor(kit: Pick<PlatformKit, 'verifier'> | undefined, key:
   } catch {
     return UNJUDGED;
   }
+}
+
+/**
+ * KBOX-58: the target a verifier is asked about. The master is added only for a verifier that declares `needsMaster` and only when one was
+ * chosen (the member is then present; otherwise it is absent, not undefined): the one place a master reaches a verifier.
+ */
+export function verifyTargetOf(verifier: Pick<Verifier, 'needsMaster'>, target: VerifyTarget, master: Lent | undefined): VerifyTarget {
+  return verifier.needsMaster === true && master !== undefined ? { ...target, master } : target;
 }
 
 /** A key with no stored record (`keyInfo` missing): no scope items and no location (KBOX-58). */

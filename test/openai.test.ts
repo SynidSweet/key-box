@@ -25,7 +25,7 @@ import { verifierContract } from './contracts/verifier.contract.ts';
 import { fakeOpenAi } from './fakes/openai.ts';
 import type { FakeOpenAi } from './fakes/openai.ts';
 import { TEST_REGISTRY } from './fixtures/profiles.ts';
-import { adapterHttpTo, bytesOf, canary, lent } from './kit/index.ts';
+import { adapterHttpTo, bytesOf, canary, lent, listAll } from './kit/index.ts';
 import { relayWorld } from './support/relay-world.ts';
 
 const ADMIN = 'sk-admin-kbox-test-0123456789abcdefghijklmnopqrstuvwxyz';
@@ -283,7 +283,7 @@ test('KBOX-14 a platform that quotes the key it was sent in a 401, or the key it
   const failures = [
     await errorText(() => issuer.issue(REQ, 'kbox_shop_g1_aaaa1111', planted)),
     await errorText(() => issuer.revoke(`${PROJECT}/key_1`, planted)),
-    await errorText(() => must(entry.lister).list(planted)),
+    await errorText(() => listAll(must(entry.lister), planted)),
     await errorText(() => must(entry.lister).listAt({ project: PROJECT }, planted)),
   ];
   assert.equal(await must(entry.verifier).verify(planted, { platform: 'openai', at: AT }), 'rejected');
@@ -355,7 +355,7 @@ test('KBOX-23 KBOX-38 the entry: id, the one host, the key page, the verifier-an
 test('KBOX-38 every network call the adapter made went to api.openai.com over the https URL it was given', async (t) => {
   const { entry, issuer, http } = await fresh(t);
   const issued = await issuer.issue(REQ, 'kbox_shop_g1_aaaa1111', master());
-  await must(entry.lister).list(master());
+  await listAll(must(entry.lister), master());
   await must(entry.verifier).verify(issued.value, { platform: 'openai', at: AT });
   await issuer.revoke(issued.platformKeyId, master());
   assert.ok(http.sent.length > 4);
