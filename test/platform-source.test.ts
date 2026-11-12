@@ -108,22 +108,7 @@ test('KBOX-51 a platform with no master key row, or one that is not master class
   assert.ok(!JSON.stringify(result).includes('an-admin-value'));
 });
 
-// --- which master row serves a key (review N5, KBOX-57) -----------------------------------------------------------------------------
-
-test('KBOX-51 a master row whose current generation cannot be lent (a failed create left it) does not serve: the working master of the platform does, whatever the row order', async (t) => {
-  const w = await world(t);
-  putMaster(w, 'fake/a-leftover', { value: null, status: 'failed' });
-  putMaster(w, 'fake/master', { value: 'working-master' });
-  assert.equal(await pick(w, 'fake', { project: 'shop' }), 'working-master');
-});
-
-test('KBOX-51 KBOX-57 with a master row per stored location, a key gets the master of its own location, never the other location\'s', async (t) => {
-  const w = await world(t);
-  putMaster(w, 'fake/other/MASTER', { at: { project: 'other' }, value: 'other-master' });
-  putMaster(w, 'fake/shop/MASTER', { at: { project: 'shop' }, value: 'shop-master' });
-  assert.equal(await pick(w, 'fake', { project: 'shop' }), 'shop-master');
-  assert.equal(await pick(w, 'fake', { project: 'other' }), 'other-master');
-});
+// --- what makes a master row serve a key (KBOX-57) -------------------------------------------------------------------------------
 
 test('KBOX-57 negative control: two master rows that differ only in projects are master_ambiguous for every key, never told apart by projects', async (t) => {
   const w = await world(t);
@@ -131,16 +116,6 @@ test('KBOX-57 negative control: two master rows that differ only in projects are
   putMaster(w, 'fake/other/MASTER', { projects: ['other'] });
   assert.equal(await pick(w, 'fake', {}), 'master_ambiguous');
   assert.equal(await pick(w, 'fake', { project: 'shop' }), 'master_ambiguous', 'a key located at shop is not given the row whose projects say shop');
-});
-
-test('KBOX-51 KBOX-57 two masters that both still qualify are refused with master_ambiguous, never guessed: two at the key\'s own location, or two that cover every place', async (t) => {
-  const w = await world(t);
-  putMaster(w, 'fake/one/MASTER', { at: { project: 'shop' } });
-  putMaster(w, 'fake/two/MASTER', { at: { project: 'shop' } });
-  assert.deepEqual(w.source.master('fake', { project: 'shop' }, []), { ok: false, code: 'master_ambiguous' }, 'two at the key\'s own location');
-  putMaster(w, 'fake/three/MASTER', {});
-  putMaster(w, 'fake/four/MASTER', {});
-  assert.deepEqual(w.source.master('fake', { project: 'third' }, []), { ok: false, code: 'master_ambiguous' }, 'none at the key\'s location and two that cover every place');
 });
 
 test('KBOX-57 negative control: a master whose projects overlap the key\'s but whose location does not cover it is not chosen', async (t) => {
@@ -191,4 +166,31 @@ test('KBOX-57 masters lists every candidate row of the platform with its stored 
   putMaster(w, 'other/MASTER', { platform: 'other' });
   const listed = await Promise.all(w.source.masters('fake').map(async (m) => [m.at, Buffer.from(await bytesOf(m.value)).toString('utf8')] as const));
   assert.deepEqual([...listed].sort((a, b) => a[1].localeCompare(b[1])), [[{ region: 'eu' }, 'eu-master'], [{ region: 'us' }, 'us-master']]);
+});
+
+// --- which master row serves a key (review N5, KBOX-57) -----------------------------------------------------------------------------
+
+test('KBOX-51 a master row whose current generation cannot be lent (a failed create left it) does not serve: the working master of the platform does, whatever the row order', async (t) => {
+  const w = await world(t);
+  putMaster(w, 'fake/a-leftover', { value: null, status: 'failed' });
+  putMaster(w, 'fake/master', { value: 'working-master' });
+  assert.equal(await pick(w, 'fake', { project: 'shop' }), 'working-master');
+});
+
+test('KBOX-51 KBOX-57 with a master row per stored location, a key gets the master of its own location, never the other location\'s', async (t) => {
+  const w = await world(t);
+  putMaster(w, 'fake/other/MASTER', { at: { project: 'other' }, value: 'other-master' });
+  putMaster(w, 'fake/shop/MASTER', { at: { project: 'shop' }, value: 'shop-master' });
+  assert.equal(await pick(w, 'fake', { project: 'shop' }), 'shop-master');
+  assert.equal(await pick(w, 'fake', { project: 'other' }), 'other-master');
+});
+
+test('KBOX-51 KBOX-57 two masters that both still qualify are refused with master_ambiguous, never guessed: two at the key\'s own location, or two that cover every place', async (t) => {
+  const w = await world(t);
+  putMaster(w, 'fake/one/MASTER', { at: { project: 'shop' } });
+  putMaster(w, 'fake/two/MASTER', { at: { project: 'shop' } });
+  assert.deepEqual(w.source.master('fake', { project: 'shop' }, []), { ok: false, code: 'master_ambiguous' }, 'two at the key\'s own location');
+  putMaster(w, 'fake/three/MASTER', {});
+  putMaster(w, 'fake/four/MASTER', {});
+  assert.deepEqual(w.source.master('fake', { project: 'third' }, []), { ok: false, code: 'master_ambiguous' }, 'none at the key\'s location and two that cover every place');
 });
