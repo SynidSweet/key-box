@@ -4,6 +4,8 @@ import type { Clock } from '../ports/clock.ts';
 import type { AdapterHttp } from '../ports/http.ts';
 import { refusingAdapterHttp } from '../ports/http.ts';
 import type { PlatformEntry } from '../ports/platform.ts';
+import { createAnthropicEntry } from './anthropic/index.ts';
+import { createStripeEntry } from './stripe/index.ts';
 
 /** What an adapter is handed when its entry is built: the one way to reach its platform, and time. */
 export interface RegistryDeps {
@@ -12,8 +14,7 @@ export interface RegistryDeps {
 }
 
 export function createRegistry(deps: RegistryDeps): readonly PlatformEntry[] {
-  void deps;
-  return [];
+  return [createAnthropicEntry(deps), createStripeEntry(deps)];
 }
 
 /** The registry as a process that makes no adapter calls sees it: every call is refused and time stands at 0. For structure checks only. */
