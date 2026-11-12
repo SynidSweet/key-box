@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { spawnNode, tempDir, waitUntil } from './kit/index.ts';
+import { spawnNode, startNode, tempDir, waitUntil } from './kit/index.ts';
 import type { NodeRun } from './kit/index.ts';
 
 const kitUrl = pathToFileURL(join(import.meta.dirname, 'kit', 'index.ts')).href;
@@ -62,4 +62,23 @@ test('KBOX-35 a cleanup step that fails is reported, and the process is still ki
   const run = await runFixture(t, `onTestEnd(t, 'process', () => { throw new Error('a cleanup step fails'); });`);
   assert.notEqual(run.status, 0, 'the failing step must still fail the test');
   assert.match(run.stdout + run.stderr, /a cleanup step fails/);
+});
+
+test('KBOX-35 ready waits for a ready line that a slow, loaded core prints after more than the old 5 s', async (t) => {
+  const child = startNode(t, ['-e', 'setTimeout(() => console.log("late ready line"), 6000)'], process.cwd(), {});
+  await child.ready('late ready line');
+  assert.match(child.stdout(), /late ready line/);
+});
+
+test('KBOX-35 ready rejects at once, naming the stderr, when the process exits without printing the line', async (t) => {
+  const child = startNode(t, ['-e', 'console.error("it broke"); process.exit(3)'], process.cwd(), {});
+  const started = performance.now();
+  await assert.rejects(child.ready('never printed'), /exited before printing "never printed": it broke/);
+  assert.ok(performance.now() - started < 3000, 'the rejection must not wait for the deadline');
+});
+
+test('KBOX-35 ready resolves at once when the line is already there', async (t) => {
+  const child = startNode(t, ['-e', 'console.log("hello"); setInterval(() => {}, 1000)'], process.cwd(), {});
+  await child.ready('hello');
+  await child.ready('hello');
 });
