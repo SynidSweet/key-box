@@ -216,6 +216,38 @@ test('KBOX-40 the Stripe adapter list names each call with the permission it nee
   }
 });
 
+test('KBOX-40 KBOX-23 the Stripe entry declares the six call names as its verifyHints, one per adapter-list call, and its hinted call is the verifier\'s first', async (t) => {
+  const { api, entry } = await stripe(t);
+  assert.deepEqual(entry.verifyHints, ['balance', 'customers', 'charges', 'products', 'prices', 'account']);
+  api.allowed.set(restricted('FULL'), ALL_ROUTES);
+  for (const [hint, path] of [['balance', '/v1/balance'], ['customers', '/v1/customers'], ['charges', '/v1/charges'], ['products', '/v1/products'], ['prices', '/v1/prices'], ['account', '/v1/account']] as const) {
+    api.log.length = 0;
+    assert.equal(await verifierOf(entry).verify(L(restricted('FULL')), { ...STRIPE, hint }), 'ok', hint);
+    assert.equal(api.log.length, 1, `the hinted call settles a key that may make it (${hint})`);
+    assert.match(api.log[0] ?? '', new RegExp(`^GET ${path}`), hint);
+  }
+});
+
+test('KBOX-40 a hint picks the first call only: a 403 on it moves on (alive, not rejected), a 401 on it is rejected, and no hint or an unlisted one keeps the list order', async (t) => {
+  const { api, entry } = await stripe(t);
+  const verifier = verifierOf(entry);
+  api.allowed.set(restricted('PRICE'), new Set(['/v1/prices']));
+  api.log.length = 0;
+  assert.equal(await verifier.verify(L(restricted('PRICE')), { ...STRIPE, hint: 'customers' }), 'ok', 'a live key is not made to look dead by a hint it may not call');
+  assert.match(api.log[0] ?? '', /^GET \/v1\/customers/, 'the hinted call came first');
+  assert.equal(api.log.filter((l) => l.includes('/v1/customers')).length, 1, 'and is not made twice');
+  assert.match(api.log.at(-1) ?? '', /^GET \/v1\/prices/);
+  api.log.length = 0;
+  assert.equal(await verifier.verify(L(restricted('DEAD')), { ...STRIPE, hint: 'prices' }), 'rejected', 'a dead key is not made to pass by a hint');
+  assert.equal(api.log.length, 1, '401 on the hinted call stops the walk');
+  api.log.length = 0;
+  await verifier.verify(L(restricted('PRICE')), STRIPE);
+  assert.match(api.log[0] ?? '', /^GET \/v1\/balance/, 'no hint: the list order');
+  api.log.length = 0;
+  await verifier.verify(L(restricted('PRICE')), { ...STRIPE, hint: 'nonesuch' });
+  assert.match(api.log[0] ?? '', /^GET \/v1\/balance/, 'an unlisted hint is ignored here (the paste route refuses it before)');
+});
+
 // --- the verifier and lister contract suites ------------------------------------------------------------------------------------------
 
 const ANTHROPIC_CAPS: IssuerCapabilities = {

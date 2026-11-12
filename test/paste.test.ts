@@ -372,3 +372,104 @@ test('KBOX-57 KBOX-12 a settling rotate_key paste whose key\'s stored location t
   assert.equal((await w.call(`/p/${rotId}`, { cookie: a.cookie })).status, 404, 'the task is settled failed');
   assert.ok(w.parts.events.after(0).some((e) => e.kind === 'approval.executed' && e.data['approval_id'] === rotId && e.data['result'] === 'failed' && e.data['reason_code'] === 'location_missing'));
 });
+
+// --- the verify hint (KBOX-40, KBOX-12) ------------------------------------------------------------------------------------------------
+
+const HINTS = ['balance', 'customers', 'charges'] as const;
+const submitWithHint = (w: RoutesWorld, id: string, cookie: string, value: string, proof: unknown, hint: unknown) => w.call(`/p/${id}`, { json: { value, proof, verify_hint: hint }, cookie });
+const hintRows = (w: RoutesWorld): unknown => w.parts.db.prepare('SELECT keyref, verify_hint FROM rotation_keys').all();
+
+test('KBOX-12 KBOX-40 a hint outside the entry\'s list is 422 bad_verify_hint: the task, the rows and the vault are unchanged and the verifier never saw the value; the retry with a listed hint works', async (t) => {
+  const w = await routesWorld(t, { pasteOnly: true, verifyHints: HINTS });
+  const id = await openTask(w);
+  const { view, cookie } = await render(w, id);
+  w.accepted.add(pasteValue(HEX));
+  const rowsBefore = JSON.stringify([rowsOfAll(w), hintRows(w)]);
+  const refused = await submitWithHint(w, id, cookie, pasteValue(HEX), w.pasteProof(view), 'products');
+  assert.equal(refused.status, 422);
+  assert.deepEqual((refused.json() as { error: { code: string; detail: unknown } }).error.detail, { code: 'bad_verify_hint' });
+  assert.equal(JSON.stringify([rowsOfAll(w), hintRows(w)]), rowsBefore, 'no row changed');
+  nothingStored(w);
+  assert.deepEqual(w.verifiedHints, [], 'the verifier was not asked');
+  const again = await render(w, id, cookie);
+  assert.equal(again.view.verify_hint, undefined, 'nothing was stored as the choice');
+  assert.equal((await submitWithHint(w, id, cookie, pasteValue(HEX), w.pasteProof(again.view), 'customers')).status, 201, 'the task is still pending and a listed hint settles it');
+});
+
+test('KBOX-12 KBOX-40 a hint for an entry that lists none, an empty hint and a non-string hint are refused; an entry without hints pastes as before', async (t) => {
+  const w = await routesWorld(t, { pasteOnly: true });
+  const id = await openTask(w);
+  const { view, cookie } = await render(w, id);
+  assert.equal(view.verify_hints, undefined, 'the page offers no choice for an entry with no hints');
+  w.accepted.add(pasteValue(HEX));
+  const proof = w.pasteProof(view);
+  const none = await submitWithHint(w, id, cookie, pasteValue(HEX), proof, 'balance');
+  assert.equal(none.status, 422);
+  assert.deepEqual((none.json() as { error: { detail: unknown } }).error.detail, { code: 'bad_verify_hint' });
+  assert.equal((await submitWithHint(w, id, cookie, pasteValue(HEX), proof, 7)).status, 400, 'a hint that is no string is not a request this route understands');
+  nothingStored(w);
+  const fresh = await render(w, id, cookie);
+  assert.equal((await submit(w, id, cookie, pasteValue(HEX), w.pasteProof(fresh.view))).status, 201);
+  assert.deepEqual(w.verifiedHints.filter((h) => h !== undefined), [], 'no hint reached the verifier');
+});
+
+test('KBOX-12 KBOX-40 the page offers the entry\'s hints, a known hint is stored on settle and given to the verifier, and a later paste changes it', async (t) => {
+  const w = await routesWorld(t, { pasteOnly: true, verifyHints: HINTS });
+  const first = pasteValue('1'.repeat(32));
+  const second = pasteValue('2'.repeat(32));
+  const third = pasteValue('3'.repeat(32));
+  w.accepted.add(first);
+  const addId = await openTask(w);
+  const a = await render(w, addId);
+  assert.deepEqual(a.view.verify_hints, [...HINTS]);
+  assert.equal(a.view.verify_hint, undefined, 'a new key has no stored choice to preselect');
+  const proof = w.pasteProof(a.view);
+  assert.equal((await submitWithHint(w, addId, a.cookie, first, proof, 'customers')).status, 201, 'the hint is outside the signed payload: the proof made before it was chosen verifies');
+  assert.equal(w.rotation.store.keyInfo(KEYREF)?.verifyHint, 'customers');
+  assert.deepEqual(new Set(w.verifiedHints), new Set(['customers']));
+  await w.rotation.orchestrator.idle();
+  const rot = ((await w.api('/api/rotations', { json: { keyref: KEYREF } })).json() as { paste_task_id: string }).paste_task_id;
+  w.accepted.add(second);
+  const r = await render(w, rot, a.cookie);
+  assert.equal(r.view.verify_hint, 'customers', 'a rotation preselects the stored hint');
+  assert.equal((await submitWithHint(w, rot, a.cookie, second, w.pasteProof(r.view), 'charges')).status, 201);
+  await w.rotation.orchestrator.idle();
+  assert.equal(w.rotation.store.keyInfo(KEYREF)?.verifyHint, 'charges', 'a later paste changed the choice');
+  assert.equal(w.verifiedHints.at(-1), 'charges');
+  // A paste that names no hint keeps the stored one and verifies with it.
+  w.clock.advance(60 * 60_000);
+  w.accepted.delete(first);
+  await w.rotation.orchestrator.idle();
+  const rot2 = ((await w.api('/api/rotations', { json: { keyref: KEYREF } })).json() as { paste_task_id: string }).paste_task_id;
+  w.accepted.add(third);
+  const r2 = await render(w, rot2, a.cookie);
+  assert.equal(r2.view.verify_hint, 'charges');
+  const seen = w.verifiedHints.length;
+  assert.equal((await submit(w, rot2, a.cookie, third, w.pasteProof(r2.view))).status, 201);
+  assert.equal(w.rotation.store.keyInfo(KEYREF)?.verifyHint, 'charges');
+  assert.equal(w.verifiedHints[seen], 'charges', 'the paste check used the stored hint');
+});
+
+test('KBOX-40 the stored hint reaches the step-10 confirmation of the old value', async (t) => {
+  const w = await routesWorld(t, { pasteOnly: true, verifyHints: HINTS });
+  const first = pasteValue('1'.repeat(32));
+  const second = pasteValue('2'.repeat(32));
+  w.accepted.add(first);
+  const addId = await openTask(w);
+  const a = await render(w, addId);
+  assert.equal((await submitWithHint(w, addId, a.cookie, first, w.pasteProof(a.view), 'balance')).status, 201);
+  const rot = ((await w.api('/api/rotations', { json: { keyref: KEYREF } })).json() as { paste_task_id: string }).paste_task_id;
+  w.accepted.add(second);
+  const r = await render(w, rot, a.cookie);
+  assert.equal((await submitWithHint(w, rot, a.cookie, second, w.pasteProof(r.view), 'charges')).status, 201);
+  await w.rotation.orchestrator.idle();
+  w.accepted.delete(first);
+  const before = w.verifiedHints.length;
+  w.clock.advance(60 * 60_000);
+  await w.rotation.orchestrator.idle();
+  assert.equal(w.rotation.store.gen(KEYREF, 1)?.status, 'retired');
+  assert.ok(w.verifiedHints.length > before, 'the old value was verified at step 10');
+  assert.deepEqual(new Set(w.verifiedHints.slice(before)), new Set(['charges']));
+});
+
+const rowsOfAll = (w: RoutesWorld): unknown => [w.parts.db.prepare('SELECT * FROM keys').all(), w.parts.db.prepare('SELECT status, revision FROM paste_tasks').all()];

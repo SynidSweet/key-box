@@ -66,7 +66,8 @@ test('KBOX-15 an approved add_key issues the admin key, as admin, with the class
   assert.deepEqual(await execute({ approvalId: 'apr_x', revision: 1, action, requester: { kind: 'box' }, proof: undefined }), { result: 'failed', reason: 'key_exists' });
 });
 
-test('KBOX-15 a master scope is never issuable through POST /api/keys: refused, nothing issued, no approval', async (t) => {
+test('KBOX-15 a master scope is never issued through POST /api/keys: a paste task, nothing issued, no approval', async (t) => {
+  // Retitled: the title still said "refused" after U6's flip; as of the KBOX-34 ruling the answer is a paste task (202), the body is unchanged.
   const w = await routesWorld(t);
   const reply = await w.api('/api/keys', { json: body({ scope: { items: ['master'] } }) });
   // KBOX-34 (shared-2 U6): a master result opens a paste task (202) instead of the former `master_not_issuable`; still nothing is issued.

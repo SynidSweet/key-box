@@ -70,3 +70,8 @@ test('KBOX-23 KBOX-57 each masterItems entry is a scope-item prefix ending in a 
   assert.equal(failure([fakeEntry(w, { masterItems: ['team:'] })]), 'passed');
   for (const bad of ['team', ':', 'te am:', 'team:x', '']) assert.equal(failure([fakeEntry(w, { masterItems: ['team:', bad] })]), 'master_items_bad fake', JSON.stringify(bad));
 });
+
+test('KBOX-23 KBOX-40 a verifyHints list has unique [a-z0-9_]{1,32} names: a good list passes, a repeat, an empty name, a capital, a dash and a 33-character name fail', () => {
+  assert.equal(failure([pasteOnlyEntry(w, SHAPE, { verifyHints: ['balance', 'a_1', 'x'.repeat(32)] })]), 'passed');
+  for (const bad of [['a', 'a'], ['a', ''], ['A'], ['a-b'], ['x'.repeat(33)], ['a b']]) assert.equal(failure([pasteOnlyEntry(w, SHAPE, { verifyHints: bad })]), 'verify_hints_bad pasteonly', JSON.stringify(bad));
+});

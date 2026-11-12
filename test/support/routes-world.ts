@@ -43,6 +43,8 @@ const PASTE_SHAPE: KeyShape = { prefix: 'pk-', alphabet: 'hex', coreLength: { mi
 export const pasteValue = (hex32: string): string => `pk-${hex32}`;
 
 export interface PasteView {
+  readonly verify_hints?: readonly string[];
+  readonly verify_hint?: string;
   readonly paste_id: string;
   readonly digest_b64: string;
   readonly nonce_b64: string;
@@ -58,6 +60,8 @@ export interface RoutesWorld extends World {
   readonly issuedAt: KeyLocation[];
   /** The `at` of every call the paste platform's verifier received, in order. */
   readonly verifiedAt: KeyLocation[];
+  /** The `hint` of every call the paste platform's verifier received, in order (undefined: none was given). */
+  readonly verifiedHints: (string | undefined)[];
   /** The token that may call the control routes. */
   readonly control: string;
   api(path: string, options?: { readonly method?: string; readonly json?: unknown; readonly bytes?: Uint8Array; readonly contentType?: string }): ReturnType<World['call']>;
@@ -72,6 +76,8 @@ export interface RoutesWorldOptions {
   readonly overlap?: boolean;
   /** true: the paste platform has no issuer; its entry states the shape and the class (KBOX-40), as Anthropic and Stripe do. */
   readonly pasteOnly?: boolean;
+  /** The paste platform entry's `verifyHints` (KBOX-40); none by default. */
+  readonly verifyHints?: readonly string[];
   /** Wraps the approvals rotation is given: a fault planted at the port (a sweep or a proposal that throws). */
   readonly approvals?: (real: RotationApprovals) => RotationApprovals;
   /** Wraps the platform source rotation is given: a fault planted at the port. */
@@ -98,8 +104,9 @@ export async function routesWorld(t: TestContext, options: RoutesWorldOptions = 
   const accepted = new Set<string>();
   const issuedAt: KeyLocation[] = [];
   const verifiedAt: KeyLocation[] = [];
+  const verifiedHints: (string | undefined)[] = [];
   const apiClassify = options.classifyAt ?? classify;
-  const placed = { ...(options.location === undefined ? {} : { location: options.location }), ...(options.locationProver === undefined ? {} : { locationProver: options.locationProver }) };
+  const placed = { ...(options.location === undefined ? {} : { location: options.location }), ...(options.locationProver === undefined ? {} : { locationProver: options.locationProver }), ...(options.verifyHints === undefined ? {} : { verifyHints: options.verifyHints }) };
 
   const apiIssuer: Issuer = {
     platform: 'fake',
@@ -130,6 +137,7 @@ export async function routesWorld(t: TestContext, options: RoutesWorldOptions = 
   const pasteVerifier: Verifier = {
     verify: async (key, target) => {
       verifiedAt.push(target.at);
+      verifiedHints.push(target.hint);
       return accepted.has(Buffer.from(await bytesOf(key)).toString('utf8')) ? 'ok' : 'rejected';
     },
   };
@@ -183,6 +191,7 @@ export async function routesWorld(t: TestContext, options: RoutesWorldOptions = 
     accepted,
     issuedAt,
     verifiedAt,
+    verifiedHints,
     control,
     api,
     pasteProof(view: PasteView, forId?: string): WireProof {
