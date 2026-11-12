@@ -38,23 +38,6 @@ const VALUE_LIMIT = 4096;
 /** The sentence that asks for the paste; the fixed rule on every paste page is `FIXED.pasteWhere`. */
 export const PASTE_ASK = 'Create the key on your phone, at the platform, then paste it here.';
 
-
-const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS paste_tasks (
-    paste_id TEXT PRIMARY KEY,
-    slot TEXT NOT NULL,
-    action_json TEXT NOT NULL,
-    digest_hex TEXT NOT NULL,
-    revision INTEGER NOT NULL,
-    requester TEXT NOT NULL,
-    reason_json TEXT,
-    opened_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'done', 'failed', 'expired'))
-  ) STRICT;
-  CREATE UNIQUE INDEX IF NOT EXISTS paste_one_pending_per_slot ON paste_tasks (slot) WHERE status = 'pending';
-`;
-
 interface TaskRow {
   readonly paste_id: string;
   readonly slot: string;
@@ -116,7 +99,6 @@ const b64u = (b: Uint8Array): string => Buffer.from(b).toString('base64url');
 
 export function createPaste(deps: PasteDeps): Paste {
   const { db } = deps;
-  db.exec(SCHEMA);
   const now = (): number => deps.clock.now();
   const row = (id: string): TaskRow | undefined => db.prepare("SELECT * FROM paste_tasks WHERE paste_id = ? AND status = 'pending'").get(id) as TaskRow | undefined;
   const actionOf = (r: TaskRow): PasteAction => JSON.parse(r.action_json) as PasteAction;

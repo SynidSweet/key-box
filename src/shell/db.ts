@@ -1,13 +1,15 @@
 // KBOX-5, KBOX-30: meta.db, the metadata database. Values live only in the key store; no column here can hold one.
-// This file is the one home of the schema.
+// The kernel's version-0 tables are here; the rotation store's and the paste tasks' are in meta-schema.ts (KBOX-56), all run by openMetaDatabase.
 import { DatabaseSync } from 'node:sqlite';
 import type { Random } from '../ports/random.ts';
+import { PASTE_SCHEMA_V0, ROTATION_SCHEMA_V0 } from './meta-schema.ts';
+import { META_MIGRATIONS, migrate } from './migrations.ts';
 
 const KEY_CLASSES = "('ordinary', 'admin', 'master')";
 const KEY_STATUSES = "('works', 'rotating', 'awaiting_approval', 'awaiting_paste', 'failed')";
 const COVERAGES = "('windowed', 'anchored', 'none')";
 
-const SCHEMA = `
+const KERNEL_SCHEMA_V0 = `
   CREATE TABLE IF NOT EXISTS keys (
     keyref TEXT PRIMARY KEY,
     platform TEXT NOT NULL,
@@ -94,19 +96,34 @@ const SCHEMA = `
   ) STRICT;
 `;
 
+/** Every meta.db table release 1 creates (version 0), in one text: what an old file already has and a new one is given before the migrations run. */
+export const META_SCHEMA_V0 = `${KERNEL_SCHEMA_V0}${ROTATION_SCHEMA_V0}${PASTE_SCHEMA_V0}`;
+
 /** Core and relay share meta.db, so a wait for the write lock is not a failure; the box runs on one small CPU and a writer can wait a while. */
 export const BUSY_TIMEOUT_MS = 30000;
 
+/** The default for an opener that has nowhere to report to (a test over a scratch file); a failing migration still throws. */
+export const noJournal = (_code: string): void => undefined;
+
 const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString('hex');
 
-/** Opens (and on first use creates) meta.db. The epoch is drawn once, when the file is created, and kept after that. */
-export function openMetaDatabase(path: string, random: Random): DatabaseSync {
+/**
+ * Opens (and on first use creates) meta.db: every version-0 table, then the pending migrations (KBOX-56), before anything reads. The epoch is
+ * drawn once, when the file is created, and kept after that. A failing migration closes the file and throws.
+ */
+export function openMetaDatabase(path: string, random: Random, journal: (code: string) => void = noJournal): DatabaseSync {
   const db = new DatabaseSync(path);
-  db.exec('PRAGMA journal_mode = WAL');
-  db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
-  db.exec('PRAGMA foreign_keys = ON');
-  db.exec(SCHEMA);
-  seedBoxInfo(db, random);
+  try {
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec(META_SCHEMA_V0);
+    migrate(db, META_MIGRATIONS, journal);
+    seedBoxInfo(db, random);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
   return db;
 }
 

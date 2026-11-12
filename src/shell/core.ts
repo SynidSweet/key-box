@@ -71,6 +71,8 @@ export interface CoreDeps {
   readonly clock: Clock;
   readonly scheduler: Scheduler;
   readonly random: Random;
+  /** Where the schema codes of KBOX-56 go (`schema_newer`, `schema_migration_failed`); a test over a scratch directory may leave it out. */
+  readonly journal?: (code: string) => void;
 }
 
 export interface CoreParts {
@@ -89,7 +91,7 @@ export interface CoreParts {
 
 export function openCore(deps: CoreDeps): CoreParts {
   mkdirSync(deps.stateDir, { recursive: true, mode: 0o700 });
-  const db = openMetaDatabase(join(deps.stateDir, 'meta.db'), deps.random);
+  const db = openMetaDatabase(join(deps.stateDir, 'meta.db'), deps.random, deps.journal);
   const hub = createEventHub();
   const events = createEventLog(db, deps.clock, hub);
   const poller = createEventPoller(events, hub, deps.scheduler, POLL_HOLD_MS);

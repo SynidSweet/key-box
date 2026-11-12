@@ -1,29 +1,44 @@
 // KBOX-5: private.db holds Web Push subscriptions and approver credentials. Only core's main opens it, and no export
 // route can: this adapter is the one place that names the file.
 import { DatabaseSync } from 'node:sqlite';
-import { BUSY_TIMEOUT_MS } from './db.ts';
+import { BUSY_TIMEOUT_MS, noJournal } from './db.ts';
+import { PRIVATE_MIGRATIONS, migrate } from './migrations.ts';
 import type { ApproverRecord, ApproverRow, PrivateStore, PushSubscriptionRow, VapidKeyPairRow } from '../ports/private.ts';
 
-export function openPrivateDatabase(path: string): PrivateStore {
+/** Every private.db table release 1 creates (version 0); the file's migrations run after it (KBOX-56). */
+export const PRIVATE_SCHEMA_V0 = `
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint TEXT PRIMARY KEY,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    approver_id TEXT
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS approvers (
+    approver_id TEXT PRIMARY KEY,
+    credential_id TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    device_public_key TEXT,
+    phrase TEXT,
+    sign_count INTEGER NOT NULL DEFAULT 0
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS vapid_key (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    private_key TEXT NOT NULL,
+    public_key TEXT NOT NULL
+  ) STRICT;
+`;
+
+export function openPrivateDatabase(path: string, journal: (code: string) => void = noJournal): PrivateStore {
   const db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode = WAL');
   db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS push_subscriptions (
-      endpoint TEXT PRIMARY KEY,
-      p256dh TEXT NOT NULL,
-      auth TEXT NOT NULL,
-      approver_id TEXT
-    ) STRICT;
-    CREATE TABLE IF NOT EXISTS approvers (
-      approver_id TEXT PRIMARY KEY,
-      credential_id TEXT NOT NULL,
-      public_key TEXT NOT NULL,
-      device_public_key TEXT,
-      phrase TEXT,
-      sign_count INTEGER NOT NULL DEFAULT 0
-    ) STRICT;
-  `);
+  db.exec(PRIVATE_SCHEMA_V0);
+  try {
+    migrate(db, PRIVATE_MIGRATIONS, journal);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
   // A private.db from before subscriptions belonged to approvers has no owner column: add it and delete the rows that had no owner
   // (no key box exists in the wild yet, so none of them is real; none would ever be forgotten with its approver).
   const columns = db.prepare('PRAGMA table_info(push_subscriptions)').all() as unknown as { name: string }[];
@@ -44,14 +59,6 @@ export function openPrivateDatabase(path: string): PrivateStore {
       throw error;
     }
   };
-  // Web Push (KBOX-22): the one VAPID key pair of this box.
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS vapid_key (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      private_key TEXT NOT NULL,
-      public_key TEXT NOT NULL
-    ) STRICT;
-  `);
   return {
     addPushSubscription(row: PushSubscriptionRow, approverId?: string): void {
       db.prepare('INSERT OR REPLACE INTO push_subscriptions (endpoint, p256dh, auth, approver_id) VALUES (?, ?, ?, ?)').run(row.endpoint, row.p256dh, row.auth, approverId ?? null);
