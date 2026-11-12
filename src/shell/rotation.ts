@@ -18,7 +18,7 @@ import { keyRoutes } from './key-routes.ts';
 import { newKeyOf } from './new-key.ts';
 import type { RotateKey } from './new-key.ts';
 import { createOrchestrator } from './orchestrator.ts';
-import type { Orchestrator } from './orchestrator.ts';
+import type { Federation, Orchestrator } from './orchestrator.ts';
 import { createPaste, pasteRoutes } from './paste.ts';
 import type { Paste } from './paste.ts';
 import { createReconciler } from './reconcile.ts';
@@ -54,6 +54,8 @@ export interface RotationDeps {
   readonly audit: Audit;
   readonly source: PlatformSource;
   readonly checkpoint?: (point: Point) => void | Promise<void>;
+  /** KBOX-55: the box's identity and the scanner's sink, once core has both a domain and an audience; a box-made key's proof needs them. */
+  readonly federation?: Federation;
 }
 
 export interface Rotation {
@@ -79,7 +81,7 @@ export interface Rotation {
 export function openRotation(deps: RotationDeps): Rotation {
   const { parts } = deps;
   const store = createRotationStore(parts.db, deps.clock, parts.hub);
-  const orchestrator = createOrchestrator({ ...deps.source, store, meta: parts.meta, vault: parts.vault, clock: deps.clock, scheduler: deps.scheduler, random: deps.random, audit: deps.audit, events: parts.events, push: deps.push, ...(deps.checkpoint === undefined ? {} : { checkpoint: deps.checkpoint }) });
+  const orchestrator = createOrchestrator({ ...deps.source, store, meta: parts.meta, vault: parts.vault, clock: deps.clock, scheduler: deps.scheduler, random: deps.random, audit: deps.audit, events: parts.events, push: deps.push, ...(deps.checkpoint === undefined ? {} : { checkpoint: deps.checkpoint }), ...(deps.federation === undefined ? {} : { federation: deps.federation }) });
   const reconciler = createReconciler({ ...deps.source, store, audit: deps.audit, events: parts.events, clock: deps.clock, orchestrator });
   const paste = createPaste({ db: parts.db, approvers: deps.approvers, clock: deps.clock, random: deps.random, audit: deps.audit, events: parts.events, push: deps.push, meta: parts.meta, source: deps.source, orchestrator, store });
   const delivery = { store, vault: parts.vault, audit: deps.audit, events: parts.events, clock: deps.clock };

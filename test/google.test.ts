@@ -87,7 +87,10 @@ interface World {
   readonly google: FakeGoogle;
   readonly http: FakeAdapterHttp;
   readonly sink: ReturnType<typeof recordingSink>;
+  /** Every keyref the minter reported a successful mint exchange for (KBOX-55 `onExchanged`), in order. */
+  readonly exchanged: readonly string[];
   mint(request: MintRequest): ReturnType<ReturnType<typeof createMinter>['mint']>;
+  federate(identity: BoxIdentity, key: Lent): ReturnType<ReturnType<typeof createMinter>['federate']>;
 }
 
 /** The minter over a fake Google that trusts KEY and lets the box impersonate both stored targets and both projects' kbox-keys. */
@@ -97,14 +100,16 @@ async function world(t: TestContext, options: { readonly keyInfo?: RegistryDeps[
   google.creatorOn([SA, OTHER_SA, ADMIN_ONE, ADMIN_TWO]);
   const http = adapterHttpTo(google);
   const sink = recordingSink();
+  const exchanged: string[] = [];
   const minter = createMinter({
     http,
     clock: new FakeClock(NOW),
+    onExchanged: (keyref) => void exchanged.push(keyref),
     ...(options.omit === 'identity' ? {} : { identity: IDENTITY }),
     ...(options.omit === 'minted' ? {} : { minted: sink }),
     ...(options.omit === 'keyInfo' ? {} : { keyInfo: options.keyInfo ?? ((keyref: string) => STORED.get(keyref)) }),
   });
-  return { google, http, sink, mint: (request) => minter.mint(request, KEY.lent) };
+  return { google, http, sink, exchanged, mint: (request) => minter.mint(request, KEY.lent), federate: (identity, key) => minter.federate(identity, key) };
 }
 
 const relay = (patch: Partial<Extract<MintRequest, { use: 'relay' }>> = {}): MintRequest => ({ use: 'relay', keyref: A, scopes: [DATASTORE], profileScopes: [DATASTORE, STORAGE], ...patch });
@@ -425,6 +430,83 @@ test('KBOX-14 a minted token planted as a canary, and an error body quoting it, 
   planted.assertAbsent(surfacesOf(quoted));
   w.google.override('sts', { kind: 'status', status: 400, body: JSON.stringify({ error: 'invalid_grant', error_description: token }) });
   planted.assertAbsent(surfacesOf(await refusal(w.mint(relay()))));
+});
+
+// --- KBOX-55: the proof of a signing key, and the mint's report ----------------------------------------------------------------------
+
+/** KBOX-55: the box's signing key, `keyrefOf('google', [], 'OIDC_SIGNING_KEY')`. */
+const SIGNING_REF = 'google/p/OIDC_SIGNING_KEY';
+
+test('KBOX-55 a successful mint exchange is reported once for the signing key; one STS refused is not; one IAM refused after STS accepted still is', async (t) => {
+  const w = await world(t);
+  await w.mint(relay());
+  assert.deepEqual(w.exchanged, [SIGNING_REF]);
+  w.google.creatorOn([]);
+  await refusal(w.mint(relay()));
+  assert.deepEqual(w.exchanged, [SIGNING_REF, SIGNING_REF], 'STS took the assertion: the key is proven whatever IAM says next');
+  w.google.trust([trusted(NEXT_KEY)]);
+  assert.equal((await refusal(w.mint(relay()))).code, 'sts_refused');
+  assert.deepEqual(w.exchanged, [SIGNING_REF, SIGNING_REF], 'a refused assertion proves nothing');
+});
+
+test('KBOX-55 federate exchanges one assertion signed with the key it is handed, for the identity it is handed, at STS only: no impersonation, nothing in the sink, no mint reported', async (t) => {
+  // Built without the box identity, the sink or the stored-record reader: federate needs none of them.
+  const w = await world(t, { omit: 'identity' });
+  w.google.trust([trusted(KEY), trusted(NEXT_KEY)]);
+  const federated = await w.federate(IDENTITY, NEXT_KEY.lent);
+  assert.deepEqual(w.http.sent.map((s) => `${s.method} ${s.originalHost}${s.target}`), ['POST sts.googleapis.com/v1/token']);
+  assert.equal(w.google.lastHeader?.['kid'], NEXT_KEY.kid, 'signed with the key handed in, not another');
+  assert.deepEqual(w.google.lastClaims, { iss: IDENTITY.issuer, sub: BOX_SUBJECT, aud: `https:${PROVIDER}`, iat: NOW / 1000, exp: NOW / 1000 + ASSERTION_LIFETIME_S });
+  assert.equal(Buffer.from(await bytesOf(federated.token)).toString('utf8'), 'kbox-test-federated-1');
+  assert.equal(federated.expiresAt, NOW + 3599_000);
+  assert.deepEqual(w.sink.added, []);
+  assert.deepEqual(w.exchanged, [], 'a proof is not a mint: the orchestrator marks the generation it proved');
+});
+
+test('KBOX-55 federate with a key Google has not taken is sts_refused, and no other call follows', async (t) => {
+  const w = await world(t);
+  assert.equal((await refusal(w.federate(IDENTITY, NEXT_KEY.lent))).code, 'sts_refused');
+  assert.deepEqual(w.http.sent.map((s) => s.originalHost), ['sts.googleapis.com']);
+});
+
+/** The google entry's box key over a fake Google that trusts KEY only, built with no identity, sink or stored-record reader of its own. */
+async function prover(t: TestContext): Promise<{ readonly google: FakeGoogle; readonly http: FakeAdapterHttp; readonly sink: ReturnType<typeof recordingSink>; prove(key: TestKey, identity?: BoxIdentity): Promise<string> }> {
+  const google = await fakeGoogle(t, { audience: PROVIDER, issuer: IDENTITY.issuer, subject: BOX_SUBJECT });
+  google.trust([trusted(KEY)]);
+  const http = adapterHttpTo(google);
+  const sink = recordingSink();
+  const box = createGoogleEntry({ http, clock: new FakeClock(NOW) }).boxKey;
+  assert.ok(box !== undefined);
+  return { google, http, sink, prove: (key, identity = IDENTITY) => box.prove(key.lent, identity, sink) };
+}
+
+test('KBOX-55 KBOX-14 prove: STS accepting the new key is ok, and the federated token it bought is held by the scanner under the signing key until it expires', async (t) => {
+  const p = await prover(t);
+  assert.equal(await p.prove(KEY), 'ok');
+  assert.deepEqual(p.sink.added, [{ keyref: SIGNING_REF, value: 'kbox-test-federated-1', expiresAt: NOW + 3599_000 }]);
+  assert.deepEqual(p.http.sent.map((s) => s.originalHost), ['sts.googleapis.com']);
+});
+
+test('KBOX-55 prove: a key Google has not taken is rejected; a 5xx, a cut answer or a 200 without a token is unreachable; nothing is held for any of them', async (t) => {
+  const p = await prover(t);
+  assert.equal(await p.prove(NEXT_KEY), 'rejected');
+  const unanswered: Parameters<FakeGoogle['override']>[1][] = [
+    { kind: 'status', status: 503, body: '{}' },
+    { kind: 'cut' },
+    { kind: 'status', status: 200, body: '{"access_token":"kbox-test-x"}' },
+  ];
+  for (const override of unanswered) {
+    p.google.override('sts', override);
+    assert.equal(await p.prove(KEY), 'unreachable', JSON.stringify(override));
+  }
+  assert.deepEqual(p.sink.added, []);
+  assert.ok(p.http.sent.every((s) => s.originalHost === 'sts.googleapis.com'), 'a proof never impersonates');
+});
+
+test('KBOX-55 prove: an audience that is no workload identity provider is refused before any call (identity_malformed), never retried as unreachable', async (t) => {
+  const p = await prover(t);
+  await assert.rejects(p.prove(KEY, { issuer: IDENTITY.issuer, audience: 'projects/123' }), (e: unknown) => e instanceof GoogleError && e.code === 'identity_malformed');
+  assert.equal(p.http.sent.length, 0);
 });
 
 // --- the entry ----------------------------------------------------------------------------------------------------------------------

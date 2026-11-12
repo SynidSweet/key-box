@@ -154,7 +154,17 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   const identity: BoxIdentity | undefined = config.domain === undefined || config.oidcAudience === undefined ? undefined : { issuer: `https://keys.${config.domain}`, audience: config.oidcAudience };
   // The stored-record reader the registry is handed answers nothing until the store is open below, so an early mint fails closed.
   let storedOf: ((keyref: string) => StoredKey | undefined) | undefined;
-  const registryDeps: RegistryDeps = { http: createAdapterHttp({ egress, scheduler }), clock, minted, keyInfo: (keyref) => storedOf?.(keyref), ...(identity === undefined ? {} : { identity }) };
+  // KBOX-55: a mint's exchange that STS accepted proves the box key's current generation. Rotation opens after the registry is built, so the
+  // mark is reached lazily; before it opens (or with no domain) nothing is marked.
+  let provedNow: ((keyref: string) => void) | undefined;
+  const registryDeps: RegistryDeps = {
+    http: createAdapterHttp({ egress, scheduler }),
+    clock,
+    minted,
+    keyInfo: (keyref) => storedOf?.(keyref),
+    onExchanged: (keyref) => provedNow?.(keyref),
+    ...(identity === undefined ? {} : { identity }),
+  };
   const registry = typeof runtime.registry === 'function' ? runtime.registry(registryDeps) : (runtime.registry ?? createRegistry(registryDeps));
   assertRegistry(registry);
   const parts = openCore({ stateDir: config.stateDir, clock, scheduler, random, journal });
@@ -221,8 +231,12 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
         await checks.atProposal(action);
       },
     });
-    const opened = openRotation({ parts, approvals: approve.approvals, approvers: approve.approvers, push, clock, scheduler, random, audit: parts.audit, source });
+    const opened = openRotation({ parts, approvals: approve.approvals, approvers: approve.approvers, push, clock, scheduler, random, audit: parts.audit, source, ...(identity === undefined ? {} : { federation: { identity, minted } }) });
     rotation = opened;
+    provedNow = (keyref) => {
+      const current = opened.store.key(keyref)?.genCurrent;
+      if (current !== undefined && opened.store.gen(keyref, current) !== undefined) opened.store.markProved(keyref, current, clock.now());
+    };
     // KBOX-41, KBOX-55: with the box's identity (domain and audience), its own signing key is made once, before anything is served, and its
     // documents are served; the JWKS reads the key's generations by status. Without it there is no key and nothing to publish.
     if (identity !== undefined) {

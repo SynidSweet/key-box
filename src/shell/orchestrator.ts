@@ -3,12 +3,16 @@
 // platform call; a failure at steps 3 to 8 re-pushes the old generation, revokes and confirms the new one and sends ONE notice.
 // A revoke is confirmed by the verifier (or the lister), never by its own answer. The old key is never revoked while a destination
 // still holds the new one's replacement unconfirmed, and the new one is never revoked while a destination still holds it.
+// KBOX-55: a key the box makes itself (its kit has `boxKey`) takes its own path, chosen before anything asks for a master: draw and store
+// (pending, published at once), check it opens, wait the publish lead, prove the platform took it, switch, grace, delete the old value.
 import type { Audit } from '../ports/audit.ts';
 import type { Clock, Scheduler } from '../ports/clock.ts';
 import type { DestinationKit, PushOutcome } from '../ports/destination.ts';
 import type { EventLog } from '../ports/events.ts';
 import type { IssuedKey } from '../ports/issuer.ts';
 import type { MetaStore } from '../ports/meta.ts';
+import type { MintedSink } from '../ports/minted.ts';
+import type { BoxIdentity, BoxMadeKey } from '../ports/platform.ts';
 import type { Push } from '../ports/push.ts';
 import type { Random } from '../ports/random.ts';
 import type { KeyClass, KeyLocation, Lent } from '../ports/types.ts';
@@ -17,8 +21,8 @@ import { ApiError } from '../pure/errors.ts';
 import { admitDestination, mintValue } from '../pure/class.ts';
 import { sameLocation } from '../pure/location.ts';
 import { ownerEndsLine } from '../pure/words.ts';
-import { intentName, nextStep, retryDelayMs } from '../pure/rotation-machine.ts';
-import type { Step } from '../pure/rotation-machine.ts';
+import { afterProof, intentName, nextStep, retryDelayMs } from '../pure/rotation-machine.ts';
+import type { KeyMachine, ProofVerdict, Step } from '../pure/rotation-machine.ts';
 import { enderOf, revokeAndConfirm } from './revoke-confirm.ts';
 import type { Ender } from './revoke-confirm.ts';
 import { isPasteSource, kindOfStored, kitFor, overlapOf, setterOf, storedPlacement, tryLend, verifierFor } from './rotation-ports.ts';
@@ -56,6 +60,12 @@ export interface StartInput {
   readonly verifyHint?: string;
 }
 
+/** KBOX-55: what a box-made key's proof is made with: the box's own identity and the scanner's sink for what the proof buys. */
+export interface Federation {
+  readonly identity: BoxIdentity;
+  readonly minted: MintedSink;
+}
+
 export interface OrchestratorDeps extends PlatformSource {
   readonly store: RotationStore;
   readonly meta: MetaStore;
@@ -66,6 +76,8 @@ export interface OrchestratorDeps extends PlatformSource {
   readonly audit: Audit;
   readonly events: EventLog;
   readonly push: Push;
+  /** KBOX-55: none while the box has no identity (no domain or no audience): a box-made key's run then fails `identity_unconfigured`. */
+  readonly federation?: Federation;
   /** Where a test stops the process; production passes none. */
   readonly checkpoint?: (point: Point) => void | Promise<void>;
 }
@@ -224,8 +236,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   }
 
   /** One persisted transition: the next state is written, then the process may stop (a test) with that written. */
-  const advance = async (run: RunRow, done: Step, patch: { readonly revokeAt?: number } = {}): Promise<Next> => {
-    const state = nextStep(done, { overlap: overlapOf(kitOf(run.keyref)) });
+  const advance = async (run: RunRow, done: Step, patch: { readonly waitUntil?: number } = {}): Promise<Next> => {
+    const state = nextStep(done, machineOf(kitOf(run.keyref)));
     store.update(run.runId, { state: state === 'done' ? 'done' : state, ...patch });
     await point(done);
     return 'continue';
@@ -236,11 +248,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     return head === undefined ? undefined : kitFor(deps, head);
   };
 
+  /** The steps a key's kit walks (KBOX-55: a box-made key has no push and no redeploy). */
+  const machineOf = (kit: PlatformKit | undefined): KeyMachine => ({ overlap: overlapOf(kit), boxMade: kit?.boxKey !== undefined });
+
   async function step(run: RunRow): Promise<Next> {
     const head = store.key(run.keyref);
     const info = store.keyInfo(run.keyref);
     const kit = head === undefined ? undefined : kitFor(deps, head);
     if (head === undefined || info === undefined || kit === undefined) return fail(run, run.state === 'rolling_back' ? 'rollback' : run.state, 'no_adapter');
+    // KBOX-55: chosen before any step can ask for a master (a second master of the platform would make every ask `master_ambiguous`).
+    if (kit.boxKey !== undefined) return boxStep(run, head, info, kit.boxKey);
     switch (run.state) {
       case 'issuing':
         return overlapOf(kit) ? issue(run, head, kit) : setNew(run, head, kit);
@@ -510,11 +527,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     store.setStatus(run.keyref, 'works', run.genNew);
     store.markRotated(run.keyref, now());
     if (store.destinationsOf(run.keyref).some((row) => row.kind === WORKSTATION)) deliver(run, head);
-    return advance(run, 'promoting', { revokeAt: now() + (overlap && run.genOld > 0 ? head.graceHours * HOUR_MS : 0) });
+    return advance(run, 'promoting', { waitUntil: now() + (overlap && run.genOld > 0 ? head.graceHours * HOUR_MS : 0) });
   }
 
   async function graceWait(run: RunRow): Promise<Next> {
-    const at = run.revokeAt ?? now();
+    const at = run.waitUntil ?? now();
     if (now() < at) {
       later(run.runId, at - now());
       return 'wait';
@@ -701,6 +718,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   }
 
   async function rollBack(run: RunRow, head: KeyHead, kit: PlatformKit, fresh?: Fresh): Promise<Next> {
+    // KBOX-55: a box-made key's rollback asks for no master: nothing was pushed or issued at a platform.
+    if (kit.boxKey !== undefined) return boxRollBack(run);
     const receipts = store.receipts(run.runId);
     const created = store.gen(run.keyref, run.genNew);
     const id = created?.platformKeyId ?? fresh?.id ?? null;
@@ -718,6 +737,150 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       store.setGenStatus(run.keyref, run.genNew, 'failed');
       deps.vault.retire(run.keyref, run.genNew);
     }
+    store.update(run.runId, { state: 'failed' });
+    return 'wait';
+  }
+
+  // --- KBOX-55: a key the box makes itself -------------------------------------------------------------------------------------------
+
+  /**
+   * A run of a box-made key: no platform makes, lists or revokes it, it has no destination, and no step asks for a master (not in rollback,
+   * revoking or promote). Publish, wait, prove, switch: the new generation is pending (published) from `issuing`, the run waits the publish
+   * lead from `verifying`, and `gen_current` moves only after the platform has taken an assertion signed with it.
+   */
+  async function boxStep(run: RunRow, head: KeyHead, info: KeyInfo, box: BoxMadeKey): Promise<Next> {
+    switch (run.state) {
+      case 'issuing':
+        return boxIssue(run, info, box);
+      case 'verifying':
+        return boxVerify(run, box);
+      case 'checking':
+        return boxCheck(run, box);
+      case 'promoting':
+        return boxPromote(run, head);
+      case 'grace':
+        return graceWait(run);
+      case 'revoking':
+        return boxRevoke(run);
+      case 'rolling_back':
+        return boxRollBack(run);
+      case 'pushing':
+      case 'redeploying':
+        // Never a step of a box-made key (`stepsFor`): a run found here was not written by this path.
+        return fail(run, run.state, 'not_a_box_step');
+      case 'done':
+      case 'failed':
+      case 'abandoned':
+        return 'wait';
+    }
+  }
+
+  /** `issuing`: draw the new value and store it as generation N' `pending`, which the JWKS lists from now on. A value stored before a restart is kept. */
+  async function boxIssue(run: RunRow, info: KeyInfo, box: BoxMadeKey): Promise<Next> {
+    if (storedNothing(run)) {
+      const stored = await attempt(
+        run,
+        'issuing',
+        () => {
+          const value = box.generate(deps.random);
+          try {
+            deps.vault.put(run.keyref, run.genNew, value);
+          } finally {
+            value.fill(0);
+          }
+          store.putGen({ keyref: run.keyref, gen: run.genNew, status: 'pending', platformKeyId: null, location: info.location });
+          return Promise.resolve();
+        },
+        'store_failed',
+      );
+      if (!stored.ok) return fail(run, 'issuing', 'store_failed');
+      await point('stored');
+      deps.audit.append({ action: 'key.issued', subject: run.keyref, at: now() });
+    }
+    return advance(run, 'issuing');
+  }
+
+  /** `verifying`: the stored value opens as a key of its kind. Leaving it starts the publish lead: the wait time is stored with the step. */
+  async function boxVerify(run: RunRow, box: BoxMadeKey): Promise<Next> {
+    const value = lendOrUndefined(run.keyref, run.genNew);
+    if (value === undefined) return fail(run, 'verifying', 'verify_failed');
+    const opened = await attempt0(() => box.check(value));
+    if (opened !== 'ok') return fail(run, 'verifying', opened === 'rejected' ? 'verify_rejected' : 'verify_failed');
+    return advance(run, 'verifying', { waitUntil: now() + box.publishLeadMs });
+  }
+
+  /**
+   * `checking`: wait until the stored wait time (a restart re-arms it), then prove with N' at the platform. Refused or unanswered, it is retried
+   * with the KBOX-17 backoff until `opened_at` + 2 × the lead; then the run fails (`jwks_not_taken` also sets the current generation unproven
+   * again). Proven: N' is marked proven, and only then may the run promote.
+   */
+  async function boxCheck(run: RunRow, box: BoxMadeKey): Promise<Next> {
+    // Written with the step on leaving `verifying`; a row without it waits the lead from the run's opening, when `verifying` ran.
+    const at = run.waitUntil ?? run.openedAt + box.publishLeadMs;
+    if (now() < at) {
+      later(run.runId, at - now());
+      return 'wait';
+    }
+    const federation = deps.federation;
+    if (federation === undefined) return fail(run, 'checking', 'identity_unconfigured');
+    const pending = lendOrUndefined(run.keyref, run.genNew);
+    if (pending === undefined) return fail(run, 'checking', 'pending_missing');
+    const proof: { verdict?: ProofVerdict } = {};
+    const asked = await attempt(
+      run,
+      'checking',
+      async () => {
+        proof.verdict = await box.prove(pending, federation.identity, federation.minted);
+      },
+      'prove_failed',
+    );
+    if (!asked.ok || proof.verdict === undefined) return fail(run, 'checking', 'prove_failed');
+    const next = afterProof(proof.verdict, { now: now(), openedAt: run.openedAt, leadMs: box.publishLeadMs, attempt: run.attempts });
+    switch (next.then) {
+      case 'promote':
+        store.markProved(run.keyref, run.genNew, now());
+        return advance(run, 'checking');
+      case 'retry':
+        auditStepFailed(run, 'checking', proof.verdict === 'rejected' ? 'proof_rejected' : 'proof_unreachable');
+        store.update(run.runId, { attempts: run.attempts + 1 });
+        later(run.runId, next.inMs);
+        return 'wait';
+      case 'fail':
+        // KBOX-55 "Due only once proven": a provider that no longer trusts the box is not asked to approve a rotation each day.
+        if (next.code === 'jwks_not_taken' && run.genOld > 0) store.clearProved(run.keyref, run.genOld);
+        return fail(run, 'checking', next.code);
+    }
+  }
+
+  /** `promoting`: N' must still be lendable and proven; it becomes current, N goes to grace, and the wait time is the end of grace. */
+  async function boxPromote(run: RunRow, head: KeyHead): Promise<Next> {
+    if (lendOrUndefined(run.keyref, run.genNew) === undefined) return fail(run, 'promoting', 'pending_missing');
+    if (store.gen(run.keyref, run.genNew)?.provedAt === null) return fail(run, 'promoting', 'not_proven');
+    store.setGenStatus(run.keyref, run.genNew, 'current');
+    if (run.genOld > 0) store.setGenStatus(run.keyref, run.genOld, 'grace');
+    store.setStatus(run.keyref, 'works', run.genNew);
+    store.markRotated(run.keyref, now());
+    return advance(run, 'promoting', { waitUntil: now() + head.graceHours * HOUR_MS });
+  }
+
+  /**
+   * `revoking`: N's value is deleted, then N is retired, so it leaves the JWKS. The one exception to KBOX-51 step 10: the box is the only
+   * holder of the private half and no verifier exists to ask, so deleting the value is the key's death.
+   */
+  async function boxRevoke(run: RunRow): Promise<Next> {
+    if (run.genOld > 0) {
+      deps.vault.retire(run.keyref, run.genOld);
+      store.setGenStatus(run.keyref, run.genOld, 'retired');
+      deps.audit.append({ action: 'key.revoked', subject: run.keyref, at: now() });
+    }
+    deps.audit.append({ action: 'rotation.completed', subject: run.keyref, at: now(), detail: { run_id: run.runId, gen: run.genNew } });
+    return advance(run, 'revoking');
+  }
+
+  /** The rollback of a box-made key: N' is marked failed and its value deleted, so it leaves the JWKS at once; N stays current. */
+  function boxRollBack(run: RunRow): Next {
+    if (store.gen(run.keyref, run.genNew) !== undefined) store.setGenStatus(run.keyref, run.genNew, 'failed');
+    deps.vault.retire(run.keyref, run.genNew);
     store.update(run.runId, { state: 'failed' });
     return 'wait';
   }

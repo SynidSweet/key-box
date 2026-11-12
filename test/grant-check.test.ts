@@ -462,6 +462,42 @@ test('KBOX-24 KBOX-41 a grant proposed through core\'s proposal route is checked
   assert.equal(opened.status, 201, opened.body);
 });
 
+/** A rotation store over a stopped core's state directory, closed when the test ends. */
+function storeAfterStop(t: TestContext, stateDir: string): ReturnType<typeof createRotationStore> {
+  const clock = new TimedClock(NOW);
+  const parts = openCore({ stateDir, clock, scheduler: clock, random: seededRandom(6) });
+  t.after(() => parts.close());
+  return createRotationStore(parts.db, clock, parts.hub);
+}
+
+test('KBOX-55 a successful mint exchange through core (the start-up grant check) marks the signing key\'s current generation proven, never its pending one', async (t) => {
+  const c = await core(t, {
+    beforeStart: (parts) => {
+      // A rotation in flight: generation 2 is published (pending) and Google trusts it too, but nothing has signed with it.
+      const pending = createHash('sha256').update('kbox-test-signing-2').digest().toString('base64url');
+      parts.vault.put(MASTER_REF, 2, Buffer.from(pending));
+      createRotationStore(parts.db, new TimedClock(NOW), parts.hub).putGen({ keyref: MASTER_REF, gen: 2, status: 'pending', platformKeyId: null, location: {} });
+    },
+  });
+  await waitUntil(() => c.crmAnswered() === 1, 'the start-up grant check answered');
+  await c.stop();
+  await c.closed;
+  const store = storeAfterStop(t, c.stateDir);
+  assert.deepEqual(store.gens(MASTER_REF).map((g) => [g.gen, g.status, g.provedAt]), [
+    [1, 'current', NOW],
+    [2, 'pending', null],
+  ]);
+});
+
+test('KBOX-55 a mint whose exchange STS refuses marks nothing: the current generation stays unproven', async (t) => {
+  // The vault's current value is a key Google was never given: STS refuses its assertion.
+  const c = await core(t, { beforeStart: (parts) => parts.vault.put(MASTER_REF, 1, Buffer.from(createHash('sha256').update('kbox-test-signing-untrusted').digest().toString('base64url'))) });
+  await waitUntil(() => c.google.requests.some((r) => r.path === '/v1/token'), 'the start-up grant check asked STS');
+  await c.stop();
+  await c.closed;
+  assert.deepEqual(storeAfterStop(t, c.stateDir).gens(MASTER_REF).map((g) => g.provedAt), [null]);
+});
+
 test('KBOX-24 core checks granted keys at start and then every day: a permission found a day later suspends the grant', async (t) => {
   const c = await core(t);
   // Waits for core to have the start-up check's answer, not only for the request: advancing a day runs every timer at once and holds the

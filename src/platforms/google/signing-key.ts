@@ -5,7 +5,12 @@ import { createECDH, createHash, createPrivateKey, sign } from 'node:crypto';
 import type { KeyObject } from 'node:crypto';
 import type { Random } from '../../ports/random.ts';
 import type { KeyShape, Lent } from '../../ports/types.ts';
+import { keyrefOf } from '../../pure/class.ts';
 import { GoogleError } from './errors.ts';
+
+/** KBOX-55: the env name of the box's signing key, and the reference it is stored under (no project). */
+export const SIGNING_KEY_NAME = 'OIDC_SIGNING_KEY';
+export const SIGNING_KEYREF = keyrefOf('google', [], SIGNING_KEY_NAME);
 
 export const SIGNING_KEY_SHAPE: KeyShape = { prefix: null, alphabet: 'base64url', coreLength: { min: 43, max: 43 }, random: true };
 

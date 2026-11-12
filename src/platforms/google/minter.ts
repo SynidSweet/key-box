@@ -19,6 +19,7 @@ import { GoogleError } from './errors.ts';
 import type { GoogleErrorCode } from './errors.ts';
 import { providerOf, signAssertion } from './oidc.ts';
 import { ADMIN_ACCOUNT, GOOGLE_ID, serviceAccount, targetOf } from './scope.ts';
+import { SIGNING_KEYREF } from './signing-key.ts';
 import type { Target } from './scope.ts';
 
 export const STS_HOST = 'sts.googleapis.com';
@@ -63,9 +64,24 @@ export interface MintedToken {
   readonly target: Target;
 }
 
+/** A federated token STS gave for an assertion: what a proof bought, used for nothing. */
+export interface FederatedToken {
+  readonly token: Lent;
+  /** Milliseconds since the epoch. */
+  readonly expiresAt: number;
+}
+
 export interface Minter {
-  /** `master` is the box's signing key (the platform's master key). */
+  /**
+   * `master` is the box's signing key (the platform's master key). Once STS has accepted the assertion, the signing key is reported proven
+   * (`onExchanged`), whatever IAM Credentials answers next.
+   */
   mint(request: MintRequest, master: Lent): Promise<MintedToken>;
+  /**
+   * KBOX-55: the STS exchange alone, for `identity`, signed with `key` (a new generation being proven): no impersonation, nothing registered
+   * and nothing reported. Needs none of the minter's identity, sink or stored-record reader. Fails as the exchange of `mint` does.
+   */
+  federate(identity: BoxIdentity, key: Lent): Promise<FederatedToken>;
 }
 
 /** The keyref the scanner files the tokens under: the key's own, or the admin account's address. */
@@ -103,7 +119,7 @@ export async function send(http: AdapterHttp, request: HttpRequest): Promise<Htt
 }
 
 export function createMinter(deps: RegistryDeps): Minter {
-  const { http, clock, identity, minted, keyInfo } = deps;
+  const { http, clock, identity, minted, keyInfo, onExchanged } = deps;
 
   /** The service account and scopes of a request, once every rule of it holds; a refusal otherwise. No call is made before this. */
   const planOf = (request: MintRequest, read: NonNullable<RegistryDeps['keyInfo']>): { readonly target: Target; readonly scopes: readonly string[] } => {
@@ -178,10 +194,17 @@ export function createMinter(deps: RegistryDeps): Minter {
       const holder = holderOf(request, target);
       const federated = await exchange(master, identity);
       minted.add(holder, Buffer.from(federated.token, 'utf8'), federated.expiresAt);
+      // KBOX-55: STS took an assertion signed with the master, the box's signing key: core marks its current generation proven.
+      onExchanged?.(SIGNING_KEYREF);
       const issued = await impersonate(target.email, scopes, federated.token);
       minted.add(holder, Buffer.from(issued.token, 'utf8'), issued.expiresAt);
       const token = issued.token;
       return { token: makeLent(`google-token ${holder}`, () => Buffer.from(token, 'utf8')), expiresAt: issued.expiresAt, target };
+    },
+    async federate(box, key) {
+      const federated = await exchange(key, box);
+      const token = federated.token;
+      return { token: makeLent('google-federated', () => Buffer.from(token, 'utf8')), expiresAt: federated.expiresAt };
     },
   };
 }

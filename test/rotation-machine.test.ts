@@ -2,23 +2,65 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { checkProperty, seedFor } from './kit/index.ts';
-import { confirmDead, defaultGraceHours, intentAbsent, intentName, nextStep, retryDelayMs, stepsFor } from '../src/pure/rotation-machine.ts';
+import { afterProof, confirmDead, defaultGraceHours, intentAbsent, intentName, nextStep, retryDelayMs, stepsFor } from '../src/pure/rotation-machine.ts';
 
 const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const LEAD = 24 * HOUR;
 
 test('KBOX-51 the order is create, store, verify, push, redeploy, check, promote, revoke', () => {
-  assert.deepEqual(stepsFor({ overlap: true }), ['issuing', 'verifying', 'pushing', 'redeploying', 'checking', 'promoting', 'grace', 'revoking']);
+  assert.deepEqual(stepsFor({ overlap: true, boxMade: false }), ['issuing', 'verifying', 'pushing', 'redeploying', 'checking', 'promoting', 'grace', 'revoking']);
 });
 
 test('KBOX-17 overlap false skips the grace wait: the old value dies as soon as the new one is set', () => {
-  assert.deepEqual(stepsFor({ overlap: false }), ['issuing', 'verifying', 'pushing', 'redeploying', 'checking', 'promoting', 'revoking']);
+  assert.deepEqual(stepsFor({ overlap: false, boxMade: false }), ['issuing', 'verifying', 'pushing', 'redeploying', 'checking', 'promoting', 'revoking']);
 });
 
 test('KBOX-51 nextStep follows the list and ends at done', () => {
-  assert.equal(nextStep('issuing', { overlap: true }), 'verifying');
-  assert.equal(nextStep('promoting', { overlap: true }), 'grace');
-  assert.equal(nextStep('promoting', { overlap: false }), 'revoking');
-  assert.equal(nextStep('revoking', { overlap: true }), 'done');
+  assert.equal(nextStep('issuing', { overlap: true, boxMade: false }), 'verifying');
+  assert.equal(nextStep('promoting', { overlap: true, boxMade: false }), 'grace');
+  assert.equal(nextStep('promoting', { overlap: false, boxMade: false }), 'revoking');
+  assert.equal(nextStep('revoking', { overlap: true, boxMade: false }), 'done');
+});
+
+test('KBOX-55 a box-made key has no pushing and no redeploying (both would ask for a master): issue, verify, check, promote, grace, revoke', () => {
+  assert.deepEqual(stepsFor({ overlap: true, boxMade: true }), ['issuing', 'verifying', 'checking', 'promoting', 'grace', 'revoking']);
+  assert.equal(nextStep('verifying', { overlap: true, boxMade: true }), 'checking');
+  assert.equal(nextStep('checking', { overlap: true, boxMade: true }), 'promoting');
+});
+
+test('KBOX-55 a proof the token service accepted promotes, at any time, even past the deadline', () => {
+  for (const now of [0, LEAD, 2 * LEAD, 3 * LEAD]) assert.deepEqual(afterProof('ok', { now, openedAt: 0, leadMs: LEAD, attempt: 5 }), { then: 'promote' });
+});
+
+test('KBOX-55 KBOX-17 a refused or unanswered proof is retried with the backoff until opened_at + 2 x lead, never later: one millisecond before it a retry, at it and after the run fails', () => {
+  const at = (now: number, attempt = 0) => ({ now, openedAt: 1000, leadMs: LEAD, attempt });
+  const deadline = 1000 + 2 * LEAD;
+  assert.deepEqual(afterProof('rejected', at(1000 + LEAD)), { then: 'retry', inMs: MINUTE });
+  assert.deepEqual(afterProof('unreachable', at(1000 + LEAD, 3)), { then: 'retry', inMs: 8 * MINUTE });
+  assert.deepEqual(afterProof('rejected', at(deadline - 1, 9)), { then: 'retry', inMs: 1 }, 'the last retry lands on the deadline, not an hour after it');
+  assert.deepEqual(afterProof('rejected', at(deadline)), { then: 'fail', code: 'jwks_not_taken' });
+  assert.deepEqual(afterProof('rejected', at(deadline + 1)), { then: 'fail', code: 'jwks_not_taken' });
+  assert.deepEqual(afterProof('unreachable', at(deadline)), { then: 'fail', code: 'sts_unreachable' });
+});
+
+test('KBOX-55 property: a failed proof before the deadline is retried within the backoff and never past the deadline; at or after it the code names the last answer', () => {
+  const seed = seedFor(process.env);
+  checkProperty(seed, 300, (rng) => {
+    const openedAt = rng.int(1_000_000);
+    const leadMs = 1 + rng.int(2 * LEAD);
+    const now = openedAt + rng.int(5 * leadMs);
+    const attempt = rng.int(30);
+    const verdict = rng.int(2) === 0 ? 'rejected' : 'unreachable';
+    const next = afterProof(verdict, { now, openedAt, leadMs, attempt });
+    const deadline = openedAt + 2 * leadMs;
+    if (now >= deadline) {
+      assert.deepEqual(next, { then: 'fail', code: verdict === 'rejected' ? 'jwks_not_taken' : 'sts_unreachable' });
+      return;
+    }
+    assert.ok(next.then === 'retry', `a retry before the deadline, got ${next.then}`);
+    assert.ok(next.inMs > 0 && next.inMs <= retryDelayMs(attempt) && now + next.inMs <= deadline, `inMs ${next.inMs}`);
+  });
 });
 
 test('KBOX-51 the grace default is 24 h when any destination is a runtime, else 1 h', () => {

@@ -686,7 +686,7 @@ const boxMade =
     platform: (id) => {
       const kit = real.platform(id);
       if (id !== 'fake' || kit === undefined) return kit;
-      const boxKey = { name: BOX_NAME, shape: { prefix: '', alphabet: 'base64url', coreLength: { min: 43, max: 43 }, random: true } as const, publishLeadMs: HOUR, generate: () => new Uint8Array(32), check: () => Promise.resolve('ok' as const) };
+      const boxKey = { name: BOX_NAME, shape: { prefix: '', alphabet: 'base64url', coreLength: { min: 43, max: 43 }, random: true } as const, publishLeadMs: HOUR, generate: () => new Uint8Array(32), check: () => Promise.resolve('ok' as const), prove: () => Promise.resolve('rejected' as const) };
       const { verifier: dropped, ...rest } = kit;
       return { ...(verifier ? kit : rest), boxKey };
     },

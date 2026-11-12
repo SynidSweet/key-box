@@ -30,7 +30,8 @@ export interface RunRow {
   readonly intentName: string;
   readonly origin: RunOrigin;
   readonly openedAt: number;
-  readonly revokeAt: number | null;
+  /** When the run's wait ends (column `revoke_at`): the end of grace, or for a box-made key also the end of its publish lead (KBOX-55). */
+  readonly waitUntil: number | null;
   readonly attempts: number;
   readonly failedStep: string | null;
   readonly reasonCode: string | null;
@@ -158,7 +159,7 @@ export interface NewRun {
 /** What may change on a run after it is opened. */
 export interface RunPatch {
   readonly state?: RunState;
-  readonly revokeAt?: number;
+  readonly waitUntil?: number;
   readonly attempts?: number;
   readonly failedStep?: string;
   readonly reasonCode?: string;
@@ -194,7 +195,7 @@ const toRun = (r: RunStored): RunRow => ({
   intentName: r.intent_name,
   origin: r.origin,
   openedAt: r.opened_at,
-  revokeAt: r.revoke_at,
+  waitUntil: r.revoke_at,
   attempts: r.attempts,
   failedStep: r.failed_step,
   reasonCode: r.reason_code,
@@ -341,7 +342,7 @@ export function createRotationStore(db: DatabaseSync, clock: Clock, hub: EventSi
           `UPDATE rotation_runs SET state = ?, revoke_at = ?, attempts = ?, failed_step = ?, reason_code = ?, failed_notified = ?, still_on_notified = ?, failed_at = ? WHERE run_id = ?`,
         ).run(
           patch.state ?? before.state,
-          patch.revokeAt ?? before.revoke_at,
+          patch.waitUntil ?? before.revoke_at,
           patch.attempts ?? before.attempts,
           patch.failedStep ?? before.failed_step,
           patch.reasonCode ?? before.reason_code,

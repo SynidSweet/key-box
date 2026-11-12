@@ -31,7 +31,9 @@ import { createMetaShareSource } from '../src/shell/share-source.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
 import { issuerWith, sourceOf } from './fakes/platform-entry.ts';
 import { rotationWorld } from './support/rotation-world.ts';
-import { TimedClock, bytesOf, drive, lent, seededRandom, tempDir } from './kit/index.ts';
+import { TimedClock, adapterHttpTo, bytesOf, drive, lent, seededRandom, tempDir } from './kit/index.ts';
+import { fakeGoogle } from './fakes/google.ts';
+import { BOX_SUBJECT } from '../src/platforms/google/oidc.ts';
 
 const BOX_REF = 'google/p/OIDC_SIGNING_KEY';
 const DOMAIN = 'box.example';
@@ -326,6 +328,29 @@ test('KBOX-55 a first start with domain and audience makes the signing key: one 
   assert.equal(keyChanged(parts, BOX_REF), 1);
   assert.deepEqual(parts.meta.snapshot().approvals, []);
   assert.equal((parts.db.prepare('SELECT count(*) AS n FROM paste_tasks').get() as { n: number }).n, 0);
+});
+
+test('KBOX-55 core hands rotation the box identity and the scanner sink: a box run stopped in checking past its lead resumes at start, proves at Google with the new key and switches', async (t) => {
+  const google = await fakeGoogle(t, { audience: AUDIENCE, issuer: `https://keys.${DOMAIN}`, subject: BOX_SUBJECT });
+  const registry = (deps: RegistryDeps): readonly PlatformEntry[] => [createGoogleEntry({ ...deps, http: adapterHttpTo(google) })];
+  const box = await boxCore(t);
+  await box.start({ registry });
+  const next = scalarText('next');
+  box.seed(({ parts, store }) => {
+    parts.vault.put(BOX_REF, 2, Buffer.from(next, 'latin1'));
+    store.putGen({ keyref: BOX_REF, gen: 2, status: 'pending', platformKeyId: null, location: {} });
+    const run = store.openRun({ runId: 'run_00000000000000aa', keyref: BOX_REF, state: 'checking', genOld: 1, genNew: 2, intentName: 'kbox_google_p_oidc_signing_key_g2_00000000', origin: 'approval' });
+    store.update(run.runId, { waitUntil: box.clock.now() });
+  });
+  google.trust([jwkOf(next)]);
+  await box.start({ registry });
+  const current = async (): Promise<number | undefined> => (JSON.parse((await box.call('/api/meta')).body) as { keys: KeyRow[] }).keys.find((k) => k.keyref === BOX_REF)?.gen_current;
+  let gen = await current();
+  for (let i = 0; i < 200 && gen !== 2; i += 1) gen = await current();
+  assert.equal(gen, 2);
+  assert.equal(google.lastHeader?.['kid'], jwkOf(next).kid, 'the proof was signed with the new key');
+  const { store } = await box.read();
+  assert.deepEqual(gensOf(store, BOX_REF), [{ gen: 1, status: 'grace' }, { gen: 2, status: 'current' }]);
 });
 
 test('KBOX-55 a restart reuses the key: the same vault bytes and kid, no new generation, no second key.issued', async (t) => {

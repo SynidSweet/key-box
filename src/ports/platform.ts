@@ -24,6 +24,12 @@ export interface BoxMadeKey {
   generate(random: Random): Uint8Array;
   /** Whether a stored value opens as a key of this kind. */
   check(value: Lent): Promise<'ok' | 'rejected'>;
+  /**
+   * Whether the platform has taken a new generation (KBOX-55 `checking`): one exchange signed with `pending` for the box's `identity`. `ok` when
+   * the platform accepted it (what it bought is held by `minted` until it expires, then dropped), `rejected` when it refused it, `unreachable`
+   * when no usable answer came. An identity the platform could never take is a throw, not an answer.
+   */
+  prove(pending: Lent, identity: BoxIdentity, minted: MintedSink): Promise<'ok' | 'rejected' | 'unreachable'>;
 }
 
 /**
@@ -138,4 +144,10 @@ export interface RegistryDeps {
    * (the arch check `key info reads`): every other adapter is handed a location or a stored id by core, never a keyref.
    */
   readonly keyInfo?: (keyref: string) => StoredKey | undefined;
+  /**
+   * KBOX-55: told the keyref of the box-made key a mint's exchange was signed with, each time the platform accepted it; core marks that key's
+   * current generation proven. A rotation's proof (`BoxMadeKey.prove`) is not reported here: the run marks the generation it proved. The
+   * relay passes none.
+   */
+  readonly onExchanged?: (keyref: string) => void;
 }

@@ -10,7 +10,7 @@ import type { Vault } from '../../src/ports/vault.ts';
 import type { EventLog } from '../../src/ports/events.ts';
 import type { EventData, EventKind } from '../../src/pure/schemas.ts';
 import { createOrchestrator } from '../../src/shell/orchestrator.ts';
-import type { NewKey, Orchestrator } from '../../src/shell/orchestrator.ts';
+import type { Federation, NewKey, Orchestrator } from '../../src/shell/orchestrator.ts';
 import type { PlatformSource, Point } from '../../src/shell/rotation-ports.ts';
 import { createReconciler } from '../../src/shell/reconcile.ts';
 import type { Reconciler } from '../../src/shell/reconcile.ts';
@@ -72,6 +72,8 @@ export interface WorldOptions {
   readonly settable?: boolean;
   /** Wraps the platform source the orchestrator is given (a test hands in one built from a registry entry). */
   readonly source?: (real: PlatformSource) => PlatformSource;
+  /** KBOX-55: the box's identity and the scanner's sink a box-made key's proof is made with; none: such a run fails `identity_unconfigured`. */
+  readonly federation?: Federation;
 }
 
 export interface RotationWorld {
@@ -281,6 +283,7 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
         audit: parts.audit,
         events,
         push,
+        ...(options.federation === undefined ? {} : { federation: options.federation }),
         checkpoint: async (point: Point): Promise<void> => {
           checkpoints.seen.push(point);
           const n = (counts.get(point) ?? 0) + 1;
