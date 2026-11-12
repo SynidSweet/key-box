@@ -366,3 +366,45 @@ test('KBOX-55 with no audience configured the run fails identity_unconfigured on
   assert.equal(b.google.requests.length, 0);
   assert.deepEqual(b.gens(), [{ gen: 1, status: 'current' }, { gen: 2, status: 'failed' }]);
 });
+
+test('KBOX-55 a crash in issuing before the generation row: reconcile retakes the run without a listing call and reuses the generation number, with one pending generation and no master asked', async (t) => {
+  const b = await boxWorld(t, { secondMaster: false });
+  // The stopped orchestrator opens the run (state issuing, nothing stored) and starts no drive: the process died before the generation row.
+  b.w.orch.stop();
+  const first = b.w.orch.start({ keyref: BOX_REF, origin: 'approval' });
+  await b.w.orch.idle();
+  assert.equal(runOf(b, first.runId).state, 'issuing');
+  assert.deepEqual(b.gens(), [{ gen: 1, status: 'current' }], 'no generation row yet');
+  b.w.build();
+  await b.w.reconciler.run();
+  await b.w.orch.idle();
+  const runs = b.w.store.activeRuns().filter((r) => r.keyref === BOX_REF);
+  assert.equal(runs.length, 1, 'one run goes on');
+  assert.equal(runs[0]?.genNew, 2, 'the generation number is reused');
+  assert.equal(runOf(b, first.runId).state, 'abandoned');
+  assert.deepEqual(b.gens(), [{ gen: 1, status: 'current' }, { gen: 2, status: 'pending' }], 'exactly one pending generation');
+  assert.notEqual(await b.valueOf(2), undefined);
+  assert.deepEqual(b.google.requests, [], 'no listing call, no Google call at all');
+  assert.deepEqual(b.masterAsked, [], 'no master asked');
+  assert.equal(b.w.parts.audit.read(0).entries.filter((e) => e.action === 'rotation.list_failed' || e.detail['code'] === 'list_failed').length, 0);
+});
+
+test('KBOX-55 a crash in issuing after the generation row: reconcile continues the same run and makes no second N\', no listing call, no master asked', async (t) => {
+  const b = await boxWorld(t, { secondMaster: false });
+  b.w.checkpoints.arm('stored');
+  const runId = await rotate(b);
+  const kept = await b.valueOf(2);
+  assert.ok(kept !== undefined, 'the row and its value were stored before the crash');
+  assert.equal(runOf(b, runId).state, 'issuing');
+  b.w.checkpoints.crashAt = undefined;
+  b.w.build();
+  await b.w.reconciler.run();
+  await b.w.orch.idle();
+  assert.deepEqual(b.gens(), [{ gen: 1, status: 'current' }, { gen: 2, status: 'pending' }], 'no gen 3');
+  assert.equal(await b.valueOf(2), kept, 'the stored value is kept');
+  assert.equal(await b.valueOf(3), undefined);
+  assert.equal(runOf(b, runId).state, 'checking', 'the same run goes on');
+  assert.equal(b.w.store.activeRuns().filter((r) => r.keyref === BOX_REF).length, 1);
+  assert.deepEqual(b.google.requests, [], 'no listing call');
+  assert.deepEqual(b.masterAsked, []);
+});
