@@ -13,6 +13,7 @@ import { refusingAdapterHttp } from '../src/ports/http.ts';
 import type { KeyRow } from '../src/ports/meta.ts';
 import type { BoxMadeKey, PlatformEntry, RegistryDeps } from '../src/ports/platform.ts';
 import type { Random } from '../src/ports/random.ts';
+import type { KeyClass, Scope } from '../src/ports/types.ts';
 import { hashToken, newToken } from '../src/pure/tokens.ts';
 import { startCore } from '../src/main-core.ts';
 import type { StartedCore } from '../src/main-core.ts';
@@ -120,10 +121,15 @@ interface Calls {
   retire: number;
 }
 
-/** The google entry as it will stand once API keys are added: an issuer, lister, verifier and retirer beside the box key, each counting calls. */
+/**
+ * The google entry as it will stand once API keys are added: an issuer, lister, verifier and retirer beside the box key, each counting calls.
+ * Its issuer classifies an empty scope (the box key's stored one) as master, so a box key wrongly handed this issuer still finds its master and
+ * reaches the issuer's calls: the negative control below then sees them.
+ */
 function googleWithApiKeys(world: FakePlatformWorld, deps: RegistryDeps = googleDeps()): { readonly entry: PlatformEntry; readonly calls: Calls } {
   const calls: Calls = { issue: 0, revoke: 0, list: 0, listAt: 0, verify: 0, retire: 0 };
-  const base = issuerWith(world.issuer, { classify: () => 'ordinary', shape: { prefix: 'AIza', alphabet: 'base64url', coreLength: { min: 35, max: 35 }, random: true } });
+  const classify = (scope: Scope): KeyClass => (Array.isArray(scope['items']) && scope['items'].length === 0 ? 'master' : 'ordinary');
+  const base = issuerWith(world.issuer, { classify, shape: { prefix: 'AIza', alphabet: 'base64url', coreLength: { min: 35, max: 35 }, random: true } });
   const issuer: Issuer = {
     ...base,
     platform: 'google',
