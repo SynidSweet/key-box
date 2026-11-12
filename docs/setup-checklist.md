@@ -9,8 +9,8 @@ Do every step on your phone, in this order. Nothing here is done from the workst
    - deSEC authenticator app as the second factor: UNVERIFIED.
    - DNSSEC for a `dedyn.io` name: UNVERIFIED.
    - TLS-ALPN-01 for a `dedyn.io` name (how Caddy gets its certificate with port 80 closed): UNVERIFIED.
-5. **A reserved public IP**, and `keys.<domain>` and `api.keys.<domain>` pointing at it.
-6. **The instance:** Ubuntu LTS minimal on the A1 shape (1 OCPU, 2 GB), "no SSH key", the reserved IP, the security list below, and the bootstrap text (`deploy/cloud-init.yaml` at the tagged release) as cloud-init user data. Leave the Compute Instance Monitoring plugin on; turn the Run Command plugin off.
+5. **The instance's public IP** (the one Oracle assigns at creation: it stays while the instance exists, stopped or running, and goes only when the instance is deleted, which means a new setup anyway), with `keys.<domain>` and `api.keys.<domain>` pointing at it.
+6. **The instance:** Ubuntu LTS minimal on the A1 shape (1 OCPU, 2 GB), "no SSH key", a public IP assigned at creation, the security list below, and the bootstrap text (`deploy/cloud-init.yaml` at the tagged release) as cloud-init user data. Leave the Compute Instance Monitoring plugin on; turn the Run Command plugin off.
 7. **The security list** (egress layer 1, KBOX-46):
 
    | Direction | Protocol | Address | Port |

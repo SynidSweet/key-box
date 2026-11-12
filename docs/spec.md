@@ -459,7 +459,7 @@ says, in order: a new email account and a new Oracle account logged into only fr
 **authenticator app synced only to the owner's Google account, which is never signed in on the workstation, devbox or Helsinki**, and whose passwords for
 Oracle, deSEC and the email account are not saved anywhere that syncs to those machines (design §8, revision 5); no passkey sign-in and no SMS on these
 accounts; pay-as-you-go with a budget alert; home region near the owner; a free `dedyn.io` name in a deSEC account used only from the phone with its own
-login, DNSSEC if offered; `keys.<domain>` and `api.keys.<domain>` at a reserved IP; Ubuntu LTS minimal on A1 (1 OCPU, 2 GB), "no SSH key", the reserved IP,
+login, DNSSEC if offered; `keys.<domain>` and `api.keys.<domain>` at the public IP Oracle assigns at creation (kept while the instance exists, stopped or running); Ubuntu LTS minimal on A1 (1 OCPU, 2 GB), "no SSH key", the reserved IP,
 the security list of `KBOX-46`, the bootstrap text as cloud-init user data; reading the setup code in the console history; `/setup`. It states plainly: the
 free name can be withdrawn and then setup is redone on a new name; if A1 capacity is unavailable, try again later or another availability domain; the E2.1.Micro
 shape is not an option (no memory criterion in Oracle's idle rule). Test (`test/bootstrap-text.test.ts`, text check): the cloud-init names C and H and four
