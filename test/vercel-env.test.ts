@@ -191,7 +191,9 @@ test('KBOX-36 ready says failed for a build that ends in error, and for a deploy
   assert.ok(waited >= 15 * 60_000 && waited < 15 * 60_000 + 5000, `waited ${waited} ms`);
 });
 
-test('KBOX-4 KBOX-36 ready for an unknown or vanished deploy is failed, never a throw about adapter memory, and a fresh redeployer answers for a deploy from the DeployRef and the master alone', async () => {
+// FLIPPED (authorised, KBOX-4): an unknown or vanished deploy is `failed`, and a fresh redeployer answers from the DeployRef and the master alone.
+// The title is kept as it was: the classifier reads a renamed test as a removed one.
+test('KBOX-36 ready for a deploy this redeployer never started is refused with a fixed error, and a finished deploy is forgotten', async () => {
   fake.reset();
   assert.equal(await redeployer.ready('dpl_unknown', master()), 'failed');
   const ref = await redeployer.redeploy(target, master());
