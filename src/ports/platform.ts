@@ -29,6 +29,11 @@ export interface PlatformEntry {
   readonly classify?: (scope: Scope) => KeyClass;
   /** The destination adapters this platform provides; the kind of each is its `destination.kind`. A kind has at most one provider. */
   readonly destinations?: readonly DestinationKit[];
+  /**
+   * The exact hosts the adapter's own calls reach (its management API, token service, ...): lower-case DNS names, no wildcard, port or path.
+   * The egress gate lets caller `adapter` reach these and the relay profiles' hosts; caller `relay` reaches relay-profile hosts only.
+   */
+  readonly hosts?: readonly string[];
   /** The probe ids (KBOX-42) that `docs/probes/<id>.md` still marks STILL UNVERIFIED. */
   readonly unverified: readonly string[];
 }

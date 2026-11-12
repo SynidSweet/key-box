@@ -28,11 +28,12 @@ import type { IdleWatch } from './shell/idle-watch.ts';
 import { createShareWriter, shareRoute } from './shell/share-writer.ts';
 import { createMetaShareSource } from './shell/share-source.ts';
 import { createPush } from './shell/push.ts';
-import { createSystemEgress } from './shell/egress-system.ts';
+import { createLazyEgress } from './shell/egress-system.ts';
 import { createHttpPushTransport } from './shell/push-transport.ts';
 import { openPrivateDatabase } from './shell/private-db.ts';
 import { systemRandom } from './shell/random.ts';
-import { REGISTRY } from './platforms/registry.ts';
+import { createRegistry } from './platforms/registry.ts';
+import { createAdapterHttp } from './shell/adapter-http.ts';
 import { createTrustInstaller } from './shell/trust-installer.ts';
 import { createUpdater } from './shell/updater.ts';
 import type { Executor } from './shell/approvals.ts';
@@ -97,7 +98,7 @@ export interface CoreRuntime {
   readonly journal: (code: string) => void;
   /** The platform adapters rotation is given; production derives them from the registry (a test passes its own). */
   readonly platforms?: PlatformSource;
-  /** The platform registry the box runs with; production uses `REGISTRY`, a test passes its own. */
+  /** The platform registry the box runs with; production builds it with `createRegistry`, a test passes its own. */
   readonly registry?: readonly PlatformEntry[];
 }
 
@@ -126,7 +127,9 @@ export interface StartedCore {
 export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = systemRuntime): Promise<StartedCore> {
   const { clock, scheduler, random, journal } = runtime;
   const config = readConfig(env);
-  const registry = runtime.registry ?? REGISTRY;
+  // The adapters' client holds the gate and the gate reads the registry's hosts: the gate is built on first use.
+  const egress = createLazyEgress(() => registry);
+  const registry = runtime.registry ?? createRegistry({ http: createAdapterHttp({ egress, scheduler }), clock });
   assertRegistry(registry);
   const parts = openCore({ stateDir: config.stateDir, clock, scheduler, random });
   const privateStore = openPrivateDatabase(join(config.stateDir, 'private.db'));
@@ -155,7 +158,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   if (config.domain === undefined) journal('no_domain');
   else {
     const trust = createTrustInstaller({ stagingDir: config.staging, resultsDir: config.installResults, random, clock, wait });
-    const push = createPush({ store: privateStore, transport: createHttpPushTransport(createSystemEgress(registry)), scheduler, clock, random, audit: parts.audit, subject: `https://keys.${config.domain}` });
+    const push = createPush({ store: privateStore, transport: createHttpPushTransport(egress), scheduler, clock, random, audit: parts.audit, subject: `https://keys.${config.domain}` });
     const wordlist = parseWordlist(readFileSync(new URL('./data/wordlist.txt', import.meta.url), 'utf8'));
     idle = createIdleWatch({ files: { stat: '/proc/stat', meminfo: '/proc/meminfo', netdev: '/proc/net/dev' }, clock, push, linkMbps: linkMbps(), notifier: { notice: journal } });
     // Rotation needs the approvals and approvers that need its executors: the executors reach it once it is open (an approval is decided long after start).

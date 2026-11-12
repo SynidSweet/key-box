@@ -51,7 +51,10 @@ export interface Egress {
 }
 
 export interface EgressDeps {
+  /** The relay profiles' hosts: served to caller `relay` and caller `adapter`. */
   readonly adapterHosts: readonly string[];
+  /** The registry entries' own hosts (`PlatformEntry.hosts`): served to caller `adapter` only. */
+  readonly registryHosts?: readonly string[];
   readonly listed: readonly EgressHost[];
   readonly resolver: Resolver;
   readonly connector: Connector;
@@ -134,7 +137,7 @@ export function createEgress(deps: EgressDeps): Egress {
   return {
     async open(caller, url, signal) {
       if (url.protocol !== 'https:' || url.port !== '' || url.username !== '' || url.password !== '') throw new EgressRefused('bad_url');
-      const verdict = hostVerdict(caller, url.hostname, deps.adapterHosts, deps.listed);
+      const verdict = hostVerdict(caller, url.hostname, deps.adapterHosts, deps.listed, deps.registryHosts);
       if (verdict !== 'allowed') throw new EgressRefused(verdict);
       const address = await resolveOnce(url.hostname);
       return connectInTime({ address, port: 443, servername: url.hostname }, signal);
