@@ -11,7 +11,6 @@ export const FAKE_KEY_PAGE = 'https://fake.example/keys';
 /** The fake platform's one location field (KBOX-57): a `region` (any lower-case name) that no class must name, as the tests' `eu` keys carry. */
 export const FAKE_LOCATION: LocationSchema = { region: { pattern: /[a-z]{2,16}/, requiredFor: [] } };
 
-
 /** An entry with the fake platform's issuer, lister, verifier and location field; `patch` replaces any field. */
 export const fakeEntry = (world: FakePlatformWorld, patch: Partial<PlatformEntry> = {}): PlatformEntry => ({
   id: 'fake',
