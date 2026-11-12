@@ -3,13 +3,47 @@
 // is emptied only after the box stored the key.
 import { browser, byId, call, fromB64u, notifier, pasteChallenge, prove } from './webauthn-client.js';
 
-/** @typedef {{ paste_id: string, title: string, lines: string[], phrase: string, platform_link?: string, digest_b64: string, nonce_b64: string }} Task */
+/** @typedef {{ paste_id: string, title: string, lines: string[], phrase: string, platform_link?: string, digest_b64: string, nonce_b64: string, verify_hints?: string[], verify_hint?: string }} Task */
 
 /** @param {unknown} v @returns {v is Task} */
 function isTask(v) {
   if (typeof v !== 'object' || v === null) return false;
   const o = /** @type {Record<string, unknown>} */ (v);
-  return ['paste_id', 'title', 'phrase', 'digest_b64', 'nonce_b64'].every((k) => typeof o[k] === 'string') && Array.isArray(o['lines']) && o['lines'].every((l) => typeof l === 'string');
+  const hints = o['verify_hints'];
+  const hintsOk = hints === undefined || (Array.isArray(hints) && hints.every((h) => typeof h === 'string'));
+  const stored = o['verify_hint'];
+  return ['paste_id', 'title', 'phrase', 'digest_b64', 'nonce_b64'].every((k) => typeof o[k] === 'string') && Array.isArray(o['lines']) && o['lines'].every((l) => typeof l === 'string') && hintsOk && (stored === undefined || typeof stored === 'string');
+}
+
+/** Whether the select holds its options yet. */
+let hintsBuilt = false;
+
+/**
+ * The choice of which read call verifies the key (KBOX-40): shown only for an entry that lists hints, once per page (a re-render for a retry
+ * keeps what the owner picked), preselected with the key's stored hint. It shows call names, never a value.
+ * @param {Task} task
+ */
+function showHints(task) {
+  const hints = task.verify_hints ?? [];
+  const row = byId('hint-row');
+  row.hidden = hints.length === 0;
+  const select = byId('hint');
+  if (hints.length === 0 || hintsBuilt) return;
+  hintsBuilt = true;
+  const doc = browser().document;
+  for (const name of ['', ...hints]) {
+    const option = doc.createElement('option');
+    option.value = name;
+    option.textContent = name === '' ? 'No preference' : name;
+    select.append(option);
+  }
+  select.value = task.verify_hint !== undefined && hints.includes(task.verify_hint) ? task.verify_hint : '';
+}
+
+/** The hint to send: the chosen call, or nothing when the page offers none or the owner has no preference. */
+function chosenHint() {
+  const value = byId('hint').value;
+  return byId('hint-row').hidden || value === '' ? {} : { verify_hint: value };
 }
 
 /** The id of the task this page is for: the fragment of its address. */
@@ -39,6 +73,7 @@ function show(task) {
     lines.push(a);
   }
   byId('words').replaceChildren(...lines);
+  showHints(task);
 }
 
 byId('send').addEventListener('click', () => {
@@ -49,7 +84,7 @@ byId('send').addEventListener('click', () => {
       show(task);
       const n = fromB64u(task.nonce_b64);
       const proof = await prove(n, await pasteChallenge(task.paste_id, fromB64u(task.digest_b64), n));
-      await call(`/p/${task.paste_id}`, { value: byId('value').value, proof });
+      await call(`/p/${task.paste_id}`, { value: byId('value').value, proof, ...chosenHint() });
       byId('value').value = '';
       notifier.say('Stored. The key is in the box.');
     } catch (error) {

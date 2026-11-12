@@ -53,6 +53,8 @@ export interface PlatformEntry {
    * The egress gate lets caller `adapter` reach these and the relay profiles' hosts; caller `relay` reaches relay-profile hosts only.
    */
   readonly hosts?: readonly string[];
+  /** The read calls a pasted key may be verified with, by name (KBOX-40): the paste page offers them, `VerifyTarget.hint` names one. Unique `[a-z0-9_]{1,32}` (the registry check). */
+  readonly verifyHints?: readonly string[];
   /** The probe ids (KBOX-42) that `docs/probes/<id>.md` still marks STILL UNVERIFIED. */
   readonly unverified: readonly string[];
 }

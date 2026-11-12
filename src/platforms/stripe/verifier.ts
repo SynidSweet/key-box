@@ -6,6 +6,8 @@ import type { Verifier } from '../../ports/issuer.ts';
 
 /** A cheap read call and the dashboard permission that allows it. The paste page offers this list (KBOX-40). */
 export interface VerifyCall {
+  /** The name the paste page offers and `VerifyTarget.hint` carries (`[a-z0-9_]{1,32}`). */
+  readonly name: string;
   readonly path: string;
   readonly permission: string;
 }
@@ -15,24 +17,30 @@ export interface VerifyCall {
  * from the dashboard wording and docs only.
  */
 export const STRIPE_VERIFY_CALLS: readonly VerifyCall[] = [
-  { path: '/v1/balance', permission: 'Balance: read' },
-  { path: '/v1/customers?limit=1', permission: 'Customers: read' },
-  { path: '/v1/charges?limit=1', permission: 'Charges and Refunds: read' },
-  { path: '/v1/products?limit=1', permission: 'Products: read' },
-  { path: '/v1/prices?limit=1', permission: 'Prices: read' },
-  { path: '/v1/account', permission: 'none documented' },
+  { name: 'balance', path: '/v1/balance', permission: 'Balance: read' },
+  { name: 'customers', path: '/v1/customers?limit=1', permission: 'Customers: read' },
+  { name: 'charges', path: '/v1/charges?limit=1', permission: 'Charges and Refunds: read' },
+  { name: 'products', path: '/v1/products?limit=1', permission: 'Products: read' },
+  { name: 'prices', path: '/v1/prices?limit=1', permission: 'Prices: read' },
+  { name: 'account', path: '/v1/account', permission: 'none documented' },
 ];
+
+/** The calls in the order a hint asks for: the hinted call first, then the rest of the list as it stands (an unlisted hint changes nothing). */
+function callsFor(hint: string | undefined): readonly VerifyCall[] {
+  const first = STRIPE_VERIFY_CALLS.find((c) => c.name === hint);
+  return first === undefined ? STRIPE_VERIFY_CALLS : [first, ...STRIPE_VERIFY_CALLS.filter((c) => c !== first)];
+}
 
 /** What an HTTP header value can safely carry: printable ASCII, no space. Anything else is not a key the platform could have issued. */
 const HEADER_SAFE = /^[\x21-\x7e]+$/;
 
 export function createStripeVerifier(http: AdapterHttp): Verifier {
   return {
-    verify(key) {
+    verify(key, target) {
       return key.use(async (bytes) => {
         const text = Buffer.from(bytes).toString('utf8');
         if (!HEADER_SAFE.test(text)) return 'rejected';
-        for (const { path } of STRIPE_VERIFY_CALLS) {
+        for (const { path } of callsFor(target.hint)) {
           let status: number;
           try {
             status = (await http.request({ method: 'GET', url: `https://api.stripe.com${path}`, headers: { authorization: `Bearer ${text}`, accept: 'application/json' } })).status;

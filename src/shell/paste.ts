@@ -37,6 +37,8 @@ export const PASTE_TTL_MS = 14 * 24 * 3600_000;
 /** The core length floor of KBOX-12 (open point 2: one constant). */
 export const PASTE_FLOOR_BYTES = 16;
 const VALUE_LIMIT = 4096;
+/** A hint name is at most 32 characters (KBOX-23); a longer one is not a request this route understands. */
+const VERIFY_HINT_LIMIT = 64;
 
 /** The sentence that asks for the paste; the fixed rule on every paste page is `FIXED.pasteWhere`. */
 export const PASTE_ASK = 'Create the key on your phone, at the platform, then paste it here.';
@@ -75,6 +77,10 @@ export interface PasteView {
   readonly lines: readonly string[];
   /** The adapter's own page for making the key. Never from mission control. */
   readonly platform_link?: string;
+  /** The entry's verify hints for the paste page's choice (KBOX-40); absent for an entry with none. */
+  readonly verify_hints?: readonly string[];
+  /** The hint stored with the key, preselected on a rotation. */
+  readonly verify_hint?: string;
   readonly phrase: string;
   readonly digest_b64: string;
   readonly nonce_b64: string;
@@ -95,8 +101,8 @@ export interface Paste {
   lastExpiredAt(slot: string): number | undefined;
   /** The pending tasks of the app's queue. */
   pending(cookie: string | undefined): readonly { readonly paste_id: string; readonly title: string }[];
-  /** For `POST /p/<id>`: the paste with its proof. */
-  submit(id: string, cookie: string | undefined, value: string, proof: ProofBytes): Promise<{ readonly keyref: string }>;
+  /** For `POST /p/<id>`: the paste with its proof, and the verify hint the owner chose (KBOX-40; not covered by the proof). */
+  submit(id: string, cookie: string | undefined, value: string, proof: ProofBytes, verifyHint?: string): Promise<{ readonly keyref: string }>;
 }
 
 const rejected = (code: string): ApiError => new ApiError('rejected', code);
@@ -146,7 +152,7 @@ export function createPaste(deps: PasteDeps): Paste {
   };
 
   /** The value checks of KBOX-12, in order: the floor, the strict shape, the platform verifier. Names only. */
-  async function checkValue(platform: string, at: KeyLocation, value: string): Promise<void> {
+  async function checkValue(platform: string, at: KeyLocation, value: string, hint: string | undefined): Promise<void> {
     const kit = deps.source.platform(platform);
     const shape = shapeOf(kit);
     if (kit === undefined || shape === undefined) throw rejected('unknown_platform');
@@ -155,17 +161,19 @@ export function createPaste(deps: PasteDeps): Paste {
     if (kit.verifier === undefined) return;
     const bytes = Uint8Array.from(Buffer.from(value, 'utf8'));
     const lent = makeLent('paste:1', () => Uint8Array.from(bytes));
-    const verdict = await kit.verifier.verify(lent, { platform, at }).catch((): 'unreachable' => 'unreachable');
+    const verdict = await kit.verifier.verify(lent, { platform, at, ...(hint === undefined ? {} : { hint }) }).catch((): 'unreachable' => 'unreachable');
     bytes.fill(0);
     if (verdict !== 'ok') throw rejected(verdict === 'rejected' ? 'verifier_rejected' : 'verifier_unreachable');
   }
 
-  async function execute(action: PasteAction, bytes: Uint8Array): Promise<string> {
+  /** `chosen` is the hint this paste carried (stored with the key); a paste without one leaves the stored choice as it is. */
+  async function execute(action: PasteAction, bytes: Uint8Array, chosen: string | undefined): Promise<string> {
+    const verifyHint = chosen === undefined ? {} : { verifyHint: chosen };
     if (action.kind === 'rotate_key') {
-      deps.orchestrator.start({ keyref: action.keyref, origin: 'paste', value: bytes });
+      deps.orchestrator.start({ keyref: action.keyref, origin: 'paste', value: bytes, ...verifyHint });
       return action.keyref;
     }
-    const key = newKeyOf(action, deps.source);
+    const key = { ...newKeyOf(action, deps.source), ...verifyHint };
     const created = await deps.orchestrator.create(key, bytes);
     if (created.status !== 'works') throw rejected('check_failed');
     return key.keyref;
@@ -215,7 +223,10 @@ export function createPaste(deps: PasteDeps): Paste {
       const reason = r.reason_json === null ? undefined : (JSON.parse(r.reason_json) as Reason);
       const coverage = action.kind === 'rotate_key' ? deps.meta.coverageOf(action.keyref) : undefined;
       const page = renderPage(action, { requester, ...(reason === undefined ? {} : { reason }), ...(coverage === undefined ? {} : { coverage }) });
-      const link = deps.source.platform(action.kind === 'add_key' ? action.platform : (deps.meta.snapshot().keys.find((k) => k.keyref === action.keyref)?.platform ?? ''))?.keyPageUrl;
+      const kit = deps.source.platform(action.kind === 'add_key' ? action.platform : (deps.meta.snapshot().keys.find((k) => k.keyref === action.keyref)?.platform ?? ''));
+      const link = kit?.keyPageUrl;
+      const hints = kit?.verifyHints ?? [];
+      const stored = action.kind === 'rotate_key' ? deps.store.keyInfo(action.keyref)?.verifyHint : undefined;
       const nonce = deps.approvers.nonce({ kind: 'decide', approvalId: id, revision: r.revision });
       return {
         paste_id: id,
@@ -223,6 +234,8 @@ export function createPaste(deps: PasteDeps): Paste {
         title: page.title,
         lines: [...page.lines, PASTE_ASK, FIXED.pasteWhere],
         ...(link === undefined ? {} : { platform_link: link }),
+        ...(hints.length === 0 ? {} : { verify_hints: hints }),
+        ...(hints.length === 0 || stored === undefined ? {} : { verify_hint: stored }),
         phrase: deps.approvers.phraseOf(approverId) ?? '',
         digest_b64: Buffer.from(r.digest_hex, 'hex').toString('base64url'),
         nonce_b64: b64u(nonce),
@@ -250,7 +263,7 @@ export function createPaste(deps: PasteDeps): Paste {
       }));
     },
 
-    async submit(id, cookie, value, proof) {
+    async submit(id, cookie, value, proof, verifyHint) {
       viewer(cookie);
       const r = pending(id);
       const digest =Uint8Array.from(Buffer.from(r.digest_hex, 'hex'));
@@ -258,15 +271,19 @@ export function createPaste(deps: PasteDeps): Paste {
       if (!verdict.ok) throw new ApiError('forbidden', 'proof_refused');
       const action = actionOf(r);
       const platform = action.kind === 'add_key' ? action.platform : (deps.meta.snapshot().keys.find((k) => k.keyref === action.keyref)?.platform ?? '');
+      // KBOX-40: a hint outside the entry's list is refused before anything is stored, and the task stays for the retry.
+      if (verifyHint !== undefined && !(deps.source.platform(platform)?.verifyHints ?? []).includes(verifyHint)) throw rejected('bad_verify_hint');
       // KBOX-57: a reference taken while the task waited settles it failed, before the verifier sees the value; a key elsewhere is a new key.
       if (action.kind === 'add_key' && deps.store.keyExists(keyrefOf(action.platform, action.projects, action.name))) refuseTaken(id);
       // KBOX-57: a stored location the entry now refuses fails the task with that code, so the value never reaches the verifier.
       if (action.kind === 'rotate_key') refuseUnplaced(id, action.keyref);
       const at = action.kind === 'add_key' ? locationOf(action) : (deps.store.keyInfo(action.keyref)?.location ?? {});
-      await checkValue(platform, at, value);
+      // The verifier is told this paste's hint, else the one stored with the key (a rotation without a new choice).
+      const stored = action.kind === 'rotate_key' ? deps.store.keyInfo(action.keyref)?.verifyHint : undefined;
+      await checkValue(platform, at, value, verifyHint ?? stored);
       const bytes = Uint8Array.from(Buffer.from(value, 'utf8'));
       try {
-        const keyref = await execute(action, bytes);
+        const keyref = await execute(action, bytes, verifyHint);
         // The paste with its assertion is the approval of this one action (decided here): it is recorded like any approval, and settled
         // only once the action executed, so a failed execution never spends it.
         settle(id, 'done');
@@ -292,6 +309,8 @@ export function createPaste(deps: PasteDeps): Paste {
 interface PasteBody {
   readonly value: string;
   readonly proof: ProofBytes;
+  /** The read call the owner chose to verify with (KBOX-40); checked against the entry's list when the paste is settled. */
+  readonly verifyHint?: string;
 }
 
 function parsePasteBody(raw: unknown): Parsed<PasteBody> {
@@ -299,9 +318,12 @@ function parsePasteBody(raw: unknown): Parsed<PasteBody> {
   const members = raw as Record<string, unknown>;
   const keys = Object.keys(members);
   const value = members['value'];
-  if (keys.length !== 2 || typeof value !== 'string' || value.length > VALUE_LIMIT) return { ok: false };
+  const hint = members['verify_hint'];
+  const hinted = hint !== undefined;
+  if (keys.length !== (hinted ? 3 : 2) || typeof value !== 'string' || value.length > VALUE_LIMIT) return { ok: false };
+  if (hinted && (typeof hint !== 'string' || hint.length > VERIFY_HINT_LIMIT)) return { ok: false };
   const proof = parseProof(members['proof']);
-  return proof.ok ? { ok: true, value: { value, proof: proof.value } } : { ok: false };
+  return proof.ok ? { ok: true, value: { value, proof: proof.value, ...(typeof hint === 'string' ? { verifyHint: hint } : {}) } } : { ok: false };
 }
 
 export function pasteRoutes(paste: Paste): Route[] {
@@ -313,7 +335,7 @@ export function pasteRoutes(paste: Paste): Route[] {
       path: '/p/:id',
       surface: 'phone',
       parse: parsePasteBody,
-      handle: async ({ params, cookie, body }) => ({ status: 201, json: { status: 'stored', ...(await paste.submit(params['id'] ?? '', cookie, body.value, body.proof)) } }),
+      handle: async ({ params, cookie, body }) => ({ status: 201, json: { status: 'stored', ...(await paste.submit(params['id'] ?? '', cookie, body.value, body.proof, body.verifyHint)) } }),
     }),
     route({ method: 'GET', path: '/paste.html', surface: 'phone', handle: () => file('paste.html', 'text/html; charset=utf-8') }),
     route({ method: 'GET', path: '/paste.js', surface: 'phone', handle: () => file('paste.js', 'text/javascript; charset=utf-8') }),

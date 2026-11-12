@@ -78,6 +78,8 @@ export interface VerifyTarget {
   readonly platform: PlatformId;
   /** The generation's recorded location (KBOX-57): what the platform answered when it made the key, else the key's stored one. */
   readonly at: KeyLocation;
+  /** The read call the owner chose for this key from the entry's `verifyHints` (KBOX-40); none: the verifier's own order. */
+  readonly hint?: string;
 }
 
 export interface Verifier {

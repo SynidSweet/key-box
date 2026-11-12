@@ -27,6 +27,8 @@ export interface RevokeTarget {
   /** The value, when the vault holds it: the verifier tests it. */
   readonly value: Lent | undefined;
   readonly master: Lent;
+  /** The key's stored verify hint (KBOX-40), given to the verifier that confirms it dead. */
+  readonly hint?: string;
 }
 
 /**
@@ -58,7 +60,7 @@ async function confirm(target: RevokeTarget): Promise<boolean> {
   const { kit, id, value } = target;
   if (kit.verifier !== undefined && value !== undefined) {
     const verifier = kit.verifier;
-    const verdict = await settled(() => verifier.verify(value, { platform: target.platform, at: target.at }));
+    const verdict = await settled(() => verifier.verify(value, { platform: target.platform, at: target.at, ...(target.hint === undefined ? {} : { hint: target.hint }) }));
     const evidence: Evidence = { by: 'verifier', verdict: verdict.ok ? verdict.value : 'unreachable' };
     return confirmDead(evidence);
   }

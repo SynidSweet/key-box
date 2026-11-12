@@ -1,9 +1,9 @@
 // KBOX-40: the Stripe adapter. Paste-only (restricted keys are dashboard-only): the entry states its shape and class and verifies a pasted
-// key with the first call of `STRIPE_VERIFY_CALLS` its restriction allows. No relay profile, no lister.
+// key with a call of `STRIPE_VERIFY_CALLS` its restriction allows, the owner's hinted call first. No relay profile, no lister.
 import type { PlatformEntry } from '../../ports/platform.ts';
 import type { AdapterHttp } from '../../ports/http.ts';
 import { STRIPE_SHAPE, classifyStripe } from './shape.ts';
-import { createStripeVerifier } from './verifier.ts';
+import { STRIPE_VERIFY_CALLS, createStripeVerifier } from './verifier.ts';
 
 export { STRIPE_SHAPE } from './shape.ts';
 export { STRIPE_VERIFY_CALLS } from './verifier.ts';
@@ -13,6 +13,7 @@ export function createStripeEntry(deps: { readonly http: AdapterHttp }): Platfor
   return {
     id: 'stripe',
     verifier: createStripeVerifier(deps.http),
+    verifyHints: STRIPE_VERIFY_CALLS.map((c) => c.name),
     // UNVERIFIED (stripe.key-page): the dashboard page that makes a restricted key (it redirects to login without a session).
     keyPageUrl: 'https://dashboard.stripe.com/apikeys',
     shape: STRIPE_SHAPE,

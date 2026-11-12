@@ -30,6 +30,7 @@ const kitOf = (entry: PlatformEntry): PlatformKit => ({
   ...(entry.location === undefined ? {} : { location: entry.location }),
   ...(entry.locationProver === undefined ? {} : { locationProver: entry.locationProver }),
   ...(entry.retirer === undefined ? {} : { retirer: entry.retirer }),
+  ...(entry.verifyHints === undefined ? {} : { verifyHints: entry.verifyHints }),
 });
 
 /** A candidate master row with the scope items its authority is read from. */

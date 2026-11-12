@@ -28,6 +28,8 @@ export interface PlatformKit {
   readonly locationProver?: LocationProver;
   /** Ends the live key of a pasted generation at step 10 (KBOX-51); none: the owner ends it. */
   readonly retirer?: Retirer;
+  /** The entry's verify hints (KBOX-40); none: the paste page offers no choice. */
+  readonly verifyHints?: readonly string[];
 }
 
 /** A registered platform whose keys are made on the phone (KBOX-12, KBOX-34), one with no issuer or an issuer that says `paste`: the box cannot issue one, so it never runs an api run for it. */

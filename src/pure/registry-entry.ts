@@ -10,7 +10,8 @@ export type EntryFailure =
   | 'bad_host'
   | 'location_field_unknown'
   | 'location_prover_missing'
-  | 'master_items_bad';
+  | 'master_items_bad'
+  | 'verify_hints_bad';
 
 /** One source of a shape and one of a class: an entry with an issuer takes each from the issuer, one without states them (KBOX-40). */
 export function checkShapeSource(entry: PlatformEntry): EntryFailure | undefined {
@@ -60,3 +61,11 @@ const MASTER_ITEM_PREFIX = /^[A-Za-z0-9_./-][A-Za-z0-9_./-]{0,126}:$/;
 /** KBOX-23, KBOX-57: each `masterItems` entry is a scope-item prefix ending in `:` (Vercel `team:`). */
 export const checkMasterItems = (entry: PlatformEntry): 'master_items_bad' | undefined =>
   (entry.masterItems ?? []).every((p) => MASTER_ITEM_PREFIX.test(p)) ? undefined : 'master_items_bad';
+
+const VERIFY_HINT_NAME = /^[a-z0-9_]{1,32}$/;
+
+/** KBOX-23, KBOX-40: a `verifyHints` list names its calls uniquely, each `[a-z0-9_]{1,32}` (the name rides in a body and a column). */
+export const checkVerifyHints = (entry: PlatformEntry): 'verify_hints_bad' | undefined => {
+  const hints = entry.verifyHints ?? [];
+  return hints.every((h) => VERIFY_HINT_NAME.test(h)) && new Set(hints).size === hints.length ? undefined : 'verify_hints_bad';
+};

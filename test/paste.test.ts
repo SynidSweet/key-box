@@ -442,10 +442,10 @@ test('KBOX-12 KBOX-40 the page offers the entry\'s hints, a known hint is stored
   await w.rotation.orchestrator.idle();
   const rot2 = ((await w.api('/api/rotations', { json: { keyref: KEYREF } })).json() as { paste_task_id: string }).paste_task_id;
   w.accepted.add(third);
-  const r2 = await render(w, rot2, a.cookie);
+  const r2 = await render(w, rot2);
   assert.equal(r2.view.verify_hint, 'charges');
   const seen = w.verifiedHints.length;
-  assert.equal((await submit(w, rot2, a.cookie, third, w.pasteProof(r2.view))).status, 201);
+  assert.equal((await submit(w, rot2, r2.cookie, third, w.pasteProof(r2.view))).status, 201);
   assert.equal(w.rotation.store.keyInfo(KEYREF)?.verifyHint, 'charges');
   assert.equal(w.verifiedHints[seen], 'charges', 'the paste check used the stored hint');
 });

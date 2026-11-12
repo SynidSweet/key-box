@@ -4,7 +4,7 @@
 import type { PlatformEntry } from '../ports/platform.ts';
 import type { AllowRule, DenyRule, RelayProfile, SampleRequest } from '../ports/relay-profile.ts';
 import { isProjectOrigin, projectHostOf, projectOfHost, projectRuleHost } from './project-host.ts';
-import { checkDestinationKinds, checkHosts, checkLocationFields, checkLocationProver, checkMasterItems, checkShapeSource } from './registry-entry.ts';
+import { checkDestinationKinds, checkHosts, checkLocationFields, checkLocationProver, checkMasterItems, checkShapeSource, checkVerifyHints } from './registry-entry.ts';
 import type { EntryFailure } from './registry-entry.ts';
 import { compileTemplate, matchTemplate, queryFits } from './rule-match.ts';
 import type { Template } from './rule-match.ts';
@@ -297,7 +297,7 @@ function checkRelaySide(entry: PlatformEntry): RegistryFailure | undefined {
 }
 
 const checkEntry = (entry: PlatformEntry): RegistryFailure | undefined =>
-  checkRelaySide(entry) ?? checkShapeSource(entry) ?? checkHosts(entry) ?? checkLocationFields(entry) ?? checkLocationProver(entry) ?? checkMasterItems(entry);
+  checkRelaySide(entry) ?? checkShapeSource(entry) ?? checkHosts(entry) ?? checkLocationFields(entry) ?? checkLocationProver(entry) ?? checkMasterItems(entry) ?? checkVerifyHints(entry);
 
 /** KBOX-23: every check the box runs before it starts; the first failure names its platform. */
 export function checkRegistry(entries: readonly PlatformEntry[]): RegistryCheck {

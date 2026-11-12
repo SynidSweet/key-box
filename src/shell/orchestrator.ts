@@ -43,6 +43,8 @@ export interface NewKey {
   readonly graceHours: number;
   readonly location: KeyLocation;
   readonly markAdmin: boolean;
+  /** The verify hint the paste chose (KBOX-40), stored with the key before its first verification. */
+  readonly verifyHint?: string;
 }
 
 export interface StartInput {
@@ -50,6 +52,8 @@ export interface StartInput {
   readonly origin: RunOrigin;
   /** A value pasted on the phone (KBOX-12): the run starts at verify, the platform is not asked to issue. */
   readonly value?: Uint8Array;
+  /** The verify hint the paste chose (KBOX-40), stored once the run is accepted; a run without one keeps the stored choice. */
+  readonly verifyHint?: string;
 }
 
 export interface OrchestratorDeps extends PlatformSource {
@@ -397,10 +401,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const value = lendOrUndefined(run.keyref, run.genNew);
       if (value === undefined) return fail(run, stepName, `${word}_failed`);
       const at = store.gen(run.keyref, run.genNew)?.location ?? store.keyInfo(run.keyref)?.location ?? {};
-      const verdict = await attempt0(() => verifier.verify(value, { platform: head.platform, at }));
+      const verdict = await attempt0(() => verifier.verify(value, { platform: head.platform, at, ...hintOf(run.keyref) }));
       if (verdict !== 'ok') return fail(run, stepName, verdict === 'rejected' ? `${word}_rejected` : `${word}_unreachable`);
     }
     return advance(run, stepName);
+  }
+
+  /** The key's stored verify hint as a `VerifyTarget`/`RevokeTarget` member (KBOX-40), or nothing. */
+  function hintOf(keyref: string): { readonly hint?: string } {
+    const hint = store.keyInfo(keyref)?.verifyHint;
+    return hint === undefined ? {} : { hint };
   }
 
   async function attempt0<T extends 'ok' | 'rejected' | 'unreachable'>(call: () => Promise<T>): Promise<T | 'unreachable'> {
@@ -517,7 +527,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       // Step 10 without a master to end the old key with: not proven dead, so the old key stays in grace and the step retries (one notice).
       const master = masterFor(head);
       if (!master.ok) return retryRevoke(run, head, enderOf(kit, id));
-      const dead = await revokeAndConfirm({ kit, platform: head.platform, id, at: old?.location ?? {}, value: lendOrUndefined(run.keyref, run.genOld), master: master.value });
+      const dead = await revokeAndConfirm({ kit, platform: head.platform, id, at: old?.location ?? {}, value: lendOrUndefined(run.keyref, run.genOld), master: master.value, ...hintOf(run.keyref) });
       if (!dead) return retryRevoke(run, head, enderOf(kit, id));
       store.setGenStatus(run.keyref, run.genOld, 'retired');
       deps.vault.retire(run.keyref, run.genOld);
@@ -683,7 +693,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     // A key the box did not make (pasted) has nothing to revoke here; one it made is revoked and confirmed before the run ends.
     if (id === null) return true;
     const created = store.gen(run.keyref, run.genNew);
-    return revokeAndConfirm({ kit, platform: head.platform, id, at: created?.location ?? fresh?.at ?? store.keyInfo(run.keyref)?.location ?? {}, value: fresh?.value ?? lendOrUndefined(run.keyref, run.genNew), master });
+    return revokeAndConfirm({ kit, platform: head.platform, id, at: created?.location ?? fresh?.at ?? store.keyInfo(run.keyref)?.location ?? {}, value: fresh?.value ?? lendOrUndefined(run.keyref, run.genNew), master, ...hintOf(run.keyref) });
   }
 
   async function rollBack(run: RunRow, head: KeyHead, kit: PlatformKit, fresh?: Fresh): Promise<Next> {
@@ -745,6 +755,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         throw new ApiError('unavailable');
       }
     }
+    if (input.verifyHint !== undefined) store.setVerifyHint(input.keyref, input.verifyHint);
     store.setStatus(input.keyref, 'rotating');
     deps.audit.append({ action: 'rotation.started', subject: input.keyref, at: now(), detail: { run_id: runId, origin: input.origin, gen: genNew } });
     launch(runId);
@@ -777,6 +788,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       });
       for (const d of key.destinations) deps.meta.putDestination(key.keyref, d);
       store.putKeyInfo(key.keyref, { scopeItems: key.scopeItems, location: key.location, rotatedAt: now(), markAdmin: key.markAdmin });
+      if (key.verifyHint !== undefined) store.setVerifyHint(key.keyref, key.verifyHint);
       start({ keyref: key.keyref, origin: 'create', ...(value === undefined ? {} : { value }) });
       await idle();
       return { status: store.key(key.keyref)?.status === 'works' ? 'works' : 'failed' };
