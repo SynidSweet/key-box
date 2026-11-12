@@ -17,5 +17,6 @@
   "supabase.relay-deny-realtime",
   "supabase.relay-deny-rest-root",
   "supabase.relay-deny-profile-headers",
-  "supabase.sb-secret-length"
+  "supabase.sb-secret-length",
+  "supabase.project-get-shape"
 ]
