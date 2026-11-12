@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { test } from 'node:test';
+import type { TestContext } from 'node:test';
 import { gzipSync } from 'node:zlib';
 import { scanForms } from '../src/pure/forms.ts';
 import type { Form } from '../src/pure/forms.ts';
@@ -15,6 +16,8 @@ import { checkProperty, seedFor, waitUntil } from './kit/index.ts';
 import type { SeededRandom } from './kit/index.ts';
 import { relayWorld } from './support/relay-world.ts';
 import type { RelayReply, RelayWorld } from './support/relay-world.ts';
+import type { PlatformEntry } from '../src/ports/platform.ts';
+import { TEST_REGISTRY } from './fixtures/profiles.ts';
 
 const shapesParsed = parseCredentialShapes(JSON.parse(readFileSync(new URL('../src/data/credential-shapes.json', import.meta.url), 'utf8')) as unknown);
 if (!shapesParsed.ok) throw new Error('src/data/credential-shapes.json does not parse');
@@ -309,6 +312,38 @@ test('KBOX-14 a 206, and a 200 carrying Content-Range, are 502 withheld with zer
   assert.deepEqual([ranged.status, ranged.body.toString()], [502, WITHHELD]);
   assert.equal((await settledRow(w, 2)).detail['reason'], 'partial');
   assert.deepEqual(notices(w), []);
+});
+
+const ITEMS_REGISTRY = TEST_REGISTRY.map((e) => (e.id === 'pathplat' && e.relay !== undefined ? { ...e, relay: { ...e.relay, itemsRange: true as const } } : e));
+
+async function rangedReply(t: TestContext, registry: readonly PlatformEntry[] | undefined, status: number, range: string): Promise<{ readonly reply: RelayReply; readonly w: RelayWorld }> {
+  const w = await relayWorld(t, registry === undefined ? {} : { registry });
+  w.upstream.respond((_req, res) => {
+    res.writeHead(status, { 'content-type': 'text/plain', 'content-range': range });
+    res.end('0123456789');
+  });
+  return { reply: await w.call(MODELS), w };
+}
+
+test('KBOX-14 on a profile with itemsRange a 200 carrying 0-24/*, 0-24/25 or */0 passes whole with no Content-Range sent on', async (t) => {
+  for (const range of ['0-24/*', '0-24/25', '*/0']) {
+    const { reply } = await rangedReply(t, ITEMS_REGISTRY, 200, range);
+    assert.deepEqual([reply.status, reply.body.toString(), reply.headers['content-range']], [200, '0123456789', undefined], range);
+  }
+});
+
+test('KBOX-14 on a profile with itemsRange, bytes 0-24/25, 0-24, 0-24/25x and the items form on a 206 are 502 withheld, audit reason partial', async (t) => {
+  for (const [status, range] of [[200, 'bytes 0-24/25'], [200, '0-24'], [200, '0-24/25x'], [200, '0-24/'], [206, '0-24/25']] as const) {
+    const { reply, w } = await rangedReply(t, ITEMS_REGISTRY, status, range);
+    assert.deepEqual([reply.status, reply.body.toString()], [502, WITHHELD], range);
+    assert.equal((await settledRow(w)).detail['reason'], 'partial', range);
+  }
+});
+
+test('KBOX-14 on a profile without itemsRange the items form 0-24/25 on a 200 is still 502 withheld, audit reason partial', async (t) => {
+  const { reply, w } = await rangedReply(t, undefined, 200, '0-24/25');
+  assert.deepEqual([reply.status, reply.body.toString()], [502, WITHHELD]);
+  assert.equal((await settledRow(w)).detail['reason'], 'partial');
 });
 
 test('KBOX-14 Content-Encoding: gzip (body holding the value) and "gzip, identity" are 502 withheld with zero body bytes; identity passes', async (t) => {

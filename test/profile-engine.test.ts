@@ -10,6 +10,7 @@ import { parseRelayTarget } from '../src/pure/target-parse.ts';
 import { IAM_HOST, PATH_HOST, STORAGE_HOST, hostProfile, leakyProfile, pathProfile } from './fixtures/profiles.ts';
 import { NO_ISSUER_CLASSIFY, NO_ISSUER_SHAPE, TEST_REGISTRY } from './fixtures/profiles.ts';
 import { relayWorld } from './support/relay-world.ts';
+import { projectRuleHost } from '../src/pure/project-host.ts';
 
 const engineOf = (profile: RelayProfile): ProfileEngine => {
   const compiled = compileProfile(profile);
@@ -166,7 +167,7 @@ const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
 /** The profile with every broad rule added that the widening check still accepts: as wide as the registry permits. */
 function widened(profile: RelayProfile): RelayProfile {
   const engine = engineOf(profile);
-  const hosts = profile.origin.kind === 'fixed' ? [profile.origin.host] : profile.origin.hosts;
+  const hosts = profile.origin.kind === 'fixed' ? [profile.origin.host] : profile.origin.kind === 'host-in-path' ? profile.origin.hosts : [projectRuleHost(profile.origin)];
   const added: AllowRule[] = [];
   for (const host of hosts) {
     for (const method of METHODS) {

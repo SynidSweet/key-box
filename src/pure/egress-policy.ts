@@ -3,6 +3,8 @@
 // link-local, unspecified, shared, multicast or reserved, including an IPv4 address inside IPv6 and the 6to4, Teredo and NAT64 prefixes.
 import { parseIpv4, parseIpv6 } from './address.ts';
 import { hostAllowed } from './pushsub.ts';
+import { projectOfHost } from './project-host.ts';
+import type { ProjectOrigin } from './project-host.ts';
 import type { Parsed } from './schemas.ts';
 
 /** Who makes the call. Adapter hosts serve `relay` and `adapter`; each listed host serves the one caller it names. */
@@ -20,14 +22,16 @@ export type HostVerdict = 'allowed' | 'undeclared_host' | 'wrong_caller';
 
 /**
  * `adapterHosts` are the relay profiles' hosts (relay and adapter calls); `registryHosts` are the hosts of the registry entries' own
- * calls (adapter calls only).
+ * calls (adapter calls only). `projectOrigins` are the relay profiles' project domains: a host that is exactly one ref label under one of them is
+ * served to caller `relay` only (the relay asks for the host of the key's stored project; an adapter never calls a project host).
  */
-export function hostVerdict(caller: Caller, host: string, adapterHosts: readonly string[], listed: readonly EgressHost[], registryHosts: readonly string[] = []): HostVerdict {
+export function hostVerdict(caller: Caller, host: string, adapterHosts: readonly string[], listed: readonly EgressHost[], registryHosts: readonly string[] = [], projectOrigins: readonly ProjectOrigin[] = []): HostVerdict {
   const adapter = adapterHosts.includes(host);
   const own = registryHosts.includes(host);
+  const project = projectOrigins.some((o) => projectOfHost(o, host) !== undefined);
   const entries = listed.filter((e) => hostAllowed(host, [e.host]));
-  if (!adapter && !own && entries.length === 0) return 'undeclared_host';
-  if (caller === 'relay') return adapter ? 'allowed' : 'wrong_caller';
+  if (!adapter && !own && !project && entries.length === 0) return 'undeclared_host';
+  if (caller === 'relay') return adapter || project ? 'allowed' : 'wrong_caller';
   if (caller === 'adapter') return adapter || own ? 'allowed' : 'wrong_caller';
   return entries.some((e) => e.caller === caller) ? 'allowed' : 'wrong_caller';
 }

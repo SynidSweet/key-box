@@ -8,7 +8,9 @@ import type { AddressInfo, Socket } from 'node:net';
 import { join } from 'node:path';
 import type { TestContext } from 'node:test';
 import type { PlatformEntry } from '../../src/ports/platform.ts';
+import { projectOriginsOf } from '../../src/pure/project-host.ts';
 import { createEgress } from '../../src/shell/egress.ts';
+import type { Connector } from '../../src/shell/egress.ts';
 import { createLendClient } from '../../src/shell/lend-socket.ts';
 import { loopbackConnector } from './loopback-connector.ts';
 import { adapterHostsOf, createRelayServer } from '../../src/shell/relay-http.ts';
@@ -114,6 +116,8 @@ export interface RelayWorld {
   readonly pass: string;
   /** Upstream hosts whose connect never finishes. */
   readonly hung: Set<string>;
+  /** The upstream host names the egress gate connected to, in order. */
+  readonly connects: readonly string[];
   /** Stops the relay now (it waits for every request in flight to finish its audit); the world's cleanup calls it again harmlessly. */
   stop(): Promise<void>;
   call(path: string, options?: CallOptions): Promise<RelayReply>;
@@ -133,8 +137,15 @@ export async function relayWorld(t: TestContext, options: RelayWorldOptions = {}
   lend.addKey({ keyref: 'adminkey1', value, grants: ['laptop'] });
   lend.addKey({ keyref: 'hostkey001', value, platform: 'hostplat', grants: ['laptop'] });
   const hung = new Set<string>();
-  const connector = loopbackConnector(up.port, hung);
-  const egress = createEgress({ adapterHosts: adapterHostsOf(registry), listed: [], resolver: { resolve: () => Promise.resolve(['203.0.113.10']) }, connector, scheduler: lend.clock });
+  const connects: string[] = [];
+  const loopback = loopbackConnector(up.port, hung);
+  const connector: Connector = {
+    connect: (target, signal) => {
+      connects.push(target.servername);
+      return loopback.connect(target, signal);
+    },
+  };
+  const egress = createEgress({ adapterHosts: adapterHostsOf(registry), projectOrigins: projectOriginsOf(registry), listed: [], resolver: { resolve: () => Promise.resolve(['203.0.113.10']) }, connector, scheduler: lend.clock });
   const journal: string[] = [];
   const server = createRelayServer({ registry, lend: createLendClient(lend.socket), egress, domain: 'box.example', journal: (code) => void journal.push(code) });
   const socket = join(lend.dir, 'relay.sock');
@@ -166,5 +177,5 @@ export async function relayWorld(t: TestContext, options: RelayWorldOptions = {}
       req.end();
     });
 
-  return { lend, upstream: up, socket, journal, value, canary: c, pass, hung, call, stop: () => server.stop() };
+  return { lend, upstream: up, socket, journal, value, canary: c, pass, hung, connects, call, stop: () => server.stop() };
 }

@@ -109,3 +109,29 @@ export const TEST_REGISTRY: readonly PlatformEntry[] = [
   { id: 'hostplat', relay: hostProfile, shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] },
   { id: 'plain', shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] },
 ];
+
+/** The domain of the project-host fixture: a key's upstream is `<ref>.projplat.example`, the ref 8 lower-case letters. */
+export const PROJECT_DOMAIN = 'projplat.example';
+/** The one host an allow rule of the project-host fixture names: the rule says "this domain", the key's stored project supplies the ref. */
+export const PROJECT_RULE_HOST = `*.${PROJECT_DOMAIN}`;
+
+/**
+ * A `project-host` profile (as Supabase is, KBOX-13): the upstream origin is `<ref>.<domain>`, the ref being the key's stored project from
+ * core's resolve answer and nothing else (KBOX-57).
+ */
+export const projectProfile: RelayProfile = {
+  platform: 'projplat',
+  origin: { kind: 'project-host', domain: PROJECT_DOMAIN, refLength: 8 },
+  callerTokenHeaders: ['authorization', 'apikey'],
+  inject: bearer,
+  allow: [{ id: 'rows-list', method: 'GET', host: PROJECT_RULE_HOST, pathTemplate: '/rest/v1/{table:[a-z_]{1,63}}', query: {} }],
+  tailRules: [],
+  mustDeny: [{ id: 'keys-create', samples: variants('POST', `abcdefgh.${PROJECT_DOMAIN}`, '/v1/projects/keys') }],
+  requestHeaders: [],
+  headerWords: {},
+  responseHeaders: [],
+  envForClients: (relayUrl: string): Record<string, string> => ({ PROJPLAT_URL: relayUrl }),
+};
+
+/** The relay test registry plus the project-host fixture platform. */
+export const PROJECT_REGISTRY: readonly PlatformEntry[] = [...TEST_REGISTRY, { id: 'projplat', relay: projectProfile, shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [] }];

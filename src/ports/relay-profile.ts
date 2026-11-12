@@ -36,9 +36,14 @@ export interface DenyRule {
 
 /**
  * Where the upstream origin comes from: one fixed host, or (Google) the first path segment, which must equal one of `hosts`
- * byte for byte.
+ * byte for byte, or (Supabase) the key's stored project: the host is `<ref>.<domain>`, the ref (`refLength` lower-case letters) being the
+ * key's stored project from core's resolve answer and nothing else (KBOX-57). An allow rule of such a profile names the host `*.<domain>`
+ * (`projectRuleHost`); the stored location supplies the ref, never the request.
  */
-export type Origin = { readonly kind: 'fixed'; readonly host: string } | { readonly kind: 'host-in-path'; readonly hosts: readonly string[] };
+export type Origin =
+  | { readonly kind: 'fixed'; readonly host: string }
+  | { readonly kind: 'host-in-path'; readonly hosts: readonly string[] }
+  | { readonly kind: 'project-host'; readonly domain: string; readonly refLength: number };
 
 export interface RelayProfile {
   readonly platform: PlatformId;
@@ -59,5 +64,7 @@ export interface RelayProfile {
   readonly headerWords: Readonly<Record<string, readonly string[]>>;
   /** Response headers passed back besides the defaults (rate limits, the platform's request id); lower case. */
   readonly responseHeaders: readonly string[];
+  /** PostgREST states the rows of a 200 read as `Content-Range: 0-24/*`: such a header (items, no unit word) is not partial content (KBOX-14). */
+  readonly itemsRange?: true;
   envForClients(relayUrl: string): Record<string, string>;
 }

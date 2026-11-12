@@ -3,6 +3,7 @@
 // check uses the same parse and the same engine, so what the box refuses at startup is exactly what the relay would let through.
 import type { PlatformEntry } from '../ports/platform.ts';
 import type { AllowRule, DenyRule, RelayProfile, SampleRequest } from '../ports/relay-profile.ts';
+import { isProjectOrigin, projectHostOf, projectOfHost, projectRuleHost } from './project-host.ts';
 import { checkDestinationKinds, checkHosts, checkLocationFields, checkLocationProver, checkMasterItems, checkShapeSource } from './registry-entry.ts';
 import type { EntryFailure } from './registry-entry.ts';
 import { compileTemplate, matchTemplate, queryFits } from './rule-match.ts';
@@ -36,10 +37,11 @@ const HOST = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z
 
 export type ProfileFailure = 'bad_template' | 'tail_not_named' | 'bad_host';
 
-/** A request as rules see it: the method from the request line, the upstream host and the decoded segments of its path. */
+/** A request as rules see it: the method from the request line, the host rules name, the decoded segments of its path. `upstream` is the host the call goes to (the rules' host, except on a project-host origin, where it is the key's own `<ref>.<domain>`). */
 export interface RelayRequest {
   readonly method: string;
   readonly host: string;
+  readonly upstream: string;
   readonly segments: readonly string[];
   readonly query: readonly QueryPair[];
 }
@@ -48,10 +50,10 @@ export type Decision = { readonly ok: true; readonly rule: AllowRule; readonly r
 
 export interface ProfileEngine {
   readonly profile: RelayProfile;
-  /** Default-deny: the one allow rule this request matches, or `forbidden`. */
-  decide(method: string, target: RelayTarget): Decision;
+  /** Default-deny: the one allow rule this request matches, or `forbidden`. `project` is the key's stored project from core's resolve answer: a project-host origin needs it. */
+  decide(method: string, target: RelayTarget, project?: string): Decision;
   /** The request equals a mustDeny sample of the profile. */
-  isDenied(method: string, target: RelayTarget): boolean;
+  isDenied(method: string, target: RelayTarget, project?: string): boolean;
   /** The sample as the relay would see it, or undefined when the one parse refuses it (so no rule can ever match it). */
   sampleTarget(sample: SampleRequest, keyref: string): string | undefined;
 }
@@ -61,16 +63,44 @@ interface CompiledRule {
   readonly template: Template;
 }
 
-const hostsOf = (profile: RelayProfile): readonly string[] => (profile.origin.kind === 'fixed' ? [profile.origin.host] : profile.origin.hosts);
+/** The hosts an allow rule of the profile may name (a project-host origin: the one `*.<domain>` mark). */
+const hostsOf = (profile: RelayProfile): readonly string[] => {
+  const origin = profile.origin;
+  switch (origin.kind) {
+    case 'fixed':
+      return [origin.host];
+    case 'host-in-path':
+      return origin.hosts;
+    case 'project-host':
+      return [projectRuleHost(origin)];
+  }
+};
+
+/** The origin itself is well formed: real host names, and a ref length that is a length. */
+const originValid = (profile: RelayProfile): boolean => {
+  const origin = profile.origin;
+  if (!isProjectOrigin(origin)) return hostsOf(profile).length > 0 && hostsOf(profile).every((h) => HOST.test(h));
+  return HOST.test(origin.domain) && Number.isInteger(origin.refLength) && origin.refLength >= 1 && origin.refLength <= 63;
+};
 
 const requestKey = (r: RelayRequest): string => `${r.method} ${r.host}${canonicalPath(r.segments)}?${canonicalQuery(r.query)}`;
 
-function requestOf(profile: RelayProfile, method: string, target: RelayTarget): RelayRequest | undefined {
-  if (profile.origin.kind === 'fixed') return { method, host: profile.origin.host, segments: target.segments, query: target.query };
-  const [host, ...rest] = target.segments;
-  const raw = target.rawSegments[0];
-  if (host === undefined || raw !== host || !profile.origin.hosts.includes(host)) return undefined;
-  return { method, host, segments: rest, query: target.query };
+function requestOf(profile: RelayProfile, method: string, target: RelayTarget, project?: string): RelayRequest | undefined {
+  const origin = profile.origin;
+  switch (origin.kind) {
+    case 'fixed':
+      return { method, host: origin.host, upstream: origin.host, segments: target.segments, query: target.query };
+    case 'project-host': {
+      const upstream = project === undefined ? undefined : projectHostOf(origin, project);
+      return upstream === undefined ? undefined : { method, host: projectRuleHost(origin), upstream, segments: target.segments, query: target.query };
+    }
+    case 'host-in-path': {
+      const [host, ...rest] = target.segments;
+      const raw = target.rawSegments[0];
+      if (host === undefined || raw !== host || !origin.hosts.includes(host)) return undefined;
+      return { method, host, upstream: host, segments: rest, query: target.query };
+    }
+  }
 }
 
 const ruleMatches = (compiled: CompiledRule, request: RelayRequest): boolean =>
@@ -85,10 +115,23 @@ function splitSample(url: string): { readonly host: string; readonly tail: strin
   return host === '' ? undefined : { host, tail: cut < 0 ? '' : rest.slice(cut) };
 }
 
+/** The project a sample stands for: the ref of its host on a project-host origin, none elsewhere. */
+const sampleProject = (profile: RelayProfile, sample: SampleRequest): string | undefined => {
+  const parts = splitSample(sample.url);
+  return parts === undefined || !isProjectOrigin(profile.origin) ? undefined : projectOfHost(profile.origin, parts.host);
+};
+
 function relayTargetOf(profile: RelayProfile, sample: SampleRequest, keyref: string): string | undefined {
   const parts = splitSample(sample.url);
-  if (parts === undefined || !hostsOf(profile).includes(parts.host)) return undefined;
-  return profile.origin.kind === 'fixed' ? `/r/${keyref}${parts.tail}` : `/r/${keyref}/${parts.host}${parts.tail}`;
+  if (parts === undefined) return undefined;
+  switch (profile.origin.kind) {
+    case 'fixed':
+      return parts.host === profile.origin.host ? `/r/${keyref}${parts.tail}` : undefined;
+    case 'project-host':
+      return projectOfHost(profile.origin, parts.host) === undefined ? undefined : `/r/${keyref}${parts.tail}`;
+    case 'host-in-path':
+      return profile.origin.hosts.includes(parts.host) ? `/r/${keyref}/${parts.host}${parts.tail}` : undefined;
+  }
 }
 
 /** Any keyref the parse accepts: samples are about the path, never the key. */
@@ -118,7 +161,7 @@ function classifySample(sample: SampleRequest, targetOf: (sample: SampleRequest)
 }
 
 const classifyForProfile = (profile: RelayProfile, sample: SampleRequest): SampleKind =>
-  classifySample(sample, (s) => relayTargetOf(profile, s, `${SAMPLE_KEYREF}01`), (target) => requestOf(profile, sample.method, target));
+  classifySample(sample, (s) => relayTargetOf(profile, s, `${SAMPLE_KEYREF}01`), (target) => requestOf(profile, sample.method, target, sampleProject(profile, sample)));
 
 /** A denyOnly list has no profile: the host is the sample's own, and it must be a plain host name. */
 const classifyDenyOnly = (sample: SampleRequest): SampleKind =>
@@ -128,7 +171,7 @@ const classifyDenyOnly = (sample: SampleRequest): SampleKind =>
       const parts = splitSample(s.url);
       return parts === undefined || !HOST.test(parts.host) ? undefined : `/r/${SAMPLE_KEYREF}01${parts.tail}`;
     },
-    (target) => ({ method: sample.method, host: '', segments: target.segments, query: target.query }),
+    (target) => ({ method: sample.method, host: '', upstream: '', segments: target.segments, query: target.query }),
   );
 
 function sampleRequests(profile: RelayProfile, rules: readonly DenyRule[]): RelayRequest[] {
@@ -145,7 +188,7 @@ export type ProfileCompile = { readonly ok: true; readonly engine: ProfileEngine
 /** Checks the shape of a profile (templates, tails, hosts) and builds its engine. */
 export function compileProfile(profile: RelayProfile): ProfileCompile {
   const hosts = hostsOf(profile);
-  if (hosts.length === 0 || !hosts.every((h) => HOST.test(h))) return { ok: false, code: 'bad_host' };
+  if (!originValid(profile)) return { ok: false, code: 'bad_host' };
   const compiled: CompiledRule[] = [];
   for (const rule of profile.allow) {
     if (!hosts.includes(rule.host)) return { ok: false, code: 'bad_host' };
@@ -158,14 +201,14 @@ export function compileProfile(profile: RelayProfile): ProfileCompile {
   const isDeniedRequest = (request: RelayRequest): boolean => denied.has(requestKey(request));
   const engine: ProfileEngine = {
     profile,
-    decide(method, target) {
-      const request = requestOf(profile, method, target);
+    decide(method, target, project) {
+      const request = requestOf(profile, method, target, project);
       if (request === undefined || isDeniedRequest(request)) return { ok: false, code: 'forbidden' };
       const found = compiled.find((c) => ruleMatches(c, request));
       return found === undefined ? { ok: false, code: 'forbidden' } : { ok: true, rule: found.rule, request };
     },
-    isDenied(method, target) {
-      const request = requestOf(profile, method, target);
+    isDenied(method, target, project) {
+      const request = requestOf(profile, method, target, project);
       return request !== undefined && isDeniedRequest(request);
     },
     sampleTarget: (sample, keyref) => relayTargetOf(profile, sample, keyref),

@@ -35,7 +35,8 @@ export type RelayAuditRow = Infer<typeof AUDIT_ROW_SCHEMA>;
 const REQUESTS = {
   resolve: { op: oneOf('resolve'), token_hash: text(TOKEN_HASH), keyref: text(KEYREF_TEXT), network: text(NETWORK) },
   grants: { op: oneOf('grants'), token_hash: text(TOKEN_HASH), network: text(NETWORK) },
-  lend: { op: oneOf('lend'), token_hash: text(TOKEN_HASH), keyref: text(KEYREF_TEXT), rule_id: text(NAME) },
+  // `project` is present exactly when the key's profile has a project-host origin: the project the relay sends to (KBOX-3, KBOX-57).
+  lend: { op: oneOf('lend'), token_hash: text(TOKEN_HASH), keyref: text(KEYREF_TEXT), rule_id: text(NAME), project: optional(text(NAME)) },
   scan: { op: oneOf('scan'), token_hash: text(TOKEN_HASH), keyref: text(KEYREF_TEXT) },
 } as const satisfies Readonly<Record<string, Schema>>;
 
@@ -71,7 +72,8 @@ export interface Grant {
   readonly projects: readonly string[];
 }
 
-export type ResolveAnswer = { readonly ok: true; readonly label: string; readonly platform: string } | { readonly ok: false; readonly code: LendRefusal };
+/** `project` is present only for a key whose profile has a project-host origin: the key's stored project, the one place it is relayed to (KBOX-57). */
+export type ResolveAnswer = { readonly ok: true; readonly label: string; readonly platform: string; readonly project?: string } | { readonly ok: false; readonly code: LendRefusal };
 export type GrantsAnswer = { readonly ok: true; readonly machine: string; readonly grants: readonly Grant[] } | { readonly ok: false; readonly code: LendRefusal };
 
 /** Refusals travel as `{"ok":"false","code":…}` so every answer is a flat closed object. */
@@ -82,13 +84,15 @@ function refusalOf(raw: unknown): { readonly ok: false; readonly code: LendRefus
   return parsed.ok ? { ok: false, code: parsed.value.code } : undefined;
 }
 
-const RESOLVED = { ok: oneOf('true'), label: text(LABEL), platform: text(/^[a-z0-9][a-z0-9-]{0,31}$/) } as const satisfies Schema;
+const RESOLVED = { ok: oneOf('true'), label: text(LABEL), platform: text(/^[a-z0-9][a-z0-9-]{0,31}$/), project: optional(text(NAME)) } as const satisfies Schema;
 
 export function parseResolveAnswer(raw: unknown): Parsed<ResolveAnswer> {
   const refusal = refusalOf(raw);
   if (refusal !== undefined) return { ok: true, value: refusal };
   const parsed = parseObject(RESOLVED, raw);
-  return parsed.ok ? { ok: true, value: { ok: true, label: parsed.value.label, platform: parsed.value.platform } } : { ok: false };
+  if (!parsed.ok) return { ok: false };
+  const { label, platform, project } = parsed.value;
+  return { ok: true, value: { ok: true, label, platform, ...(project === undefined ? {} : { project }) } };
 }
 
 const GRANT = { keyref: text(KEYREF_TEXT), platform: text(/^[a-z0-9][a-z0-9-]{0,31}$/), name: text(NAME) } as const satisfies Schema;

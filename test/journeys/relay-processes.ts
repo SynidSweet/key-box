@@ -7,6 +7,7 @@ import { openCore } from '../../src/shell/core.ts';
 import { createEgress } from '../../src/shell/egress.ts';
 import { createLendHandler, loadCredentialShapes } from '../../src/shell/lend-core.ts';
 import { createMintedValues } from '../../src/shell/minted-values.ts';
+import { readKeyInfo } from '../../src/shell/rotation-store.ts';
 import { createLendClient, createLendServer } from '../../src/shell/lend-socket.ts';
 import { systemRandom } from '../../src/shell/random.ts';
 import { adapterHostsOf, createRelayServer } from '../../src/shell/relay-http.ts';
@@ -25,7 +26,7 @@ const serveUntilTerm = (stop: () => Promise<void>): void => {
 if (role === 'core' && first !== undefined && lendSocket !== undefined) {
   process.umask(0o007);
   const core = openCore({ stateDir: first, clock: systemClock, scheduler: systemScheduler, random: systemRandom });
-  const handler = createLendHandler({ meta: core.meta, tokens: core.meta, vault: core.vault, audit: core.audit, events: core.events, registry: TEST_REGISTRY, shapes: loadCredentialShapes(), clock: systemClock, minted: createMintedValues(systemClock), journal });
+  const handler = createLendHandler({ meta: core.meta, tokens: core.meta, vault: core.vault, audit: core.audit, events: core.events, registry: TEST_REGISTRY, shapes: loadCredentialShapes(), clock: systemClock, minted: createMintedValues(systemClock), journal, locationOf: (keyref) => readKeyInfo(core.db, keyref)?.location });
   const server = createLendServer(handler, journal);
   await server.listen(lendSocket);
   serveUntilTerm(async () => {

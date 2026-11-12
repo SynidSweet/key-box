@@ -4,12 +4,13 @@ import { join } from 'node:path';
 import type { TestContext } from 'node:test';
 import type { PlatformEntry } from '../../src/ports/platform.ts';
 import type { Random } from '../../src/ports/random.ts';
-import type { KeyClass } from '../../src/ports/types.ts';
+import type { KeyClass, KeyLocation } from '../../src/ports/types.ts';
 import { hashToken, newToken } from '../../src/pure/tokens.ts';
 import { openCore } from '../../src/shell/core.ts';
 import type { CoreParts } from '../../src/shell/core.ts';
 import { createLendHandler, loadCredentialShapes } from '../../src/shell/lend-core.ts';
 import { createMintedValues } from '../../src/shell/minted-values.ts';
+import { createRotationStore, readKeyInfo } from '../../src/shell/rotation-store.ts';
 import type { MintedValues } from '../../src/shell/minted-values.ts';
 import { createLendClient, createLendServer } from '../../src/shell/lend-socket.ts';
 import type { LendClient, LendServer } from '../../src/shell/lend-socket.ts';
@@ -23,6 +24,10 @@ export interface NewKey {
   readonly cls?: KeyClass;
   readonly grants?: readonly string[];
   readonly gen?: number;
+  /** The key's projects (default `['shop']`): names for people, never placement (KBOX-57). */
+  readonly projects?: readonly string[];
+  /** The key's stored location (its `rotation_keys` record); absent stores none. */
+  readonly at?: KeyLocation;
 }
 
 export interface LendWorld {
@@ -39,6 +44,8 @@ export interface LendWorld {
   /** Enrols a machine and returns its pass. */
   enrol(label: string, scope?: 'relay' | 'control'): string;
   addKey(key: NewKey): void;
+  /** The key's record is deleted and made again at `at` (a key elsewhere is a new key, KBOX-57); its meta row and value stay. */
+  readdAt(keyref: string, at: KeyLocation): void;
 }
 
 export async function lendWorld(t: TestContext, registry: readonly PlatformEntry[] = TEST_REGISTRY): Promise<LendWorld> {
@@ -48,7 +55,19 @@ export async function lendWorld(t: TestContext, registry: readonly PlatformEntry
   const core = openCore({ stateDir: join(dir, 'state'), clock, scheduler: clock, random });
   const minted = createMintedValues(clock);
   const journal: string[] = [];
-  const handler = createLendHandler({ meta: core.meta, tokens: core.meta, vault: core.vault, audit: core.audit, events: core.events, registry, shapes: loadCredentialShapes(), clock, minted, journal: (code) => void journal.push(code) });
+  const handler = createLendHandler({
+    meta: core.meta,
+    tokens: core.meta,
+    vault: core.vault,
+    audit: core.audit,
+    events: core.events,
+    registry,
+    shapes: loadCredentialShapes(),
+    clock,
+    minted,
+    journal: (code) => void journal.push(code),
+    locationOf: (keyref) => readKeyInfo(core.db, keyref)?.location,
+  });
   const server = createLendServer(handler);
   const socket = join(dir, 'lend.sock');
   await server.listen(socket);
@@ -66,7 +85,14 @@ export async function lendWorld(t: TestContext, registry: readonly PlatformEntry
     journal,
     minted,
     enrol: (label, scope = 'relay') => seedPass(core, label, scope, random, clock.now()),
-    addKey: (key) => seedKey(core, key),
+    addKey: (key) => {
+      seedKey(core, key);
+      if (key.at !== undefined) storeKeyInfo(core, clock, key.keyref, key.at);
+    },
+    readdAt: (keyref, at) => {
+      core.db.prepare('DELETE FROM rotation_keys WHERE keyref = ?').run(keyref);
+      storeKeyInfo(core, clock, keyref, at);
+    },
   };
 }
 
@@ -84,7 +110,7 @@ export function seedKey(core: CoreParts, key: NewKey): void {
     keyref: key.keyref,
     platform: key.platform ?? 'pathplat',
     name: `KEY_${key.keyref.toUpperCase()}`,
-    projects: ['shop'],
+    projects: key.projects ?? ['shop'],
     class: key.cls ?? 'admin',
     status: 'works',
     gen_current: gen,
@@ -94,4 +120,9 @@ export function seedKey(core: CoreParts, key: NewKey): void {
   });
   core.vault.put(key.keyref, gen, key.value);
   for (const machine of key.grants ?? []) core.meta.putGrant(key.keyref, machine);
+}
+
+/** Writes the key's rotation record at `at` through the real rotation store. */
+function storeKeyInfo(core: CoreParts, clock: TimedClock, keyref: string, at: KeyLocation): void {
+  createRotationStore(core.db, clock, core.hub).putKeyInfo(keyref, { scopeItems: [], location: at, rotatedAt: clock.now(), markAdmin: false });
 }

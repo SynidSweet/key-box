@@ -13,6 +13,7 @@ import { bytesOf, canary, waitUntil } from './kit/index.ts';
 import { lendWorld } from './support/lend-world.ts';
 import type { LendWorld } from './support/lend-world.ts';
 import { relayWorld } from './support/relay-world.ts';
+import { PROJECT_REGISTRY } from './fixtures/profiles.ts';
 
 const NETWORK = '203.0.113.0/24';
 const textValue = (bytes: Uint8Array): Uint8Array => Buffer.from(Buffer.from(bytes).toString('hex'));
@@ -333,4 +334,77 @@ test('KBOX-14 a key whose forms cannot be built is refused for lend and scan, wi
   const other = await lendOf(w, pass, 'adminkey1');
   assert.equal(other.ok, true, 'another key is lent as before');
   assert.equal(await cutsStream(w, pass, `{"echo":"${Buffer.from(value).toString()}"}`), true, 'and its value is still held by the scan');
+});
+
+// ---------------------------------------------------------------- KBOX-57: a project-host key is lent only for its stored project
+
+const STORED = 'abcdefgh';
+/** A valid-looking ref the key's `projects` name: never placement (the negative control). */
+const OTHER = 'zyxwvuts';
+
+/** `at` null stores no rotation record for the key. */
+async function projectKey(t: Parameters<typeof lendWorld>[0], at: { readonly project?: string } | null = { project: STORED }) {
+  const w = await lendWorld(t, PROJECT_REGISTRY);
+  const c = canary();
+  const pass = w.enrol('laptop');
+  w.addKey({ keyref: 'projkey01', value: textValue(c.bytes), platform: 'projplat', grants: ['laptop'], projects: [OTHER], ...(at === null ? {} : { at }) });
+  return { w, pass, c };
+}
+
+const resolveProject = (w: LendWorld, pass: string, keyref = 'projkey01') => w.client.resolve({ op: 'resolve', token_hash: hashToken(pass), keyref, network: NETWORK });
+const projectLend = (keyref: string, pass: string, project: string | undefined, rule = 'rows-list') => ({ op: 'lend' as const, token_hash: hashToken(pass), keyref, rule_id: rule, ...(project === undefined ? {} : { project }) });
+const mismatchRows = (w: LendWorld) => w.core.audit.read(0).entries.filter((r) => r.action === 'lend.refused').map((r) => [r.actor, r.ref, r.detail['op'], r.detail['code']]);
+
+test('KBOX-57 negative control: resolve answers a project-host key with its stored project, never the ref its projects name', async (t) => {
+  const { w, pass } = await projectKey(t);
+  assert.deepEqual(await resolveProject(w, pass), { ok: true, label: 'laptop', platform: 'projplat', project: STORED });
+  w.addKey({ keyref: 'pathkey01', value: Buffer.from('a path value'), grants: ['laptop'], at: { project: STORED } });
+  assert.deepEqual(await resolveProject(w, pass, 'pathkey01'), { ok: true, label: 'laptop', platform: 'pathplat' }, 'a fixed-origin key names no project, stored or not');
+  assert.deepEqual(mismatchRows(w), []);
+});
+
+test('KBOX-3 a project-host lend naming the stored project is lent; another project or none is forbidden, audited location_mismatch, and sends no value frame', async (t) => {
+  const { w, pass, c } = await projectKey(t);
+  const lent = await w.client.lend(projectLend('projkey01', pass, STORED));
+  assert.ok(lent.ok, 'control: the stored project is lent');
+  assert.deepEqual(await w.client.lend(projectLend('projkey01', pass, OTHER)), { ok: false, code: 'forbidden' });
+  assert.deepEqual(await w.client.lend(projectLend('projkey01', pass, undefined)), { ok: false, code: 'forbidden' });
+  c.assertAbsent({ answer: await rawExchange(w.socket, projectLend('projkey01', pass, OTHER)) });
+  assert.deepEqual(mismatchRows(w), [
+    ['laptop', 'projkey01', 'lend', 'location_mismatch'],
+    ['laptop', 'projkey01', 'lend', 'location_mismatch'],
+    ['laptop', 'projkey01', 'lend', 'location_mismatch'],
+  ]);
+});
+
+test('KBOX-57 a project-host key with no stored project (no record, or a record naming none): resolve and every lend are forbidden, audited location_mismatch, no value frame', async (t) => {
+  for (const at of [null, {}]) {
+    const { w, pass, c } = await projectKey(t, at);
+    assert.deepEqual(await resolveProject(w, pass), { ok: false, code: 'forbidden' });
+    assert.deepEqual(await w.client.lend(projectLend('projkey01', pass, undefined)), { ok: false, code: 'forbidden' });
+    c.assertAbsent({ answer: await rawExchange(w.socket, projectLend('projkey01', pass, OTHER)) });
+    assert.deepEqual(mismatchRows(w), [
+      ['laptop', 'projkey01', 'resolve', 'location_mismatch'],
+      ['laptop', 'projkey01', 'lend', 'location_mismatch'],
+      ['laptop', 'projkey01', 'lend', 'location_mismatch'],
+    ], JSON.stringify(at));
+  }
+});
+
+test('KBOX-57 a key deleted and re-added at another project between resolve and lend: the earlier lend is refused, a lend for the new place is not', async (t) => {
+  const { w, pass } = await projectKey(t);
+  const resolved = await resolveProject(w, pass);
+  assert.deepEqual(resolved, { ok: true, label: 'laptop', platform: 'projplat', project: STORED });
+  w.readdAt('projkey01', { project: OTHER });
+  assert.deepEqual(await w.client.lend(projectLend('projkey01', pass, STORED)), { ok: false, code: 'forbidden' });
+  assert.deepEqual(mismatchRows(w), [['laptop', 'projkey01', 'lend', 'location_mismatch']]);
+  assert.equal((await w.client.lend(projectLend('projkey01', pass, OTHER))).ok, true, 'control: the stored place now is lent');
+});
+
+test('KBOX-3 a lend naming a project for a key whose profile is not project-host is forbidden, audited location_mismatch, even when it equals the stored project', async (t) => {
+  const { w, pass } = await granted(t);
+  w.addKey({ keyref: 'pathkey01', value: Buffer.from('a path value'), grants: ['laptop'], at: { project: STORED } });
+  assert.deepEqual(await w.client.lend(projectLend('pathkey01', pass, STORED, 'models-list')), { ok: false, code: 'forbidden' });
+  assert.deepEqual(mismatchRows(w), [['laptop', 'pathkey01', 'lend', 'location_mismatch']]);
+  assert.equal((await w.client.lend(projectLend('pathkey01', pass, undefined, 'models-list'))).ok, true, 'control: without a project it is lent');
 });
