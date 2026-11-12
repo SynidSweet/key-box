@@ -122,6 +122,11 @@ export interface CoreRuntime {
   readonly registry?: readonly PlatformEntry[] | ((deps: RegistryDeps) => readonly PlatformEntry[]);
   /** The egress host list core reads and checks at its start; production reads deploy/egress-hosts.json (a test passes another file). */
   readonly egressHostsFile?: URL;
+  /**
+   * The /proc files of the idle watch (KBOX-21). The system runtime names the real ones; a runtime that names none runs no idle watch and
+   * holds no reserve (an in-process test core).
+   */
+  readonly proc?: { readonly stat: string; readonly meminfo: string; readonly netdev: string };
 }
 
 const systemRuntime: CoreRuntime = {
@@ -129,6 +134,7 @@ const systemRuntime: CoreRuntime = {
   scheduler: systemScheduler,
   random: systemRandom,
   journal: (code) => void process.stderr.write(`keybox core: ${code}\n`),
+  proc: { stat: '/proc/stat', meminfo: '/proc/meminfo', netdev: '/proc/net/dev' },
 };
 
 export interface StartedCore {
@@ -206,7 +212,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
     const trust = createTrustInstaller({ stagingDir: config.staging, resultsDir: config.installResults, random, clock, wait });
     const push = createPush({ store: privateStore, transport: createHttpPushTransport(egress), scheduler, clock, random, audit: parts.audit, subject: `https://keys.${config.domain}` });
     const wordlist = parseWordlist(readFileSync(new URL('./data/wordlist.txt', import.meta.url), 'utf8'));
-    idle = createIdleWatch({ files: { stat: '/proc/stat', meminfo: '/proc/meminfo', netdev: '/proc/net/dev' }, clock, push, linkMbps: linkMbps(), notifier: { notice: journal } });
+    if (runtime.proc !== undefined) idle = createIdleWatch({ files: runtime.proc, clock, push, linkMbps: linkMbps(), notifier: { notice: journal } });
     // Rotation needs the approvals and approvers that need its executors: the executors reach it once it is open (an approval is decided long after start).
     const viaRotation = (kind: 'rotate_key' | 'add_key'): Executor => (approval) => {
       const executor = rotation?.executors[kind];
