@@ -553,3 +553,18 @@ test('KBOX-14 KBOX-40 a key id of "." or ".." in the list never reaches the reti
     assert.equal(asked.some((a) => a.startsWith('POST')), false);
   }
 });
+
+test('KBOX-40 KBOX-51 the Anthropic entry declares its retirer: handed the old value, the key\'s location and the master (an admin key), it ends the live key whose hint matches, and nothing else', async (t) => {
+  const { api, entry } = await anthropic(t);
+  const { retirer } = entry;
+  assert.ok(retirer !== undefined, 'the entry carries the retirer step 10 uses for a pasted generation');
+  const oldKey = ordinary('OLD9');
+  const otherKey = ordinary('OTH9');
+  api.add(otherKey, 'other');
+  api.add(oldKey, 'old');
+  const verifier = verifierOf(entry);
+  assert.equal(await retirer.retire(L(oldKey), {}, L(ADMIN)), 'retired');
+  assert.equal(await verifier.verify(L(oldKey), ANTHROPIC), 'rejected', 'the old key no longer works');
+  assert.equal(await verifier.verify(L(otherKey), ANTHROPIC), 'ok', 'another key is untouched');
+  assert.equal(await retirer.retire(L(oldKey), {}, L(ADMIN)), 'absent', 'a second ask finds no live key');
+});

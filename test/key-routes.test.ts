@@ -8,6 +8,7 @@ import type { RoutesWorld } from './support/routes-world.ts';
 import type { LocationProver } from '../src/ports/issuer.ts';
 import type { KeyLocation } from '../src/ports/types.ts';
 import type { PlatformSource } from '../src/shell/rotation-ports.ts';
+import { issuerWith } from './fakes/platform-entry.ts';
 
 const HOUR = 3600_000;
 const KEYREF = 'fake/shop/OPENAI_KEY';
@@ -503,4 +504,168 @@ test('KBOX-57 a host-naming location is proven with the chosen master before the
   assert.equal(created.status, 201, created.body);
   assert.deepEqual(w.issuedAt, [{ project: REF }], 'the issuer made the key at the proven place');
   assert.equal((await w.api('/api/keys', { json: requests[2] })).status, 202, 'a proven paste key opens its paste task');
+});
+
+// --- master results and master rotations (KBOX-34, KBOX-57) --------------------------------------------------------------------------
+
+const withoutVerifier = (real: PlatformSource): PlatformSource => ({
+  ...real,
+  platform: (id) => {
+    const kit = real.platform(id);
+    if (kit === undefined) return undefined;
+    const { verifier, ...rest } = kit;
+    void verifier;
+    return rest;
+  },
+});
+const MASTER = ['master'];
+const pasteMaster = { platform: PASTE_PLATFORM, name: 'ANTHROPIC_KEY', scope: { items: MASTER } };
+
+test('KBOX-34 a master result on an issuer platform, and on a paste platform, opens a paste task: class master, no issuer call, no approval', async (t) => {
+  const w = await routesWorld(t);
+  for (const json of [body({ scope: { items: MASTER } }), body(pasteMaster)]) {
+    const reply = await w.api('/api/keys', { json });
+    assert.equal(reply.status, 202, reply.body);
+    assert.deepEqual(members(reply), ['class', 'keyref', 'paste_task_id']);
+    assert.equal((reply.json() as { class: string }).class, 'master');
+  }
+  assert.deepEqual(w.issuedAt, [], 'no issuer call');
+  assert.equal((await w.queue()).length, 0, 'no approval');
+});
+
+test('KBOX-34 a master result on an entry with no verifier is rejected no_verifier: nothing opened, issued or written; an admin result on it is not', async (t) => {
+  const w = await routesWorld(t, { source: withoutVerifier });
+  const before = allRows(w);
+  for (const json of [body({ scope: { items: MASTER } }), body(pasteMaster)]) {
+    const reply = await w.api('/api/keys', { json });
+    assert.deepEqual([reply.status, errorOf(reply).code, errorOf(reply).detail?.code], [422, 'rejected', 'no_verifier'], reply.body);
+  }
+  assert.equal(allRows(w), before);
+  assert.equal(opened(w), 0);
+  assert.deepEqual(w.issuedAt, []);
+  const admin = await w.api('/api/keys', { json: body({ platform: PASTE_PLATFORM, name: 'ANTHROPIC_KEY', scope: { items: ['admin'] } }) });
+  assert.equal(admin.status, 202, 'only a master needs the verifier');
+});
+
+test('KBOX-34 a master result is a paste task even where the proposal-time master is missing: no master is needed to enter the first one', async (t) => {
+  const w = await routesWorld(t, { source: answering({ ok: false, code: 'no_master' }) });
+  const reply = await w.api('/api/keys', { json: body({ scope: { items: MASTER } }) });
+  assert.equal(reply.status, 202, reply.body);
+});
+
+/** A key of `fake` made by the add_key executor (a run), stored with these scope items. */
+async function storedFake(w: RoutesWorld, items: readonly string[]): Promise<void> {
+  const execute = w.rotation.executors.add_key;
+  assert.ok(execute);
+  const action = { kind: 'add_key', platform: 'fake', name: 'OPENAI_KEY', projects: ['shop'], scope: { items } } as const;
+  assert.deepEqual(await execute({ approvalId: 'apr_x', revision: 1, action, requester: { kind: 'box' }, proof: undefined }), { result: 'done' });
+}
+const selfRotating = (real: PlatformSource): PlatformSource => ({
+  ...real,
+  platform: (id) => {
+    const kit = real.platform(id);
+    return kit?.issuer === undefined ? kit : { ...kit, issuer: issuerWith(kit.issuer, { selfRotate: true }) };
+  },
+});
+const statusOf = (w: RoutesWorld): string | undefined => w.parts.meta.snapshot().keys.find((k) => k.keyref === KEYREF)?.status;
+
+test('KBOX-34 POST /api/rotations for a master key on an issuer that is not selfRotate opens a paste task, never an approval or a run; an approval alone cannot rotate it', async (t) => {
+  const w = await routesWorld(t);
+  await storedFake(w, MASTER);
+  const reply = await w.api('/api/rotations', { json: { keyref: KEYREF } });
+  assert.equal(reply.status, 202, reply.body);
+  assert.deepEqual(members(reply), ['paste_task_id']);
+  assert.equal(statusOf(w), 'awaiting_paste');
+  assert.equal((await w.queue()).length, 0);
+  assert.equal(w.rotation.store.activeRunOf(KEYREF), undefined);
+  const run = w.rotation.executors.rotate_key;
+  assert.ok(run);
+  assert.deepEqual(await run({ approvalId: 'apr_y', revision: 1, action: { kind: 'rotate_key', keyref: KEYREF }, requester: { kind: 'box' }, proof: undefined }), { result: 'failed', reason: 'paste_required' });
+  assert.throws(() => w.rotation.orchestrator.start({ keyref: KEYREF, origin: 'owner' }), (e: unknown) => e instanceof ApiError && JSON.stringify(e.detail) === JSON.stringify({ code: 'no_issuer' }));
+});
+
+test('KBOX-34 POST /api/rotations for a master key on a selfRotate issuer opens a rotate_key approval', async (t) => {
+  const w = await routesWorld(t, { source: selfRotating });
+  await storedFake(w, MASTER);
+  const reply = await w.api('/api/rotations', { json: { keyref: KEYREF } });
+  assert.equal(reply.status, 202, reply.body);
+  assert.deepEqual(members(reply), ['approval_id']);
+  assert.deepEqual((await w.queue()).map((q) => q.kind), ['rotate_key']);
+});
+
+/** A master answer a test can change: undefined lets the world's own master through. */
+const swappable = (box: { result: ReturnType<PlatformSource['master']> | undefined }) => (real: PlatformSource): PlatformSource => ({ ...real, master: (p, at, items) => box.result ?? real.master(p, at, items) });
+
+test('KBOX-57 POST /api/rotations asks the master first where the issuer makes the rotation by run: none is rejected no_master and two master_ambiguous, nothing opened', async (t) => {
+  const box: { result: ReturnType<PlatformSource['master']> | undefined } = { result: undefined };
+  for (const items of [['admin'], MASTER]) {
+    for (const code of ['no_master', 'master_ambiguous'] as const) {
+      box.result = undefined;
+      const w = await routesWorld(t, { source: (real) => selfRotating(swappable(box)(real)) });
+      await storedFake(w, items);
+      const status = statusOf(w);
+      box.result = { ok: false, code };
+      const reply = await w.api('/api/rotations', { json: { keyref: KEYREF } });
+      assert.deepEqual([reply.status, errorOf(reply).code, errorOf(reply).detail?.code], [422, 'rejected', code], `${items.join()} ${code}: ${reply.body}`);
+      assert.equal(opened(w), 0, 'no approval and no paste task');
+      assert.equal(statusOf(w), status, 'the status is unchanged');
+    }
+  }
+});
+
+test('KBOX-57 KBOX-34 a rotation made by paste needs no master: a master key on an issuer that is not selfRotate opens its paste task though the platform has none', async (t) => {
+  const box: { result: ReturnType<PlatformSource['master']> | undefined } = { result: undefined };
+  const w = await routesWorld(t, { source: swappable(box) });
+  await storedFake(w, MASTER);
+  box.result = { ok: false, code: 'no_master' };
+  const paste = await w.api('/api/rotations', { json: { keyref: KEYREF } });
+  assert.equal(paste.status, 202, paste.body);
+  assert.deepEqual(members(paste), ['paste_task_id']);
+});
+
+test('KBOX-57 the schedule asks the master before it opens a request: a due admin key with none, or two, is skipped with one box.notice "rotation skipped" per key and code, and nothing is opened', async (t) => {
+  const box: { result: ReturnType<PlatformSource['master']> | undefined } = { result: undefined };
+  const w = await routesWorld(t, { source: swappable(box) });
+  await storedFake(w, ['admin']);
+  w.clock.advance(91 * 24 * HOUR);
+  box.result = { ok: false, code: 'no_master' };
+  w.rotation.tick();
+  w.rotation.tick();
+  box.result = { ok: false, code: 'master_ambiguous' };
+  w.rotation.tick();
+  w.rotation.tick();
+  assert.equal(opened(w), 0);
+  assert.equal(w.rotation.store.runs().length, 1, 'only the key\'s own first run');
+  const notices = w.parts.events.after(0).filter((e) => e.kind === 'box.notice' && e.data['text'] === 'rotation skipped');
+  assert.deepEqual(notices.map((e) => e.data['code']), ['no_master', 'master_ambiguous'], 'one notice per code');
+  const refused = w.parts.audit.read(0).entries.filter((e) => e.action === 'rotation.refused');
+  assert.deepEqual(refused.map((e) => [e.ref, e.detail['code']]), [[KEYREF, 'no_master'], [KEYREF, 'master_ambiguous']]);
+  box.result = undefined;
+  w.rotation.tick();
+  assert.deepEqual((await w.queue()).map((q) => q.kind), ['rotate_key'], 'positive control: with a master the same key opens its approval');
+});
+
+test('KBOX-34 the schedule opens a paste task, not an approval, for a due master key on an issuer that is not selfRotate, with no master needed', async (t) => {
+  const box: { result: ReturnType<PlatformSource['master']> | undefined } = { result: undefined };
+  const w = await routesWorld(t, { source: swappable(box) });
+  await storedFake(w, MASTER);
+  w.clock.advance(91 * 24 * HOUR);
+  box.result = { ok: false, code: 'no_master' };
+  w.rotation.tick();
+  assert.equal(opened(w), 1);
+  assert.equal((await w.queue()).length, 0, 'not an approval');
+  assert.equal(statusOf(w), 'awaiting_paste');
+  assert.deepEqual(w.parts.events.after(0).filter((e) => e.kind === 'box.notice'), []);
+});
+
+test('KBOX-57 KBOX-34 POST /api/retired for a keyref that exists records the new generation at the key\'s stored location, not an empty one', async (t) => {
+  const w = await routesWorld(t, { location: PROJECT_ENTRY });
+  assert.equal((await w.api('/api/keys', { json: body({ projects: [REF], location: { project: REF } }) })).status, 201);
+  const ref = `fake/${REF}/OPENAI_KEY`;
+  assert.deepEqual(w.rotation.store.keyInfo(ref)?.location, { project: REF });
+  const reply = await w.api(`/api/retired?platform=fake&project=${REF}&name=OPENAI_KEY`, { bytes: Buffer.from(`fk-${'cd'.repeat(16)}`) });
+  assert.equal(reply.status, 201, reply.body);
+  const added = w.rotation.store.gens(ref).at(-1);
+  assert.deepEqual([added?.status, added?.location], ['retired', { project: REF }]);
+  assert.deepEqual(w.rotation.store.keyInfo(ref)?.location, { project: REF }, 'the key\'s own record is unchanged');
 });
