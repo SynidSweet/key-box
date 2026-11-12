@@ -10,9 +10,9 @@ Every unit of stages 1 to 4 is built and integrated on main: `scaffold`, `forms`
 `src/main-core.ts` now wires everything: `startCore(env, runtime)` (exported; `main()` is `startCore` plus SIGTERM/SIGINT)
 serves the machine API, the share file and, when `KB_DOMAIN` is set, the phone app, approvals, the real `TrustPort`, the update
 intake and rotation (key routes, paste, deliveries, the hourly tick, the daily reconcile, the `rotate_key` and `add_key`
-executors). `src/platforms/registry.ts` is EMPTY until the adapter units add entries, so every action that needs a platform
-(`add_key`, `add_destination`, `set_allow_rules`, the two Vercel kinds) is `rejected` at proposal time, no key has a share shape
-(`noShapeYet`) and the relay forwards nothing. Spec: `docs/spec.md` (Build units table at the end). Verdicts of each unit's
+executors). `src/platforms/registry.ts` is EMPTY until the adapter units add entries, so `add_key` is `rejected` at proposal time (no platform is registered),
+no key has a share shape and the relay forwards nothing. A registry entry now carries everything an adapter registers (unit
+`platforms`); `add_destination`, `set_allow_rules` and the two Vercel kinds stay `rejected` until their executors are built. Spec: `docs/spec.md` (Build units table at the end). Verdicts of each unit's
 adversary: `/home/petter/.local/share/lanes/key-box/<unit>.verdict.md`.
 
 ## Codebase map
@@ -22,13 +22,16 @@ adversary: `/home/petter/.local/share/lanes/key-box/<unit>.verdict.md`.
   `loop/gate.sh` + `loop/probes/arch.sh`.
 - `src/ports/` (interfaces of design 5.1): `vault`, `audit`, `meta` (+TokenStore), `events`, `private`, `clock`, `random`,
   `issuer` (Issuer, KeyLister with `listAt`, Verifier), `destination` (Destination, Redeployer, three push outcomes),
-  `relay-profile`, `platform` (`PlatformEntry`: id, issuer, lister, relay or denyOnly), `approvals`, `notifier`, `push`, `trust`,
+  `relay-profile`, `platform` (`PlatformEntry`: id, issuer, lister, relay or denyOnly, verifier, keyPageUrl, shape (no issuer only), destinations,
+  required `unverified`; `DestinationKit` lives in `destination`), `approvals`, `notifier`, `push`, `trust`,
   `share`, `minted`, `types`.
 - `src/pure/` (no I/O), by concern:
   - Approvals and proofs: `webauthn`, `cose`, `challenge` (every challenge; shared with kb-install), `actions` (closed `Action`
     union), `slots`, `words`, `codes`, `tokens`, `canonical`, `schemas`, `errors`, `address`, `lent`, `pushcrypto`, `pushsub`.
   - Update: `tar`, `release-hash`, `runtime-lock`, `install-request` (core's request and root's answer, one home), `kept-proof`.
-  - Relay: `target-parse`, `rule-match`, `profile` (engine and registry checks), `scanner`, `forms` (the one forms library for
+  - Relay: `target-parse`, `rule-match`, `profile` (engine and registry checks), `registry-entry` (one shape source, destination kinds),
+    `platform-shape` (`shapeOf`: the one shape of an entry or kit), `destination-kind` (the one mapping from the metadata kind
+    `vercel_env` to the adapter kind `vercel-env`), `proposal-vet` (`vetAction(registry)`; the one list of kinds with no executor), `scanner`, `forms` (the one forms library for
     the scanner and the share writer), `lend-protocol`, `relay-errors`, `egress-policy`.
   - Rotation: `rotation-machine` (steps, intent name, retry delay), `scheduler` (due dates, staggering), `class` (class never
     lowered, KBOX-16).
@@ -62,17 +65,21 @@ adversary: `/home/petter/.local/share/lanes/key-box/<unit>.verdict.md`.
   `test/support/demo-pages.ts` (a real core on `https://keys.localhost`, state seeded through the real routes, one URL printed per
   page state) and `test/browser/phone-run.ts` + `cdp.ts` (NOT collected by the gate: real Chromium from `~/.cache/ms-playwright`
   over CDP, a virtual WebAuthn authenticator, 390 px screenshots of every page state; run with `runq run --place local
-  --why-local display`); `test/fakes/` (platform, destination, push, trust, vault, audit, approvals). New in integration: `main-core.test.ts` (core started
+  --why-local display`); `test/fakes/` (platform, platform-entry: `fakeEntry`, `pasteOnlyEntry`, `sourceOf`; destination, push, trust, vault, audit, approvals). New in integration: `main-core.test.ts` (core started
   in process on a `TimedClock`), `platform-source.test.ts`, `share-rotation.test.ts` (real share source over a real rotation).
 
 ## Remaining
 
 1. The six adapter units, parallel: `google` (KBOX-24, 41), `vercel` (26, 36), `supabase` (37), `openai` (38), `elevenlabs` (39),
    `paste` (40: Anthropic, Stripe). Each COMMITS A PROBE REPORT FIRST (`docs/probes/<id>.md`) of every UNVERIFIED endpoint named in
-   its rule, then code. To wire an adapter: add its `PlatformEntry` line to `src/platforms/registry.ts`; `PlatformEntry` has no
-   `verifier`, `keyPageUrl` or destination kits yet, so the first adapter to need them extends the port and the two lines in
-   `platform-source.ts` that read it; replace `noShapeYet` in `main-core.ts` with the registry's `issuer.capabilities().shape`;
-   drop the kind from `NEEDS_ADAPTER` / replace `vetWithoutAdapters` with the adapter's proposal check.
+   its rule, then code. An adapter adds ONLY `src/platforms/<id>/` and one `PlatformEntry` line in `src/platforms/registry.ts`:
+   `issuer`, `lister`, `relay` or `denyOnly`, `verifier`, `keyPageUrl`, `destinations` (`{destination, redeployer?}` per kind; the kind
+   is `destination.kind`), `shape` (only with no issuer; else the issuer's own), `unverified` (ids its probe report marks STILL
+   UNVERIFIED; `test/unverified-probes.test.ts` checks it against `docs/probes/<id>.md`). `platform-source`, `main-core` (shapes,
+   proposal vet, egress, lend) and the paste flow read the entry; nothing shared changes. `startCore` takes `runtime.registry` for tests.
+   OPEN: `key-routes` (`classify`), `new-key` (`capabilitiesFor`) and `retire` still need an ISSUER (`issuer.capabilities().classify`),
+   so `POST /api/keys` and `/api/retired` for a paste-only (issuer-less) platform answer `unknown_platform`; the `paste` unit must
+   decide how such a platform classifies a scope. Fixture entries in older tests (see Recent) lack `unverified`/`shape`.
 2. Journeys J1 (setup, then approve a rotation of an admin key), J3 as two real processes (J3 runs in one process today) and J4
    (an update bundle approved and installed, then a bad bundle rolled back). J1 and J3 need the registry; J4 needs the real
    kb-install on a box. J2, J5 and J6 exist.
@@ -132,7 +139,10 @@ adversary: `/home/petter/.local/share/lanes/key-box/<unit>.verdict.md`.
 
 ## Recent
 
-`integrate` (this slice, on main after e1fd5e5): rotation wired into core (`startCore`, `platform-source`, executors, routes,
+`platforms` (unit/platforms, NOT gate-green): `unverified` is required and a shape-less entry is refused, so the older fixture entries
+(`test/fixtures/profiles.ts` TEST_REGISTRY, `registry.test.ts`, `relay-forward.test.ts`, `profile-engine.test.ts`, `platform-source.test.ts`)
+fail typecheck, and every relay-world test and `registry.test.ts` case that expects `passed` fails with `shape_missing`; they await an
+authorised additive fixture edit (`unverified: []`, a `shape`). `integrate` (on main after e1fd5e5): rotation wired into core (`startCore`, `platform-source`, executors, routes,
 tick and reconcile, stop), `Orchestrator.stop`, retired generations in the share file over the real source, `key.changed` on
 every generation status change, and this file. Before it: `rotate` (two adversary fix rounds; verdict "declared not done" named
 the wiring and J1/J3), `update` (verdict UNSOUND, fixes merged incl. spec revision 4: approver_add binds the new approver's key
