@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import type { TestContext } from 'node:test';
 import type { NodeRun } from './proc.ts';
+import { onTestEnd } from './cleanup.ts';
 import { waitUntil } from './settle.ts';
 
 /** Starts this Node with `args` in `cwd` (with `env` applied over ours; an `undefined` value removes the variable) and resolves when it exits, so two of them can run at once. A failure to start rejects. */
@@ -36,7 +37,7 @@ export function startNode(t: TestContext, args: readonly string[], cwd: string, 
   const exited = new Promise<NodeRun>((resolve) => {
     child.on('close', (status, signal) => resolve({ status, signal, stdout: text(out), stderr: text(err) }));
   });
-  t.after(async () => {
+  onTestEnd(t, 'process', async () => {
     child.kill('SIGKILL');
     await exited;
   });

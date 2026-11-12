@@ -31,7 +31,7 @@ async function runFixture(t: Parameters<typeof tempDir>[0], body: string): Promi
   await writeFile(
     file,
     `import { test } from 'node:test';
-import { startNode, tempDir } from ${JSON.stringify(kitUrl)};
+import { startNode, tempDir, onTestEnd } from ${JSON.stringify(kitUrl)};
 test('fixture', async (t) => {
   await tempDir(t);
   ${body}
@@ -56,4 +56,10 @@ test('KBOX-35 a started process is killed even when another end-of-test hook fai
   const run = await runFixture(t, `t.after(() => { throw new Error('an earlier hook fails'); });`);
   assert.notEqual(run.status, 0, 'the failing hook must still fail the test');
   assert.match(run.stdout + run.stderr, /an earlier hook fails/);
+});
+
+test('KBOX-35 a cleanup step that fails is reported, and the process is still killed', async (t) => {
+  const run = await runFixture(t, `onTestEnd(t, 'process', () => { throw new Error('a cleanup step fails'); });`);
+  assert.notEqual(run.status, 0, 'the failing step must still fail the test');
+  assert.match(run.stdout + run.stderr, /a cleanup step fails/);
 });
