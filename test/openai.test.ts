@@ -240,22 +240,23 @@ test('KBOX-14 a platform that quotes the key it was sent in a 401, or the key it
   const c = canary(40);
   const hex = Buffer.from(c.bytes).toString('hex');
   const planted = lent(Buffer.from(`sk-admin-kbox-test-${hex}`), 'planted:1');
-  const failures: string[] = [];
-  const record = async (call: () => Promise<unknown>): Promise<void> => {
+  /** Everything a failed call shows: the error as inspected, and its message, stack and cause. A call that does not fail fails the test. */
+  const errorText = async (call: () => Promise<unknown>): Promise<string> => {
     try {
       await call();
-      failures.push('NO ERROR');
     } catch (e) {
-      failures.push(inspect(e, { depth: 6 }), e instanceof Error ? `${e.message} ${String(e.stack)} ${inspect(e.cause)}` : String(e));
+      return [inspect(e, { depth: 6 }), e instanceof Error ? `${e.message} ${String(e.stack)} ${inspect(e.cause)}` : String(e)].join('\n');
     }
+    throw new Error('the call was expected to fail and did not');
   };
   fake.setMode('401-echo');
-  await record(() => issuer.issue({ scope: SCOPE }, 'kbox_shop_g1_aaaa1111', planted));
-  await record(() => issuer.revoke(`${PROJECT}/key_1`, planted));
-  await record(() => must(entry.lister).list(planted));
-  await record(() => must(entry.lister).listAt({ project: PROJECT }, planted));
+  const failures = [
+    await errorText(() => issuer.issue({ scope: SCOPE }, 'kbox_shop_g1_aaaa1111', planted)),
+    await errorText(() => issuer.revoke(`${PROJECT}/key_1`, planted)),
+    await errorText(() => must(entry.lister).list(planted)),
+    await errorText(() => must(entry.lister).listAt({ project: PROJECT }, planted)),
+  ];
   assert.equal(await must(entry.verifier).verify(planted, { platform: 'openai' }), 'rejected');
-  assert.ok(failures.every((f) => f !== 'NO ERROR'));
   c.assertAbsent({ errors: failures.join('\n') });
 
   // the key the platform would issue, echoed by a failing create and carried by a create answer that is cut short of its id
@@ -265,14 +266,8 @@ test('KBOX-14 a platform that quotes the key it was sent in a 401, or the key it
   const later: string[] = [];
   for (const mode of ['create-500-echo', 'create-bad-shape'] as const) {
     issuedFake.setMode(mode);
-    try {
-      await over.issuer.issue({ scope: SCOPE }, `kbox_shop_${mode.replaceAll('-', '_')}_g1_aaaa1111`, planted);
-      later.push('NO ERROR');
-    } catch (e) {
-      later.push(inspect(e, { depth: 6 }));
-    }
+    later.push(await errorText(() => over.issuer.issue({ scope: SCOPE }, `kbox_shop_${mode.replaceAll('-', '_')}_g1_aaaa1111`, planted)));
   }
-  assert.ok(later.every((f) => f !== 'NO ERROR'));
   for (const fakeValue of [...later]) assert.equal(fakeValue.includes('sk-svcacct-'), false, 'a key the platform would have issued is in an error');
 });
 
