@@ -41,6 +41,8 @@ export interface FakeVercel {
   setDown(down: boolean): Promise<void>;
   /** Every request is answered with this status and a body quoting the presented token, until `undefined`. */
   forceStatus(status: number | undefined): void;
+  /** A live project token is refused (plain 403, no `invalidToken`) on `GET /v5/user/tokens/current`, as a token without that permission may be, until false. */
+  restrictSelfRead(on: boolean): void;
   /** Every 200 answer is cut off after its first bytes, until false. */
   cutAnswers(cut: boolean): void;
   /** Back to the start: no tokens, no variables, the seed deployments, every switch off. The server stays up. */
@@ -111,6 +113,7 @@ export async function startFakeVercel(t: { after(fn: () => void | Promise<void>)
   let failNext = false;
   let forced: number | undefined;
   let cut = false;
+  let selfReadRefused = false;
   const reset = (): void => {
     tokens.clear();
     envs.clear();
@@ -121,6 +124,7 @@ export async function startFakeVercel(t: { after(fn: () => void | Promise<void>)
     failNext = false;
     forced = undefined;
     cut = false;
+    selfReadRefused = false;
     for (const p of projects) {
       envs.set(p, []);
       deploys.set(`dpl_seed_${p}`, { project: p, name: `${p}-name`, state: 'READY', polls: 0, willFail: false });
@@ -147,6 +151,7 @@ export async function startFakeVercel(t: { after(fn: () => void | Promise<void>)
     const key = `${call.method} /${v}/${a}`;
     if (key === 'GET /v2/user') return caller.kind === 'master' ? { status: 200, body: { user: { id: 'u_fake' } } } : notAllowed;
     if (key === 'GET /v5/user' && b === 'tokens' && c === 'current') {
+      if (selfReadRefused && caller.kind === 'project') return notAllowed;
       const token = caller.token;
       return { status: 200, body: { token: { id: token?.id ?? 'tok_master', ...(token?.projectId === undefined ? {} : { projectId: token.projectId }) } } };
     }
@@ -304,6 +309,7 @@ export async function startFakeVercel(t: { after(fn: () => void | Promise<void>)
     },
     forceStatus: (status) => void (forced = status),
     cutAnswers: (value) => void (cut = value),
+    restrictSelfRead: (on) => void (selfReadRefused = on),
     reset,
   };
 }

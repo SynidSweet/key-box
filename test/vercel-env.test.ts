@@ -1,5 +1,6 @@
 // KBOX-36, KBOX-16: the Vercel destination `vercel-env` (sensitive environment variables) and its redeployer, over the fake of api.vercel.com.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import type { DestinationTarget } from '../src/ports/destination.ts';
 import type { AdapterHttp, HttpRequest, HttpResponse } from '../src/ports/http.ts';
@@ -69,15 +70,20 @@ test('KBOX-36 the project id and the name are encoded as path text and body text
   assert.equal(body.key, 'N"AME\n');
 });
 
-test('KBOX-36 the receipt names the variable and the value pushed, so two values give two receipts, and it never holds the value', async () => {
+test('KBOX-2 KBOX-36 the receipt names the variable (its id, one per name) and holds no part and no digest of either value', async () => {
   fake.reset();
   const one = await destination.push(target, 'K', lentText('vcp_KboxTestFakeOne'), master());
   const two = await destination.push(target, 'K', lentText('vcp_KboxTestFakeTwo'), master());
   const other = await destination.push(target, 'L', lentText('vcp_KboxTestFakeOne'), master());
   assert.ok(one.outcome === 'applied' && two.outcome === 'applied' && other.outcome === 'applied');
-  assert.notEqual(one.version, two.version);
-  assert.notEqual(one.version, other.version);
-  assert.equal(JSON.stringify([one, two, other]).includes('KboxTestFakeOne'), false);
+  assert.equal(one.version, two.version, 'the same variable, the same receipt');
+  assert.notEqual(one.version, other.version, 'another variable, another receipt');
+  assert.equal(one.version, fake.envs.get(PROJECT)?.find((e) => e.key === 'K')?.id);
+  const seen = JSON.stringify([one, two, other]);
+  for (const text of ['vcp_KboxTestFakeOne', 'vcp_KboxTestFakeTwo']) {
+    const bytes = Buffer.from(text);
+    for (const form of [text, bytes.toString('hex'), bytes.toString('base64'), createHash('sha256').update(bytes).digest('hex').slice(0, 16)]) assert.equal(seen.includes(form), false, form);
+  }
   assert.equal(fake.envs.get(PROJECT)?.filter((e) => e.key === 'K').length, 1, 'upsert: one variable, not two');
 });
 
@@ -225,3 +231,19 @@ test('KBOX-36 a transport failure is a HttpTransportError at the port and nothin
   assert.equal(failure.cause, undefined);
 });
 
+
+// ---------------------------------------------------------------- review fixes (adapters batch 1)
+
+test('KBOX-2 KBOX-36 the receipt of a push is the variable id and nothing derived from the value: no digest, no part of it, the same id for a repeated push of the same variable', async () => {
+  fake.reset();
+  const valueText = 'vcp_KboxTestFakeReceiptValue';
+  const first = await destination.push(target, 'K', lentText(valueText), master());
+  const again = await destination.push(target, 'K', lentText('vcp_KboxTestFakeOther'), master());
+  assert.ok(first.outcome === 'applied' && again.outcome === 'applied');
+  const id = fake.envs.get(PROJECT)?.find((e) => e.key === 'K')?.id;
+  assert.equal(first.version, id, 'the receipt is the variable id, which finds the push again');
+  assert.equal(again.version, id);
+  const digest = createHash('sha256').update(valueText).digest('hex');
+  assert.equal(first.version.includes(digest.slice(0, 8)), false);
+  assert.doesNotMatch(first.version, /[0-9a-f]{16}/);
+});

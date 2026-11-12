@@ -3,6 +3,7 @@
   "vercel.env-upsert",
   "vercel.env-update",
   "vercel.env-delete",
+  "vercel.env-list-pagination",
   "vercel.redeploy",
   "vercel.verifier-user-path",
   "vercel.verifier-project-token",

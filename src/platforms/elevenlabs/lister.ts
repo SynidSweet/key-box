@@ -14,19 +14,23 @@ function regionsAt(at: KeyLocation): readonly Region[] {
   return [at.region];
 }
 
-async function keysIn(http: AdapterHttp, regions: readonly Region[], master: Lent): Promise<PlatformKeyInfo[]> {
-  const read = await inEachRegion(regions, (region) => readServiceAccounts(http, region, master));
-  return read.flatMap(({ region, value }) =>
+async function keysIn(http: AdapterHttp, regions: readonly Region[], master: Lent): Promise<{ readonly keys: PlatformKeyInfo[]; readonly complete: boolean }> {
+  const { read, complete } = await inEachRegion(regions, (region) => readServiceAccounts(http, region, master));
+  const keys = read.flatMap(({ region, value }) =>
     value.flatMap((account) => account.keys.map((k): PlatformKeyInfo => ({ platformKeyId: k.keyId, name: k.name, location: { region }, ...(k.disabled ? { disabled: true as const } : {}) }))),
   );
+  return { keys, complete };
 }
 
 export function createLister(http: AdapterHttp): KeyLister {
   return {
-    list: (master: Lent): Promise<PlatformKeyInfo[]> => keysIn(http, REGIONS, master),
+    // The port's plain list has no completeness: it is what the regions that answered hold, and a region that refused the master is left out
+    // (the sweep that reads it only acts on what it sees). `listAt` says whether every region answered.
+    list: async (master: Lent): Promise<PlatformKeyInfo[]> => (await keysIn(http, REGIONS, master)).keys,
     async listAt(at: KeyLocation, master: Lent): Promise<KeyListing> {
-      // The service-account list is one document, with no pages (ASSUMED): a listing that parsed is a complete one.
-      return { complete: true, at, keys: await keysIn(http, regionsAt(at), master) };
+      // The service-account list is one document, with no pages (UNVERIFIED, elevenlabs.service-account-list): a region that answered is read
+      // whole, and a region that refused the master leaves the listing incomplete.
+      return { at, ...(await keysIn(http, regionsAt(at), master)) };
     },
   };
 }

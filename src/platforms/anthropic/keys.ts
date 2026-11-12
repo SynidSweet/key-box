@@ -41,6 +41,7 @@ export async function readKeys(http: AdapterHttp, admin: Lent, options: { readon
   // UNVERIFIED (anthropic.key-list-status-filter): the path, `status`, `limit`, `after_id`, and the page fields `data`, `has_more`, `last_id`
   // are from the SDK documentation; a live 401 does not tell a wrong path from a bad key.
   const keys: ListedKey[] = [];
+  const seen = new Set<string>();
   let after: string | undefined;
   for (;;) {
     const query = new URLSearchParams();
@@ -59,7 +60,9 @@ export async function readKeys(http: AdapterHttp, admin: Lent, options: { readon
     }
     keys.push(...page.keys);
     if (!page.hasMore) return { keys, complete: true };
-    if (page.lastId === undefined || page.lastId === after) return { keys, complete: false };
+    // A cursor seen before (a repeat, or a longer cycle) would loop for ever: the list ends here, incomplete.
+    if (page.lastId === undefined || seen.has(page.lastId)) return { keys, complete: false };
+    seen.add(page.lastId);
     after = page.lastId;
   }
 }

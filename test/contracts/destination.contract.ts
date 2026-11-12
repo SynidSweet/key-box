@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
+import { bytesOf } from '../kit/index.ts';
 import type { Destination, DestinationTarget } from '../../src/ports/destination.ts';
 import type { Lent } from '../../src/ports/types.ts';
 
@@ -31,11 +33,17 @@ export function destinationContract(name: string, make: () => DestinationSubject
     assert.deepEqual(again, first);
   });
 
-  test(`KBOX-35 destination contract (${name}): pushing a different value gives a different receipt`, async () => {
+  test(`KBOX-2 KBOX-35 destination contract (${name}): pushing a different value gives a receipt that, as of the KBOX-2 ruling, carries no part and no digest of either value`, async () => {
     const { destination, target, master, valueOne, valueTwo } = make();
     const first = await destination.push(target, 'API_KEY', valueOne, master);
     const second = await destination.push(target, 'API_KEY', valueTwo, master);
-    assert.notDeepEqual(second, first);
+    // as of the KBOX-2 ruling the receipt names the object, so it no longer differs per value; it must hold nothing of either value
+    const seen = JSON.stringify([first, second]);
+    for (const lent of [valueOne, valueTwo]) {
+      const bytes = Buffer.from(await bytesOf(lent));
+      const forms = [bytes.toString('utf8'), bytes.toString('hex'), bytes.toString('base64'), createHash('sha256').update(bytes).digest('hex').slice(0, 16)];
+      for (const form of forms) assert.equal(seen.includes(form), false, form);
+    }
   });
 
   test(`KBOX-35 destination contract (${name}): remove deletes the value, and removing what is absent counts as done`, async () => {

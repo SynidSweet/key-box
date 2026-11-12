@@ -28,6 +28,8 @@ interface Account {
 export interface RegionState {
   readonly accounts: Map<string, Account>;
   readonly masters: Set<string>;
+  /** Key values that are live but lack the permission `/v1/user` and `/v1/models` need: those routes answer them 403 (a real restricted key may be refused by permission). */
+  readonly restricted: Set<string>;
   /** Make every call answer with this status and a body that quotes the presented key (a failing platform). */
   failWith: number | undefined;
   /** Drop every connection without an answer. */
@@ -46,6 +48,7 @@ function freshRegion(master: string): RegionState {
   return {
     accounts: new Map([['sa-test-1', { name: 'service account one', keys: new Map() }]]),
     masters: new Set([master]),
+    restricted: new Set(),
     failWith: undefined,
     down: false,
     createValue: undefined,
@@ -90,6 +93,10 @@ function handle(state: RegionState, req: IncomingMessage, res: ServerResponse, b
   const method = req.method ?? '';
   const live = [...state.accounts.values()].some((a) => [...a.keys.values()].some((k) => k.value === presented && !k.disabled));
   if (path === '/v1/user' || path === '/v1/models') {
+    if (state.restricted.has(presented)) {
+      json(res, 403, { detail: { type: 'authorization_error', code: 'missing_permissions', message: 'The API key is missing the permission user_read', status: 'missing_permissions' } });
+      return;
+    }
     if (state.masters.has(presented) || live) json(res, 200, { ok: true });
     else refusal(res, presented);
     return;
@@ -199,6 +206,7 @@ export async function startElevenLabsWorld(): Promise<ElevenLabsWorld> {
         for (const [id, a] of fresh.accounts) regions[r].accounts.set(id, a);
         regions[r].masters.clear();
         for (const m of fresh.masters) regions[r].masters.add(m);
+        regions[r].restricted.clear();
         regions[r].failWith = undefined;
         regions[r].down = false;
         regions[r].createValue = undefined;

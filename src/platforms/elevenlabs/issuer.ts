@@ -4,13 +4,11 @@ import type { AdapterHttp } from '../../ports/http.ts';
 import type { IssuedKey, IssueRequest, Issuer, IssuerCapabilities } from '../../ports/issuer.ts';
 import type { Lent, PlatformKeyId } from '../../ports/types.ts';
 import { makeLent } from '../../pure/lent.ts';
-import { ElevenLabsError, call, expectJson, isRecord, isRefusal } from './api.ts';
+import { ElevenLabsError, call, expectJson, isRecord, isRefusal, segment } from './api.ts';
 import { locateKey, readServiceAccounts } from './directory.ts';
 import type { Region } from './regions.ts';
 import { classifyScope, parseScope } from './scope.ts';
 import { ELEVENLABS_SHAPE } from './shape.ts';
-
-const enc = encodeURIComponent;
 
 /** The service account a key is made in: the scope's own, else the workspace's only one. */
 async function serviceAccountFor(http: AdapterHttp, region: Region, asked: string | undefined, master: Lent): Promise<string> {
@@ -38,7 +36,7 @@ export function createIssuer(http: AdapterHttp): Issuer {
     async issue(req: IssueRequest, intentName: string, master: Lent): Promise<IssuedKey> {
       const scope = parseScope(req.scope);
       const account = await serviceAccountFor(http, scope.region, scope.serviceAccount, master);
-      const answer = await call(http, scope.region, 'POST', `/v1/service-accounts/${enc(account)}/api-keys`, master, { name: intentName, permissions: scope.permissions });
+      const answer = await call(http, scope.region, 'POST', `/v1/service-accounts/${segment(account)}/api-keys`, master, { name: intentName, permissions: scope.permissions });
       const body = expectJson(answer);
       const value = isRecord(body) ? body['xi-api-key'] : undefined;
       const keyId = isRecord(body) ? body['key_id'] : undefined;
@@ -49,7 +47,7 @@ export function createIssuer(http: AdapterHttp): Issuer {
     async revoke(id: PlatformKeyId, master: Lent): Promise<'revoked' | 'absent'> {
       const found = await locateKey(http, id, master);
       if (found === undefined) return 'absent';
-      const answer = await call(http, found.region, 'DELETE', `/v1/service-accounts/${enc(found.serviceAccount)}/api-keys/${enc(id)}`, master);
+      const answer = await call(http, found.region, 'DELETE', `/v1/service-accounts/${segment(found.serviceAccount)}/api-keys/${segment(id)}`, master);
       if (answer.status === 404) return 'absent';
       if (answer.status >= 200 && answer.status < 300) return 'revoked';
       throw new ElevenLabsError(isRefusal(answer) ? 'rejected' : 'platform_error', answer.status);
