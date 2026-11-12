@@ -406,6 +406,8 @@ test('KBOX-55 KBOX-52 the rotation record makes the fresh key due on schedule: n
   const box = await boxCore(t);
   await box.start();
   await box.read();
+  // As of the KBOX-55 "Due only once proven" rule: the fresh key is proven first.
+  box.seed(({ store }) => store.markProved(BOX_REF, 1, box.clock.now()));
   // The days pass with core stopped; each start runs one hourly tick of its own: at 90 days less an hour, then at 90 days and an hour.
   box.clock.advance(90 * DAY - 2 * HOUR);
   await box.start();
