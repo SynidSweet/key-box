@@ -562,7 +562,7 @@ test('KBOX-55 refuseBoxKeyAction lets everything else through: rotate_key, a set
     { kind: 'rotate_key', keyref: BOX_REF },
     { kind: 'set_schedule', keyref: BOX_REF, rotate_every_days: 30, grace_hours: 2 },
     { kind: 'grant', keyref: 'google/p/MAPS_KEY', machine: 'ws-1' },
-    { kind: 'add_key', platform: 'google', name: 'OIDC_SIGNING_KEY', projects: ['shop'], scope: { items: ['read'] } },
+    { kind: 'add_key', platform: 'google', name: 'MAPS_KEY', projects: ['shop'], scope: { items: ['read'] } },
     { kind: 'revoke_grant', keyref: BOX_REF, machine: 'ws-1' },
   ] as const;
   for (const action of fine) assert.doesNotThrow(() => refuseBoxKeyAction(ENTRIES, action), action.kind);

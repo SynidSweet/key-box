@@ -717,8 +717,8 @@ test('KBOX-55 POST /api/keys naming the box key is rejected box_made, whatever i
   const after = await w.api('/api/keys', { json: named(['read']) });
   assert.deepEqual(code(after), ['rejected', 'box_made'], 'still box_made, not key_exists, once the key exists');
   assert.deepEqual(vaultGens(w, BOX_REF), [1]);
-  // Negative control: the same name in a project is another key, created as any ordinary key is.
-  assert.equal((await w.api('/api/keys', { json: named(['read'], ['shop']) })).status, 201);
+  // Negative control (KBOX-34 refuses the platform and name in any project): another name is created as any ordinary key is.
+  assert.equal((await w.api('/api/keys', { json: body({ name: 'OTHER_KEY', projects: ['shop'], scope: { items: ['read'] } }) })).status, 201);
 });
 
 test('KBOX-55 POST /api/keys with a master result on a platform whose master the box makes is rejected box_made_master, checked before no_verifier; no paste task', async (t) => {
@@ -753,8 +753,8 @@ test('KBOX-55 POST /api/retired naming the box key is rejected box_made before i
   assert.deepEqual(code(after), ['rejected', 'box_made']);
   assert.deepEqual(vaultGens(w, BOX_REF), [1]);
   assert.equal(w.rotation.store.topGen(BOX_REF), 1);
-  // Negative control: the same name under a project is another key and is retired as before.
-  assert.equal((await w.api(`/api/retired?platform=fake&project=shop&name=${BOX_NAME}`, { bytes: Buffer.from(`fk-${'ab'.repeat(16)}`) })).status, 201);
+  // Negative control (KBOX-34 refuses the platform and name in any project): another name is retired as before.
+  assert.equal((await w.api(`/api/retired?platform=fake&project=shop&name=OTHER_KEY`, { bytes: Buffer.from(`fk-${'ab'.repeat(16)}`) })).status, 201);
 });
 
 test('KBOX-34 KBOX-55 POST /api/keys and POST /api/retired naming the box key by platform and name are rejected box_made under any project: nothing written, nothing opened; another name is not box_made', async (t) => {
