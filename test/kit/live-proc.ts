@@ -3,10 +3,10 @@ import type { TestContext } from 'node:test';
 import type { NodeRun } from './proc.ts';
 import { waitUntil } from './settle.ts';
 
-/** Starts this Node with `args` in `cwd` and resolves when it exits, so two of them can run at once. A failure to start rejects. */
-export function spawnNode(args: readonly string[], cwd: string): Promise<NodeRun> {
+/** Starts this Node with `args` in `cwd` (with `env` applied over ours; an `undefined` value removes the variable) and resolves when it exits, so two of them can run at once. A failure to start rejects. */
+export function spawnNode(args: readonly string[], cwd: string, env: Readonly<Record<string, string | undefined>> = {}): Promise<NodeRun> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [...args], { cwd });
+    const child = spawn(process.execPath, [...args], { cwd, env: { ...process.env, ...env } });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     child.stdout.on('data', (c: Buffer) => out.push(c));
