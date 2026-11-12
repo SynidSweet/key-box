@@ -18,3 +18,11 @@ export function createRegistry(deps: RegistryDeps): readonly PlatformEntry[] {
 
 /** The registry as a process that makes no adapter calls sees it: every call is refused and time stands at 0. For structure checks only. */
 export const REGISTRY: readonly PlatformEntry[] = createRegistry({ http: refusingAdapterHttp, clock: { now: () => 0 } });
+
+/**
+ * The registry of kb-relay, which makes no adapter call: it is built with the refusing client, so every call is refused. `create` is the
+ * builder it uses (a test passes a recording one).
+ */
+export function createRelayRegistry(clock: Clock, create: (deps: RegistryDeps) => readonly PlatformEntry[] = createRegistry): readonly PlatformEntry[] {
+  return create({ http: refusingAdapterHttp, clock });
+}
