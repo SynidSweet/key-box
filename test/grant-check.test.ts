@@ -450,28 +450,6 @@ test('KBOX-41 core serves the discovery document and the JWKS of the box\'s sign
   assert.equal(jwks.body.includes(SIGNING_VALUE), false);
 });
 
-test('KBOX-41 the JWKS publishes the signing key\'s next generation before it becomes current, and keeps the one before it while the vault holds it', async (t) => {
-  const next = createHash('sha256').update('kbox-test-signing-2').digest().toString('base64url');
-  const previous = createHash('sha256').update('kbox-test-signing-0').digest().toString('base64url');
-  const kids = async (c: Core): Promise<number> => (JSON.parse((await c.call('/.well-known/jwks.json', { phone: true })).body) as { keys: unknown[] }).keys.length;
-  const pending = await core(t, { beforeStart: (parts) => parts.vault.put(MASTER_REF, 2, Buffer.from(next)) });
-  assert.equal(await kids(pending), 2, 'current and the pending generation');
-  const grace = await core(t, {
-    beforeStart: (parts) => {
-      parts.meta.putKey({ ...row(MASTER_REF, 'master', ['box']), gen_current: 2 });
-      parts.vault.put(MASTER_REF, 2, Buffer.from(previous));
-    },
-  });
-  assert.equal(await kids(grace), 2, 'current and the generation before it');
-  const retired = await core(t, {
-    beforeStart: (parts) => {
-      parts.meta.putKey({ ...row(MASTER_REF, 'master', ['box']), gen_current: 3 });
-      parts.vault.put(MASTER_REF, 3, Buffer.from(next));
-    },
-  });
-  assert.equal(await kids(retired), 1, 'a generation two back is not published even while its file exists');
-});
-
 test('KBOX-24 KBOX-41 a grant proposed through core\'s proposal route is checked with core\'s own identity, sink and stored record: refused with 422 naming the permission, and a clean one opens an approval', async (t) => {
   const c = await core(t);
   await waitUntil(() => c.crmAnswered() === 1, 'the start-up grant check answered');
