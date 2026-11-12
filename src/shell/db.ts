@@ -97,7 +97,7 @@ const SCHEMA = `
 /** Core and relay share meta.db, so a wait for the write lock is not a failure; the box runs on one small CPU and a writer can wait a while. */
 export const BUSY_TIMEOUT_MS = 30000;
 
-const hex =(bytes: Uint8Array): string => Buffer.from(bytes).toString('hex');
+const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString('hex');
 
 /** Opens (and on first use creates) meta.db. The epoch is drawn once, when the file is created, and kept after that. */
 export function openMetaDatabase(path: string, random: Random): DatabaseSync {
