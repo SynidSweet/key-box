@@ -41,7 +41,7 @@ const text = (l: Lent): Promise<string> => bytesOf(l).then((b) => Buffer.from(b)
 
 function adapterOver(fake: FakeOpenAi): { readonly entry: PlatformEntry; readonly issuer: Issuer; readonly http: ReturnType<typeof adapterHttpTo> } {
   const http = adapterHttpTo(fake);
-  const entry = createOpenAiEntry({ http, clock: { now: () => 1_000_000 } });
+  const entry = createOpenAiEntry({ http });
   assert.ok(entry.issuer !== undefined && entry.lister !== undefined && entry.verifier !== undefined);
   return { entry, issuer: entry.issuer, http };
 }
@@ -120,7 +120,7 @@ test('KBOX-38 the key the platform makes with a new service account is deleted a
 test('KBOX-38 issue is refused with a fixed error for a scope with no project, a master scope and a project id that is not an id; nothing is sent', async (t) => {
   const { fake, issuer } = await fresh(t);
   for (const scope of [{}, { items: [] }, { items: ['organization:admin'] }, { items: ['project:../organization'] }, { items: ['project:a/b'] }, { items: ['project:'] }, { items: ['project:proj_a', 'project:proj_b'] }]) {
-    await assert.rejects(() => issuer.issue({ scope }, 'kbox_x_g1_aaaa1111', master()), /^Error: openai: bad_scope$/, JSON.stringify(scope));
+    await assert.rejects(() => issuer.issue({ scope }, 'kbox_x_g1_aaaa1111', master()), /^OpenAiError: openai: bad_scope$/, JSON.stringify(scope));
   }
   assert.equal(fake.calls.length, 0);
 });
@@ -286,7 +286,7 @@ test('KBOX-14 an issued value is a Lent: printing, inspecting and JSON of the is
 test('KBOX-14 a create answer with no usable value or id is a fixed bad_response', async (t) => {
   const { fake, issuer } = await fresh(t);
   fake.setMode('create-bad-shape');
-  await assert.rejects(() => issuer.issue({ scope: SCOPE }, 'kbox_shop_g1_aaaa1111', master()), /^Error: openai: bad_response$/);
+  await assert.rejects(() => issuer.issue({ scope: SCOPE }, 'kbox_shop_g1_aaaa1111', master()), /^OpenAiError: openai: bad_response/);
 });
 
 // --- the shape ------------------------------------------------------------------------------------------------------------------
@@ -405,11 +405,11 @@ test('KBOX-13 KBOX-25 KBOX-38 every mustDeny sample of the openai profile and ev
   assert.deepEqual(await leaks(t, widened(p), p.mustDeny), []);
 });
 
-test('KBOX-38 positive control: a profile that allows POST /v1/organization/{rest:**} is found by the same harness', async (t) => {
+test('KBOX-23 KBOX-38 positive control: a profile that allows POST /v1/organization/{rest:**} fails the registry check against these mustDeny samples', () => {
   const p = profile();
   const leaky: RelayProfile = { ...p, allow: [...p.allow, { id: 'org-anything', method: 'POST', host: 'api.openai.com', pathTemplate: '/v1/organization/{rest:**}', query: {} }], tailRules: ['org-anything'] };
-  const through = await leaks(t, leaky, p.mustDeny);
-  assert.ok(through.some((s) => s.startsWith('organization POST')), 'the harness saw the leak');
+  const base = must(adapterOver(must(shared)).entry);
+  assert.deepEqual(checkRegistry([{ ...base, relay: leaky }]), { ok: false, code: 'allow_matches_must_deny', platform: 'openai' });
 });
 
 test('KBOX-38 every operation of the profile reaches upstream with the key injected, the pass dropped and nothing else of the caller\'s authority', async (t) => {
@@ -439,7 +439,9 @@ test('KBOX-14 KBOX-38 an upstream 401 that quotes the key masked is replaced end
   const reply = await w.call(`/r/${OPENAI_REF}/v1/models`);
   assert.deepEqual([reply.status, reply.body.toString()], [401, upstreamRefusedBody()]);
   w.canary.assertAbsent({ body: reply.body, headers: JSON.stringify(reply.headers) });
-  assert.equal(scanForms(Buffer.from(value)).some((f) => reply.body.includes(f.bytes)), false);
+  const forms = scanForms(value);
+  assert.ok(forms.ok);
+  assert.equal(forms.forms.some((f) => reply.body.includes(f.bytes)), false);
 });
 
 const sdkRequest = JSON.parse(readFileSync(new URL('./fixtures/openai-sdk-request.json', import.meta.url), 'utf8')) as {
