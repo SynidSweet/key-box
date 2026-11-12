@@ -478,9 +478,9 @@ re-checks token, grant and rule id. Master values are lent only to issuer, verif
 lend handler, not by configuration. Indirect use is closed by `KBOX-13` and `KBOX-14`. Test (`test/lend.test.ts`): a master keyref is refused with no value
 sent; an ordinary keyref refused; a keyref without a grant refused; a revoked token refused; a rule id not in the profile refused; a lend call from a process
 the socket mode refuses (see `KBOX-45`); the lend response is a one-shot (a second read on the same connection gets nothing); core down makes the relay answer
-503 `unavailable`; the canary is absent from the relay's logs.
+503 `unavailable`; the canary is absent from the relay's logs. Every `keyref` on the lend socket (the requests, the grants answer, the relay audit row) has the stored keyref's shape (`NAME`), the one core looks up by equality.
 
-**`KBOX-13` Forwarding rules.** Source: design §4. The relay URL is `https://api.keys.<domain>/r/<keyref>/<path>`; the upstream origin is fixed by the key's
+**`KBOX-13` Forwarding rules.** Source: design §4. The relay URL is `https://api.keys.<domain>/r/<address>/<path>`, where `<address>` is the key's keyref in one path segment with each `/` written `~` (`openai/shop/OPENAI_KEY` → `openai~shop~OPENAI_KEY`; revision 2026-11-13: the earlier `[a-z0-9]{6,24}` matched no real keyref); the upstream origin is fixed by the key's
 profile (a `project-host` profile, Supabase, sends to `<ref>.<domain>` where the ref is the key's stored project from core's resolve answer and nothing else, `KBOX-57`; the Google profile takes the host as the first path segment, which must equal byte for byte one of the key's declared hosts: lowercase ASCII, no
 port, no `@`, no `%`, no trailing dot). In order:
 1. Read the caller's token from the profile's declared headers (`Authorization: Bearer`, `apikey`); if several declared headers are present they must carry
@@ -489,7 +489,7 @@ port, no `@`, no `%`, no trailing dot). In order:
 3. **Parse once, refuse ambiguity.** From the raw request target, 400 with no upstream call if the path has an encoded `/`, `\` or `.` (`%2F`, `%5C`, `%2E`,
    either case); `%00`, a control byte or a non-ASCII byte; a raw `\`, `;`, `#`; an empty segment (`//`); a `.` or `..` segment; a malformed `%` escape. The
    remaining percent escapes are decoded per segment; rules match the **decoded segments**; the forwarded path is the decoded segments re-encoded canonically
-   (RFC 3986 unreserved characters and the path characters `:` and `@` literal, everything else `%XX` upper case), so the path matched is the path sent.
+   (RFC 3986 unreserved characters and the path characters `:` and `@` literal, everything else `%XX` upper case), so the path matched is the path sent. The address segment is read raw and never decoded: it routes only when replacing each `~` by `/` gives a stored keyref's shape (`NAME`), so any `%` in it (an escaped `~`, `/` or `_` included) is 404 `not_found` with no call to core (that 404 is the relay's behaviour: whatever the edge does with an escaped address, core still checks the grant by equality), and each key has exactly one address (`~` is unreserved, RFC 3986 §2.3, and no keyref holds it).
    `:` stays literal because Google routes custom methods only on a literal colon: `documents:runQuery` reaches the method while `documents%3ArunQuery`
    is a 404 like a made-up verb (probe `google.colon-encoding`, 2026-11-12). A rule naming a literal `:` segment therefore matches a request that sent `%3A`
    too, and the request forwarded is the one the rule names.
@@ -549,14 +549,13 @@ Test (`test/registry.test.ts`): a fixture platform that breaks each check (inclu
 
 **`KBOX-32` The relay endpoint and the pass: what agents and `with-keys` rely on.** Source: design §2, §4; shapes decided here. A pass is a relay token as in
 `KBOX-10`, generated on the machine. It is carried in the profile's declared header(s) (OpenAI: `Authorization: Bearer <pass>`; Supabase: `apikey: <pass>`, and
-`Authorization: Bearer <pass>`, which supabase-js also sends; Google: `Authorization: Bearer <pass>`). Relay URL: `https://api.keys.<domain>/r/<keyref>/<path>`;
-Google: `/r/<keyref>/<host>/<path>`. `GET /r/_/grants` (relay token, carried in `Authorization: Bearer <pass>` or `apikey: <pass>`; both present must be equal, as in `KBOX-13` step 1) returns `{machine, grants:[{keyref, platform, name, projects, env}]}` where `env` is the
+`Authorization: Bearer <pass>`, which supabase-js also sends; Google: `Authorization: Bearer <pass>`). Relay URL: `https://api.keys.<domain>/r/<address>/<path>` (`<address>` as in `KBOX-13`);
+Google: `/r/<address>/<host>/<path>`. `GET /r/_/grants` (relay token, carried in `Authorization: Bearer <pass>` or `apikey: <pass>`; both present must be equal, as in `KBOX-13` step 1) returns `{machine, grants:[{keyref, platform, name, projects, env}]}` where `env` is the
 profile's `envForClients(relayUrl)` with the pass left as the literal `"<pass>"` (the client substitutes its own pass). The profiles' `envForClients`: OpenAI
 `{OPENAI_BASE_URL: <relay>/v1, OPENAI_API_KEY: "<pass>"}`; Supabase `{SUPABASE_URL: <relay>, SUPABASE_SECRET_KEY: "<pass>"}` (relay url is
-`https://api.keys.<domain>/r/<keyref>`); Google `{KBOX_GOOGLE_RELAY_URL: <relay>}` (no standard client variable exists; decided here). `_` is not a valid keyref
-(`[a-z0-9]{6,24}`). A pass works on `/r/*` only, never on `/api/*`. Test (`test/relay-contract.test.ts`): each profile's env map is pinned; a pass in the wrong header
-for its profile is 401; `/r/_/grants` lists only the granted keys of that machine and no value; a keyref of 5 or 25 characters or with an upper-case letter never
-routes; a pass for machine A does not list B's grants; the OpenAI SDK's own request shape (an `Authorization` header and a `/v1/...` path under the base URL) is
+`https://api.keys.<domain>/r/<address>`); Google `{KBOX_GOOGLE_RELAY_URL: <relay>}` (no standard client variable exists; decided here). `_` is not a valid address
+(no keyref starts with `_`). A pass works on `/r/*` only, never on `/api/*`. Test (`test/relay-contract.test.ts`): each profile's env map is pinned; a pass in the wrong header
+for its profile is 401; `/r/_/grants` lists only the granted keys of that machine and no value; a real keyref (`<platform>/<project>/<NAME>`) is listed with its address and relayed, and the audit row names the keyref; an address holding `%`, starting with `_` or `.`, or over 128 characters is 404 with no upstream call; a well-formed address of no key, or of a key not granted to the machine, is 403 with no upstream call; a pass for machine A does not list B's grants; the OpenAI SDK's own request shape (an `Authorization` header and a `/v1/...` path under the base URL) is
 replayed from a recorded fixture and reaches the matched rule.
 
 **`KBOX-47` The in-code egress gate.** Source: design §1.1, §1.5 (layer 3). Every outbound request of core and relay goes through one module. It refuses a host that is neither declared by a registered
@@ -907,6 +906,7 @@ R11 (database password rotation) waits for the deferred CI destination, which is
 | kernel-approve | KBOX-7, KBOX-8, KBOX-9, KBOX-11, KBOX-20, KBOX-22, KBOX-49, KBOX-53 | kernel-store | — |
 | update | KBOX-1, KBOX-6, KBOX-21, KBOX-44, KBOX-46, KBOX-48 | kernel-approve | — |
 | relay | KBOX-3, KBOX-13, KBOX-14, KBOX-23, KBOX-25, KBOX-32, KBOX-47 | kernel-approve, forms | — |
+| relay-ref | KBOX-3, KBOX-13, KBOX-32 | relay | — |
 | rotate | KBOX-12, KBOX-15, KBOX-16, KBOX-17, KBOX-34, KBOX-51, KBOX-52 | kernel-approve | — |
 | share | KBOX-18, KBOX-33 | kernel-store, forms | — |
 | google-a | KBOX-24, KBOX-41 | relay, rotate, shared-2 | — |
