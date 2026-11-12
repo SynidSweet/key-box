@@ -8,6 +8,7 @@ import { registryHostsOf } from '../pure/registry-entry.ts';
 import { systemScheduler } from './clock.ts';
 import { createEgress, createTlsConnector, systemResolver } from './egress.ts';
 import type { Egress } from './egress.ts';
+import { projectOriginsOf } from '../pure/project-host.ts';
 import { adapterHostsOf } from './relay-http.ts';
 
 const DEFAULT_HOSTS_FILE = new URL('../../deploy/egress-hosts.json', import.meta.url);
@@ -23,6 +24,7 @@ export function createSystemEgress(registry: readonly PlatformEntry[], listed: r
   return createEgress({
     adapterHosts: adapterHostsOf(registry),
     registryHosts: registryHostsOf(registry),
+    projectOrigins: projectOriginsOf(registry),
     listed,
     resolver: systemResolver,
     connector: createTlsConnector(),

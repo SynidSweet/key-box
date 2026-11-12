@@ -1,4 +1,4 @@
-// KBOX-3, KBOX-14, KBOX-50: core's side of the lend socket. Core re-checks every pass, grant and rule id the relay sends,
+// KBOX-3, KBOX-14, KBOX-50, KBOX-57: core's side of the lend socket. Core re-checks every pass, grant, rule id and project the relay sends,
 // and lends a value only for an admin key: the class check is here, in code, not in configuration, so a master or ordinary
 // value never reaches the relay. Responses are scanned here too, against every value the box holds (master values
 // included), so those values never leave core. The relay's audit rows are written here, closed.
@@ -9,6 +9,7 @@ import type { EventLog } from '../ports/events.ts';
 import type { MetaKey, MetaStore, TokenRecord, TokenStore } from '../ports/meta.ts';
 import type { PlatformEntry } from '../ports/platform.ts';
 import type { RelayProfile } from '../ports/relay-profile.ts';
+import type { KeyLocation } from '../ports/types.ts';
 import type { Vault } from '../ports/vault.ts';
 import { VaultError } from '../pure/errors.ts';
 import { scanForms } from '../pure/forms.ts';
@@ -35,6 +36,8 @@ export interface LendCoreDeps {
   readonly minted: MintedValues;
   /** A fixed code when core could not do part of its job. Never text of a value or a key. */
   readonly journal: (code: string) => void;
+  /** KBOX-57: the key's stored location (its rotation record), read at every resolve and lend; undefined when none is stored. */
+  readonly locationOf: (keyref: string) => KeyLocation | undefined;
 }
 
 type Checked<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly code: LendRefusal };
@@ -71,6 +74,23 @@ export function createLendHandler(deps: LendCoreDeps): LendHandler {
     const profile = profileOf(key.platform);
     if (profile === undefined || !profile.allow.some((r) => r.id === ruleId)) return false;
     return key.allow_rules.length === 0 || key.allow_rules.includes(ruleId);
+  };
+
+  /**
+   * KBOX-3, KBOX-57: the project a resolve answers and a lend must name. A project-host profile takes the key's stored project and nothing
+   * else (never its `projects`), and a key of such a profile with none stored has no place (`unplaced`); any other profile takes none.
+   */
+  type Placement = { readonly kind: 'placed'; readonly project: string | undefined } | { readonly kind: 'unplaced' };
+  const placementOf = (key: MetaKey): Placement => {
+    if (profileOf(key.platform)?.origin.kind !== 'project-host') return { kind: 'placed', project: undefined };
+    const project = deps.locationOf(key.keyref)?.project;
+    return project === undefined ? { kind: 'unplaced' } : { kind: 'placed', project };
+  };
+
+  /** A request whose place is not the key's stored one: `forbidden`, with the audit row `location_mismatch` naming the key and the op. */
+  const refuseMismatch = (session: LendSession, label: string, keyref: string, op: 'resolve' | 'lend'): void => {
+    deps.audit.append({ action: 'lend.refused', subject: keyref, actor: label, at: deps.clock.now(), detail: { op, code: 'location_mismatch' } });
+    session.reply(refusalMessage('forbidden'));
   };
 
   /** What the vault holds for one generation: its forms, nothing (not stored), or a value no form can be built of. */
@@ -148,7 +168,10 @@ export function createLendHandler(deps: LendCoreDeps): LendHandler {
       case 'resolve': {
         deps.tokens.recordUse(record.value.label, request.network);
         const key = grantedKey(record.value, request.keyref);
-        return session.reply(key.ok ? { ok: 'true', label: record.value.label, platform: key.value.platform } : refusalMessage(key.code));
+        if (!key.ok) return session.reply(refusalMessage(key.code));
+        const placed = placementOf(key.value);
+        if (placed.kind === 'unplaced') return refuseMismatch(session, record.value.label, request.keyref, 'resolve');
+        return session.reply({ ok: 'true', label: record.value.label, platform: key.value.platform, ...(placed.project === undefined ? {} : { project: placed.project }) });
       }
       case 'grants': {
         deps.tokens.recordUse(record.value.label, request.network);
@@ -160,7 +183,11 @@ export function createLendHandler(deps: LendCoreDeps): LendHandler {
       }
       case 'lend': {
         const key = grantedKey(record.value, request.keyref);
-        if (!key.ok || !lendable(key.value, request.rule_id) || !(await scannable(key.value))) return session.reply(refusalMessage('forbidden'));
+        if (!key.ok || !lendable(key.value, request.rule_id)) return session.reply(refusalMessage('forbidden'));
+        // KBOX-57: the place is read again here, so a key re-made elsewhere since the resolve never has its value sent to the earlier host.
+        const placed = placementOf(key.value);
+        if (placed.kind === 'unplaced' || placed.project !== request.project) return refuseMismatch(session, record.value.label, request.keyref, 'lend');
+        if (!(await scannable(key.value))) return session.reply(refusalMessage('forbidden'));
         return deps.vault.lend(key.value.keyref, key.value.gen_current).use((bytes) => {
           session.replyBytes(bytes);
           return Promise.resolve();

@@ -228,6 +228,8 @@ export const AUDIT_SCHEMAS = {
   'push.failed': { code: text(CODE), status: optional(int(100, 599)) },
   /** An orphan temp file of a vault write was zero-filled and removed at start; the row's ref is the key, nothing else is recorded. */
   'vault.temp_swept': {},
+  /** KBOX-3, KBOX-57: core refused a resolve or lend whose place is not the key's stored project (or a project-host key with none stored); the row's ref is the keyref, its actor the pass's label. */
+  'lend.refused': { op: oneOf('resolve', 'lend'), code: oneOf('location_mismatch') },
   // relay (KBOX-13 step 9, KBOX-50): one row per relayed request; the row's ref is the keyref (or the route) and its actor the
   // pass's label. The query, the path and every body are left out; `rule_id` names the operation.
   'relay.request': {

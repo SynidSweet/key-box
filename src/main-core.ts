@@ -215,7 +215,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   // Platform adapters register the short-lived values they mint here, so the scanner holds them while they live (KBOX-14).
   const minted = createMintedValues(clock);
   const lend = createLendServer(
-    createLendHandler({ meta: parts.meta, tokens: approve?.tokens.tokenStore ?? parts.meta, vault: parts.vault, audit: parts.audit, events: parts.events, registry, shapes: loadCredentialShapes(), clock, minted, journal }),
+    createLendHandler({ meta: parts.meta, tokens: approve?.tokens.tokenStore ?? parts.meta, vault: parts.vault, audit: parts.audit, events: parts.events, registry, shapes: loadCredentialShapes(), clock, minted, journal, locationOf: (keyref) => readKeyInfo(parts.db, keyref)?.location }),
     journal,
   );
   if (config.lendSocket === undefined) journal('no_lend_socket');

@@ -27,6 +27,8 @@ import type { LendClient, ScanSession } from './lend-socket.ts';
 
 /** Request bodies up to 32 MiB are relayed; larger ones are 413 (KBOX-13 step 7). */
 export const REQUEST_BODY_LIMIT = 32 * 1024 * 1024;
+// KBOX-14: the items form of Content-Range (0-24/* or */0): digits only, no unit word.
+const ITEMS_RANGE = /^(?:\d+-\d+|\*)\/(?:\d+|\*)$/;
 const GRANTS_PATH = '/r/_/grants';
 /** Methods whose empty body is still declared as `Content-Length: 0`. */
 const BODY_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH']);
@@ -48,7 +50,11 @@ export interface RelayServer {
 
 /** Every host a registered relay profile names: the egress gate's adapter hosts for relay calls. */
 export const adapterHostsOf = (registry: readonly PlatformEntry[]): string[] =>
-  registry.flatMap((e) => (e.relay === undefined ? [] : e.relay.origin.kind === 'fixed' ? [e.relay.origin.host] : [...e.relay.origin.hosts]));
+  registry.flatMap((e) => {
+    const origin = e.relay?.origin;
+    if (origin === undefined || origin.kind === 'project-host') return [];
+    return origin.kind === 'fixed' ? [origin.host] : [...origin.hosts];
+  });
 
 /** A refusal at any step: the code decides the answer. */
 class Refused extends Error {
@@ -230,21 +236,22 @@ export function createRelayServer(deps: RelayDeps): RelayServer {
     if (engine === undefined) throw new Refused('forbidden');
     if (!pass.carriers.every((h) => (engine.profile.callerTokenHeaders as readonly string[]).includes(h))) throw new Refused('bad_token');
     if (METHOD_OVERRIDE_HEADERS.some((h) => req.headers[h] !== undefined)) throw new Refused('method_override');
-    const decision = engine.decide(req.method ?? '', target);
+    const decision = engine.decide(req.method ?? '', target, resolved.project);
     if (!decision.ok) throw new Refused('forbidden');
     trace.ruleId = decision.rule.id;
     const headers = forwardedHeaders(engine.profile, req.headers);
     const body = await readBody(req);
-    return { engine, decision, headers, body, tokenHash };
+    // KBOX-57: the lend names the project the upstream host was built from, so core can refuse a key whose stored place has changed since.
+    return { engine, decision, headers, body, tokenHash, project: resolved.project };
   }
 
   async function relay(req: IncomingMessage, res: ServerResponse, trace: Trace, source: ClientAddress, target: RelayTarget, abort: AbortSignal): Promise<void> {
-    const { engine, decision, headers, body, tokenHash } = await admit(req, trace, source, target);
-    const lent = await deps.lend.lend({ op: 'lend', token_hash: tokenHash, keyref: target.keyref, rule_id: decision.rule.id });
+    const { engine, decision, headers, body, tokenHash, project } = await admit(req, trace, source, target);
+    const lent = await deps.lend.lend({ op: 'lend', token_hash: tokenHash, keyref: target.keyref, rule_id: decision.rule.id, ...(project === undefined ? {} : { project }) });
     if (!lent.ok) throw new Refused(lent.code === 'bad_token' ? 'bad_token' : 'forbidden');
     headers.set('accept-encoding', 'identity');
     if (body.length > 0 || BODY_METHODS.has(req.method ?? '')) headers.set('content-length', String(body.length));
-    headers.set('host', decision.request.host);
+    headers.set('host', decision.request.upstream);
     await engine.profile.inject(headers, lent.value);
     const opened = await deps.lend.scan({ op: 'scan', token_hash: tokenHash, keyref: target.keyref });
     if (!opened.ok) throw new Refused('forbidden');
@@ -252,7 +259,7 @@ export function createRelayServer(deps: RelayDeps): RelayServer {
     try {
       const query = canonicalQuery(decision.request.query);
       const path = `${canonicalPath(decision.request.segments)}${query === '' ? '' : `?${query}`}`;
-      const upstream = await callUpstream(decision.request.host, req.method ?? 'GET', path, headers, body, abort);
+      const upstream = await callUpstream(decision.request.upstream, req.method ?? 'GET', path, headers, body, abort);
       await answer(res, engine.profile, upstream, scan, trace);
     } finally {
       scan.close();
@@ -278,7 +285,8 @@ export function createRelayServer(deps: RelayDeps): RelayServer {
   /** Step 8: the response through the scanner. Headers and body are one stream; the head is sent once its bytes are released. */
   async function answer(res: ServerResponse, profile: RelayProfile, upstream: IncomingMessage, scan: ScanSession, trace: Trace): Promise<void> {
     const status = upstream.statusCode ?? 502;
-    if (status === 206 || upstream.headers['content-range'] !== undefined) {
+    const range = upstream.headers['content-range'];
+    if (status === 206 || (range !== undefined && !(profile.itemsRange === true && ITEMS_RANGE.test(range)))) {
       upstream.destroy();
       throw new Refused('withheld', 'partial');
     }

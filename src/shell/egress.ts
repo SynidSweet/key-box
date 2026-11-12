@@ -9,6 +9,7 @@ import type { Duplex } from 'node:stream';
 import type { Scheduler } from '../ports/clock.ts';
 import { addressRefused, hostVerdict } from '../pure/egress-policy.ts';
 import type { Caller, EgressHost } from '../pure/egress-policy.ts';
+import type { ProjectOrigin } from '../pure/project-host.ts';
 
 export type { Caller } from '../pure/egress-policy.ts';
 
@@ -55,6 +56,8 @@ export interface EgressDeps {
   readonly adapterHosts: readonly string[];
   /** The registry entries' own hosts (`PlatformEntry.hosts`): served to caller `adapter` only. */
   readonly registryHosts?: readonly string[];
+  /** The relay profiles' project-host origins: served to caller `relay` only, one ref label under the domain (never a wildcard). */
+  readonly projectOrigins?: readonly ProjectOrigin[];
   readonly listed: readonly EgressHost[];
   readonly resolver: Resolver;
   readonly connector: Connector;
@@ -151,7 +154,7 @@ export function createEgress(deps: EgressDeps): Egress {
   return {
     async open(caller, url, signal) {
       if (url.protocol !== 'https:' || url.port !== '' || url.username !== '' || url.password !== '') throw new EgressRefused('bad_url');
-      const verdict = hostVerdict(caller, url.hostname, deps.adapterHosts, deps.listed, deps.registryHosts);
+      const verdict = hostVerdict(caller, url.hostname, deps.adapterHosts, deps.listed, deps.registryHosts, deps.projectOrigins);
       if (verdict !== 'allowed') throw new EgressRefused(verdict);
       if (signal.aborted) throw new EgressRefused('resolve_failed');
       const address = await resolveOnce(url.hostname, signal);
