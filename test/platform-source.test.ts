@@ -177,7 +177,8 @@ test('KBOX-51 a master row whose current generation cannot be lent (a failed cre
   assert.equal(await pick(w, 'fake', { project: 'shop' }), 'working-master');
 });
 
-test('KBOX-51 KBOX-57 with a master row per stored location, a key gets the master of its own location, never the other location\'s', async (t) => {
+test('KBOX-51 with a master row per project, a key gets its own project\'s master, never the other project\'s', async (t) => {
+  // KBOX-57: "per project" is the row's stored location (`{project}`), never its `projects` list.
   const w = await world(t);
   putMaster(w, 'fake/other/MASTER', { at: { project: 'other' }, value: 'other-master' });
   putMaster(w, 'fake/shop/MASTER', { at: { project: 'shop' }, value: 'shop-master' });
