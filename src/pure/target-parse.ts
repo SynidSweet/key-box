@@ -106,15 +106,18 @@ export function parseRelayTarget(target: string): TargetParse {
   return { ok: true, value: { keyref, segments: path.segments, rawSegments: path.raw, query } };
 }
 
-/** RFC 3986 unreserved characters literal, every other byte `%XX` upper case. */
-function encodeCanonical(text: string): string {
+/** RFC 3986 unreserved characters and the `extraLiteral` ones literal, every other byte `%XX` upper case. */
+function encodeCanonical(text: string, extraLiteral: string): string {
   let out = '';
   for (const ch of text) {
-    out += UNRESERVED.test(ch) ? ch : [...Buffer.from(ch, 'utf8')].map((b) => `%${b.toString(16).toUpperCase().padStart(2, '0')}`).join('');
+    out += UNRESERVED.test(ch) || extraLiteral.includes(ch) ? ch : [...Buffer.from(ch, 'utf8')].map((b) => `%${b.toString(16).toUpperCase().padStart(2, '0')}`).join('');
   }
   return out;
 }
 
-export const canonicalPath = (segments: readonly string[]): string => `/${segments.map(encodeCanonical).join('/')}`;
+/** Path characters kept literal (KBOX-13 step 3): Google routes a custom method (`documents:runQuery`) only on a literal colon. */
+const PATH_LITERAL = ':@';
 
-export const canonicalQuery = (pairs: readonly QueryPair[]): string => pairs.map(([name, value]) => `${encodeCanonical(name)}=${encodeCanonical(value)}`).join('&');
+export const canonicalPath = (segments: readonly string[]): string => `/${segments.map((s) => encodeCanonical(s, PATH_LITERAL)).join('/')}`;
+
+export const canonicalQuery = (pairs: readonly QueryPair[]): string => pairs.map(([name, value]) => `${encodeCanonical(name, '')}=${encodeCanonical(value, '')}`).join('&');

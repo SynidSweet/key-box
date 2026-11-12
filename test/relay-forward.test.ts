@@ -11,7 +11,7 @@ import { createLendClient } from '../src/shell/lend-socket.ts';
 import { createRelayServer } from '../src/shell/relay-http.ts';
 import { waitUntil } from './kit/index.ts';
 import { pathProfile } from './fixtures/profiles.ts';
-import { PROJECT_REGISTRY } from './fixtures/profiles.ts';
+import { PROJECT_REGISTRY, TEST_REGISTRY } from './fixtures/profiles.ts';
 import { relayWorld } from './support/relay-world.ts';
 import type { CallOptions, RelayWorld } from './support/relay-world.ts';
 
@@ -67,7 +67,8 @@ test('KBOX-13 escapes are decoded once per segment, rules see the decoded segmen
   const target = parsed(`/r/${KEYREF}/v1/%6Frganization/a~b_c.d-e/x%3Ay%40z`);
   assert.equal(target.keyref, KEYREF);
   assert.deepEqual(target.segments, ['v1', 'organization', 'a~b_c.d-e', 'x:y@z']);
-  assert.equal(canonicalPath(target.segments), '/v1/organization/a~b_c.d-e/x%3Ay%40z');
+  // as of the KBOX-13 colon ruling the path keeps : and @ literal
+  assert.equal(canonicalPath(target.segments), '/v1/organization/a~b_c.d-e/x:y@z');
 });
 
 test('KBOX-13 the canonical encoding is idempotent: parsing a canonical path gives the same segments (round trip)', () => {
@@ -413,4 +414,27 @@ test('KBOX-13 a stored project that is not a ref of the profile (the relay re-ch
     assert.equal(reply.status, 403, project);
     assert.deepEqual([w.connects, w.upstream.requests.length], [[], 0], project);
   }
+});
+
+test('KBOX-13 step 3 the canonical path keeps : and @ literal and encodes every other reserved or non-ASCII character as %XX upper case', () => {
+  assert.equal(canonicalPath(['x:y@z']), '/x:y@z');
+  assert.equal(canonicalPath(['documents:runQuery']), '/documents:runQuery');
+  for (const [ch, enc] of [['/', '%2F'], [' ', '%20'], ['%', '%25'], ['?', '%3F'], ['#', '%23'], ['é', '%C3%A9'], ['!', '%21'], ['$', '%24'], ['&', '%26'], ["'", '%27'], ['(', '%28'], [')', '%29'], ['*', '%2A'], ['+', '%2B'], [',', '%2C'], [';', '%3B'], ['=', '%3D']] as const) {
+    assert.equal(canonicalPath([`a${ch}b`]), `/a${enc}b`, ch);
+  }
+});
+
+test('KBOX-13 step 4 the canonical query still encodes : and @ in names and values as %3A and %40', () => {
+  assert.equal(canonicalQuery([['a:b', 'c@d']]), 'a%3Ab=c%40d');
+});
+
+test('KBOX-13 step 3 documents%3ArunQuery and documents:runQuery both match the literal rule and go upstream as documents:runQuery', async (t) => {
+  const colonRule = { id: 'doc-query', method: 'POST', host: pathProfile.allow[0]?.host ?? '', pathTemplate: '/v1/documents:runQuery', query: {} } as const;
+  const profile = { ...pathProfile, allow: [...pathProfile.allow, colonRule] };
+  const registry = TEST_REGISTRY.map((e) => (e.id === profile.platform ? { ...e, relay: profile } : e));
+  const w = await relayWorld(t, { registry });
+  for (const spelling of ['documents%3ArunQuery', 'documents:runQuery']) {
+    assert.equal((await w.call(`${PATH}/v1/${spelling}`, { method: 'POST' })).status, 200, spelling);
+  }
+  assert.deepEqual(w.upstream.requests.map((r) => r.url), ['/v1/documents:runQuery', '/v1/documents:runQuery']);
 });
