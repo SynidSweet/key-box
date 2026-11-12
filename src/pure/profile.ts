@@ -3,7 +3,7 @@
 // check uses the same parse and the same engine, so what the box refuses at startup is exactly what the relay would let through.
 import type { PlatformEntry } from '../ports/platform.ts';
 import type { AllowRule, DenyRule, RelayProfile, SampleRequest } from '../ports/relay-profile.ts';
-import { checkDestinationKinds, checkHosts, checkShapeSource } from './registry-entry.ts';
+import { checkDestinationKinds, checkHosts, checkLocationFields, checkShapeSource } from './registry-entry.ts';
 import type { EntryFailure } from './registry-entry.ts';
 import { compileTemplate, matchTemplate, queryFits } from './rule-match.ts';
 import type { Template } from './rule-match.ts';
@@ -253,7 +253,7 @@ function checkRelaySide(entry: PlatformEntry): RegistryFailure | undefined {
   return checkRelay(entry.relay);
 }
 
-const checkEntry = (entry: PlatformEntry): RegistryFailure | undefined => checkRelaySide(entry) ?? checkShapeSource(entry) ?? checkHosts(entry);
+const checkEntry = (entry: PlatformEntry): RegistryFailure | undefined => checkRelaySide(entry) ?? checkShapeSource(entry) ?? checkHosts(entry) ?? checkLocationFields(entry);
 
 /** KBOX-23: every check the box runs before it starts; the first failure names its platform. */
 export function checkRegistry(entries: readonly PlatformEntry[]): RegistryCheck {
