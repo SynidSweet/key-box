@@ -21,7 +21,8 @@ export async function call(http: AdapterHttp, key: Lent, method: 'GET' | 'POST',
     if (body !== undefined) headers['content-type'] = 'application/json';
     try {
       const answer = await http.request({ method, url: `${ORIGIN}${pathAndQuery}`, headers, ...(body === undefined ? {} : { body: Buffer.from(JSON.stringify(body)) }) });
-      return { status: answer.status, json: parse(answer.body) };
+      const parsed = parse(answer.body);
+      return { status: answer.status, json: parsed.ok ? parsed.value : undefined };
     } catch (error) {
       if (error instanceof HttpTransportError) throw new AnthropicError('unreachable');
       throw new AnthropicError('http_error');
@@ -29,12 +30,12 @@ export async function call(http: AdapterHttp, key: Lent, method: 'GET' | 'POST',
   });
 }
 
-/** The body as JSON, or undefined when it is not (the caller then treats the answer as having no usable body). */
-function parse(body: Uint8Array): unknown {
+/** The body as JSON, or `ok: false` when it is not (the caller then treats the answer as having no usable body). */
+function parse(body: Uint8Array): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
   try {
-    return JSON.parse(Buffer.from(body).toString('utf8'));
+    return { ok: true, value: JSON.parse(Buffer.from(body).toString('utf8')) };
   } catch {
-    return undefined;
+    return { ok: false };
   }
 }
 

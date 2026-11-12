@@ -27,7 +27,6 @@ import { verifierContract } from './contracts/verifier.contract.ts';
 import { routesWorld } from './support/routes-world.ts';
 import type { PasteView, RoutesWorld } from './support/routes-world.ts';
 
-const clock = { now: () => 0 };
 const L = (text: string): Lent => lent(Buffer.from(text), 'test:1');
 /** A synthetic ordinary Anthropic key; `tag` (4 characters) is the end of the value, so it is what `partial_key_hint` tells keys apart by. */
 const ordinary = (tag: string): string => `sk-ant-api03-kbox-test-${'x'.repeat(40)}${tag}`;
@@ -46,12 +45,12 @@ async function anthropic(t: Teardown): Promise<Anthropic> {
   const api = await fakeAnthropic(t);
   api.admins.add(ADMIN);
   const http = adapterHttpTo(api);
-  return { api, http, entry: createAnthropicEntry({ http, clock }) };
+  return { api, http, entry: createAnthropicEntry({ http }) };
 }
 async function stripe(t: Teardown): Promise<{ api: FakeStripe; http: FakeAdapterHttp; entry: PlatformEntry }> {
   const api = await fakeStripe(t);
   const http = adapterHttpTo(api);
-  return { api, http, entry: createStripeEntry({ http, clock }) };
+  return { api, http, entry: createStripeEntry({ http }) };
 }
 const verifierOf = (entry: PlatformEntry): Verifier => {
   if (entry.verifier === undefined) throw new RangeError('entry has no verifier');
@@ -145,10 +144,10 @@ test('KBOX-40 Anthropic verifier: 200 ok, 401 and 403 rejected, a cut connection
 test('KBOX-40 KBOX-14 Anthropic verifier: every transport failure code is unreachable, and an answer that says nothing about the key (404, 429, 5xx) is unreachable too', async () => {
   for (const code of ['refused', 'unreachable', 'timeout', 'too_large', 'malformed'] as const) {
     const down = { request: () => Promise.reject(new HttpTransportError(code)) };
-    assert.equal(await verifierOf(createAnthropicEntry({ http: down, clock })).verify(L(ordinary('ABCD')), ANTHROPIC), 'unreachable', code);
+    assert.equal(await verifierOf(createAnthropicEntry({ http: down })).verify(L(ordinary('ABCD')), ANTHROPIC), 'unreachable', code);
   }
   for (const status of [404, 429, 500, 503]) {
-    assert.equal(await verifierOf(createAnthropicEntry({ http: answering(status), clock })).verify(L(ordinary('ABCD')), ANTHROPIC), 'unreachable', String(status));
+    assert.equal(await verifierOf(createAnthropicEntry({ http: answering(status) })).verify(L(ordinary('ABCD')), ANTHROPIC), 'unreachable', String(status));
   }
 });
 
@@ -195,10 +194,10 @@ test('KBOX-40 Stripe verifier: 200 ok, 401 rejected, a 403 moves on to the next 
 test('KBOX-40 KBOX-14 Stripe verifier: every transport failure code and an answer that says nothing about the key (404, 429, 5xx) is unreachable', async () => {
   for (const code of ['refused', 'unreachable', 'timeout', 'too_large', 'malformed'] as const) {
     const down = { request: () => Promise.reject(new HttpTransportError(code)) };
-    assert.equal(await verifierOf(createStripeEntry({ http: down, clock })).verify(L(restricted('ABCD')), STRIPE), 'unreachable', code);
+    assert.equal(await verifierOf(createStripeEntry({ http: down })).verify(L(restricted('ABCD')), STRIPE), 'unreachable', code);
   }
   for (const status of [404, 429, 500, 503]) {
-    assert.equal(await verifierOf(createStripeEntry({ http: answering(status), clock })).verify(L(restricted('ABCD')), STRIPE), 'unreachable', String(status));
+    assert.equal(await verifierOf(createStripeEntry({ http: answering(status) })).verify(L(restricted('ABCD')), STRIPE), 'unreachable', String(status));
   }
 });
 
@@ -409,14 +408,15 @@ test('KBOX-14 a platform answer that quotes the key never reaches an error: veri
   const secret = `sk-ant-admin01-${Buffer.from(c.bytes).toString('hex')}`;
   const surfaces: Record<string, string> = {};
   const note = (name: string, value: unknown): void => void (surfaces[name] = typeof value === 'string' ? value : JSON.stringify(value));
-  const caught = async (name: string, call: () => Promise<unknown>): Promise<void> => {
+  const outcome = async (call: () => Promise<unknown>): Promise<unknown> => {
     try {
-      note(name, await call());
+      return await call();
     } catch (error) {
       assert.ok(error instanceof Error);
-      note(name, [error.name, error.message, error.stack ?? '', JSON.stringify(error), String(error.cause ?? '')].join('|'));
+      return [error.name, error.message, error.stack ?? '', JSON.stringify(error), String(error.cause ?? '')].join('|');
     }
   };
+  const caught = async (name: string, call: () => Promise<unknown>): Promise<void> => note(name, await outcome(call));
   await caught('anthropic verify', () => verifierOf(entry).verify(L(secret), ANTHROPIC));
   await caught('anthropic list', () => listerOf(entry).list(L(secret)));
   await caught('anthropic listAt', () => listerOf(entry).listAt({}, L(secret)));

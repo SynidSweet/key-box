@@ -1,7 +1,7 @@
 // KBOX-40: the Anthropic adapter. Paste-only (the platform's keys are made in its console): the entry states its shape and class, verifies
 // a pasted key, lists keys with the admin key, and `createAnthropicRetirer` retires the old key after a paste rotation. No relay profile.
 import type { PlatformEntry } from '../../ports/platform.ts';
-import type { RegistryDeps } from '../registry.ts';
+import type { AdapterHttp } from '../../ports/http.ts';
 import { createAnthropicLister } from './lister.ts';
 import { ANTHROPIC_SHAPE, classifyAnthropic } from './shape.ts';
 import { createAnthropicVerifier } from './verifier.ts';
@@ -12,7 +12,7 @@ export type { AnthropicRetirer } from './retire.ts';
 export { AnthropicError } from './errors.ts';
 export { ANTHROPIC_SHAPE } from './shape.ts';
 
-export function createAnthropicEntry(deps: RegistryDeps): PlatformEntry {
+export function createAnthropicEntry(deps: { readonly http: AdapterHttp }): PlatformEntry {
   return {
     id: 'anthropic',
     verifier: createAnthropicVerifier(deps.http),
