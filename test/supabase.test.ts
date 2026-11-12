@@ -4,10 +4,12 @@ import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import type { TestContext } from 'node:test';
 import { HttpTransportError } from '../src/ports/http.ts';
-import type { AdapterHttp } from '../src/ports/http.ts';
+import type { AdapterHttp, HttpRequest } from '../src/ports/http.ts';
+import type { Issuer, Verifier } from '../src/ports/issuer.ts';
 import type { PlatformEntry } from '../src/ports/platform.ts';
 import type { AllowRule, DenyRule, RelayProfile } from '../src/ports/relay-profile.ts';
 import type { KeyLocation, Lent } from '../src/ports/types.ts';
+import { matchesShape } from '../src/pure/class.ts';
 import { assess } from '../src/pure/coverage.ts';
 import { checkLocation } from '../src/pure/location.ts';
 import { checkRegistry, compileProfile, refuseWidening } from '../src/pure/profile.ts';
@@ -21,13 +23,14 @@ import { destinationContract } from './contracts/destination.contract.ts';
 import { issuerContract } from './contracts/issuer.contract.ts';
 import { listerContract } from './contracts/lister.contract.ts';
 import { relayProfileContract } from './contracts/relay-profile.contract.ts';
+import { verifierContract } from './contracts/verifier.contract.ts';
 import { MASTER_TEXT, OTHER_REF, REF, WRONG_TEXT, startFakeSupabase } from './fakes/supabase.ts';
 import { TEST_REGISTRY, variants } from './fixtures/profiles.ts';
 import { adapterHttpTo, bytesOf, canary, lent } from './kit/index.ts';
 import type { FakeAdapterHttp } from './kit/index.ts';
 import { relayWorld } from './support/relay-world.ts';
 import { routesWorld } from './support/routes-world.ts';
-import type { RoutesWorld } from './support/routes-world.ts';
+import type { PasteView, RoutesWorld } from './support/routes-world.ts';
 
 const fake = await startFakeSupabase();
 after(() => fake.close());
@@ -96,11 +99,11 @@ test('KBOX-37 KBOX-57 the entry declares the project as its one location: 20 low
   assert.equal(checkLocation(entry.location, AT, 'admin', [`project:${REF}`]), 'location_in_scope', 'a project: scope item is a second placement source');
 });
 
-test('KBOX-37 the entry states what it is: hosts, an issuer that reveals once with a lister, a location prover, no verifier, one secrets destination readable by api, and it passes the registry checks', () => {
+test('KBOX-37 the entry states what it is: hosts, an issuer that reveals once with a lister, a location prover, a verifier for the master, one secrets destination readable by api, and it passes the registry checks', () => {
   const s = subject();
   assert.deepEqual(s.entry.hosts, ['api.supabase.com']);
   assert.equal(s.issuer.capabilities().revealOnce, true);
-  assert.equal(s.entry.verifier, undefined);
+  assert.notEqual(s.entry.verifier, undefined);
   assert.equal(s.destination.kind, 'supabase-secret');
   assert.deepEqual(s.destination.properties(), { readableBy: 'api', needsRedeploy: false });
   assert.deepEqual(s.entry.relay?.origin, { kind: 'project-host', domain: 'supabase.co', refLength: 20 });
@@ -590,4 +593,164 @@ test('KBOX-37 a host carried in the path is not a way to another project: it is 
   assert.equal((await w.call(`/r/${KEYREF}/${OTHER_HOST}/rest/v1/items`)).status, 403);
   assert.equal(w.upstream.requests.length, before);
   assert.deepEqual(w.connects, []);
+});
+
+// ---------------------------------------------------------------- the verifier of the master token (KBOX-37, KBOX-58)
+
+/** A personal access token of the assumed shape: `sbp_` and 40 hex characters (UNVERIFIED supabase.pat-shape). Synthetic. */
+const pat = (n: number): string => `sbp_${n.toString(16).padStart(40, '0')}`;
+const lentText = (text: string): Lent => lent(Buffer.from(text), 'value:1');
+const ACCOUNT = { platform: 'supabase', at: {} } as const;
+
+function verifierOver(http: AdapterHttp): Verifier {
+  const verifier = entryOver(http).verifier;
+  if (verifier === undefined) throw new Error('the entry has no verifier');
+  return verifier;
+}
+
+/** An AdapterHttp that answers every request with this status and body, recording each request. */
+function answering(status: number, body: string): AdapterHttp & { readonly sent: HttpRequest[] } {
+  const sent: HttpRequest[] = [];
+  return {
+    sent,
+    request: (req) => {
+      sent.push(req);
+      return Promise.resolve({ status, headers: { 'content-type': 'application/json' }, body: Buffer.from(body) });
+    },
+  };
+}
+
+test('KBOX-37 KBOX-58 the master verifier answers by the table: a 200 JSON array (empty too) is ok, a 401 with Supabase\'s JSON error object is rejected, anything else is unreachable, never rejected', async () => {
+  const rows: [number, string, string][] = [
+    [200, '[]', 'ok'],
+    [200, JSON.stringify([{ ref: REF, name: 'kbox-test' }]), 'ok'],
+    [200, '{"ref":"x"}', 'unreachable'],
+    [200, 'not json', 'unreachable'],
+    [200, '', 'unreachable'],
+    [401, '{"message":"Unauthorized"}', 'rejected'],
+    // L6: a 401 that is not the platform's own error object (an edge, a proxy) is no proof of death.
+    [401, '<html>401 Authorization Required</html>', 'unreachable'],
+    [401, '', 'unreachable'],
+    [401, '[{"message":"x"}]', 'unreachable'],
+    [401, '{"error":"unauthorized"}', 'unreachable'],
+    [401, '{"message":401}', 'unreachable'],
+    // 403 is a WAF or an edge block as often as a refusal: never rejected, so never a false proof of death.
+    [403, '{"message":"Forbidden"}', 'unreachable'],
+    [404, '{"message":"not found"}', 'unreachable'],
+    [429, '{"message":"rate limited"}', 'unreachable'],
+    [500, '{"message":"internal"}', 'unreachable'],
+    [503, '', 'unreachable'],
+    [302, '', 'unreachable'],
+  ];
+  for (const [status, body, verdict] of rows) assert.equal(await verifierOver(answering(status, body)).verify(lentText(pat(1)), ACCOUNT), verdict, `${status} ${body}`);
+  assert.equal(await verifierOver(DOWN).verify(lentText(pat(1)), ACCOUNT), 'unreachable', 'a transport failure');
+});
+
+test('KBOX-37 KBOX-58 the master verifier asks exactly GET https://api.supabase.com/v1/projects with the value under test as the bearer, whatever location it is given', async () => {
+  fake.reset();
+  fake.masterText = pat(2);
+  const http = adapterHttpTo(fake);
+  assert.equal(await verifierOver(http).verify(lentText(pat(2)), { platform: 'supabase', at: AT }), 'ok');
+  assert.equal(await verifierOver(http).verify(lentText(pat(3)), ACCOUNT), 'rejected', 'a token the platform does not know: its 401 error object');
+  assert.deepEqual(http.sent.map((r) => [r.method, r.originalHost, r.target, r.headers['authorization']]), [
+    ['GET', 'api.supabase.com', '/v1/projects', `Bearer ${pat(2)}`],
+    ['GET', 'api.supabase.com', '/v1/projects', `Bearer ${pat(3)}`],
+  ]);
+});
+
+test('KBOX-37 KBOX-58 a value not of the token shape never leaves: an sb_secret_ key, 39 or 41 hex, upper-case or non-hex cores are unreachable with no request', async () => {
+  const http = answering(401, '{"message":"Unauthorized"}');
+  const verifier = verifierOver(http);
+  for (const value of [`sb_secret_${'a'.repeat(32)}`, `sbp_${'a'.repeat(39)}`, `sbp_${'a'.repeat(41)}`, `sbp_${'A'.repeat(40)}`, `sbp_${'g'.repeat(40)}`, MASTER_TEXT, `xsbp_${'a'.repeat(40)}`])
+    assert.equal(await verifier.verify(lentText(value), ACCOUNT), 'unreachable', value);
+  assert.equal(http.sent.length, 0);
+});
+
+test('KBOX-58 the master verifier applies to a key whose scope items include access-token, with other items too and at any location, and to no project key', () => {
+  const { appliesTo } = verifierOver(answering(200, '[]'));
+  assert.ok(appliesTo);
+  for (const at of [{}, AT]) {
+    for (const items of [['access-token'], ['secret', 'access-token'], ['publishable', 'access-token', 'other']]) assert.equal(appliesTo({ items }, at), true, JSON.stringify(items));
+    for (const items of [['secret'], ['publishable'], [], ['access-tokens'], ['secret', 'publishable']]) assert.equal(appliesTo({ items }, at), false, JSON.stringify(items));
+  }
+  assert.equal(appliesTo({ items: 'access-token' }, {}), true, 'one item given as text');
+});
+
+test('KBOX-37 KBOX-58 an access-token key has the token shape (sbp_ and 40 hex, UNVERIFIED supabase.pat-shape); every other key the secret key shape', () => {
+  const caps = subject().issuer.capabilities();
+  const shapeFor = caps.shapeFor;
+  assert.ok(shapeFor);
+  const token = shapeFor({ items: ['access-token'] }, {});
+  assert.deepEqual(token, { prefix: 'sbp_', alphabet: 'hex', coreLength: { min: 40, max: 40 }, random: true });
+  assert.equal(shapeFor({ items: ['secret', 'access-token'] }, AT), token);
+  for (const items of [['secret'], ['publishable'], []]) assert.equal(shapeFor({ items }, AT), undefined, JSON.stringify(items));
+  assert.ok(token !== undefined && matchesShape(token, pat(4)));
+  for (const near of [`sbp_${'a'.repeat(39)}`, `sbp_${'a'.repeat(41)}`, `sb_secret_${'a'.repeat(40)}`, `sbp_${'z'.repeat(40)}`, `sbp-${'a'.repeat(40)}`]) assert.equal(token !== undefined && matchesShape(token, near), false, near);
+});
+
+// M1: the contract issues a key and expects this verifier to judge it, but the Supabase issuer makes project keys, which this verifier never
+// judges (it applies to the master token only). So the subject's issuer is a test wrapper that mints token-shaped values the fake Management
+// API takes as its one live bearer, and stops taking on revoke; the shared contract file is unchanged.
+verifierContract('supabase (master token)', () => {
+  fake.reset();
+  const recording = adapterHttpTo(fake);
+  const down = { on: false };
+  const http: AdapterHttp = { request: (req) => (down.on ? Promise.reject(new HttpTransportError('unreachable')) : recording.request(req)) };
+  const entry = entryOver(http);
+  const real = entry.issuer;
+  if (real === undefined || entry.verifier === undefined) throw new Error('entry incomplete');
+  let minted = 0;
+  const issuer: Issuer = {
+    platform: real.platform,
+    capabilities: () => real.capabilities(),
+    issue: () => {
+      minted += 1;
+      const value = pat(0x7000 + minted);
+      fake.masterText = value;
+      return Promise.resolve({ value: lentText(value), platformKeyId: `token-${minted}` });
+    },
+    revoke: () => {
+      fake.masterText = 'revoked';
+      return Promise.resolve('revoked');
+    },
+  };
+  return { issuer, verifier: entry.verifier, master: master(), stranger: lentText(pat(0xdead)), setUnreachable: (on) => void (down.on = on) };
+});
+
+// ---------------------------------------------------------------- the master token and project keys through the box (KBOX-58)
+
+const accessToken = { platform: 'supabase', name: 'SUPABASE_ACCESS_TOKEN', projects: ['shop'], scope: { items: ['access-token'] } };
+
+test('KBOX-37 KBOX-58 a master access-token result opens a paste task; a pasted token the platform answers 200 for is stored, and its value is in no response', async (t) => {
+  const { w, http } = await supabaseRoutes(t);
+  const reply = await w.api('/api/keys', { json: accessToken });
+  assert.equal(reply.status, 202, reply.body);
+  const id = (reply.json() as { paste_task_id: string }).paste_task_id;
+  const c = canary(20);
+  const token = `sbp_${Buffer.from(c.bytes).toString('hex')}`;
+  fake.masterText = token;
+  const cookie = await w.view();
+  const page = await w.call(`/p/${id}`, { cookie });
+  const stored = await w.call(`/p/${id}`, { json: { value: token, proof: w.pasteProof(page.json() as PasteView) }, cookie });
+  assert.equal(stored.status, 201, stored.body);
+  assert.equal(w.rotation.store.key('supabase/shop/SUPABASE_ACCESS_TOKEN')?.class, 'master');
+  assert.ok(http.sent.some((r) => r.target === '/v1/projects' && r.headers['authorization'] === `Bearer ${token}`), 'the token was verified at the platform');
+  c.assertAbsent({ proposal: reply.body, page: page.body, stored: stored.body, events: JSON.stringify(w.parts.events.after(0)), audit: JSON.stringify(w.parts.audit.read(0)) });
+});
+
+test('KBOX-37 KBOX-58 a secret key\'s run never sends a project key to /v1/projects and its old key is retired by the lister; negative control: no request carries an sb_secret_ value as bearer', async (t) => {
+  const { w, http } = await supabaseRoutes(t);
+  const execute = w.rotation.executors.add_key;
+  assert.ok(execute);
+  const action = { kind: 'add_key', platform: 'supabase', name: 'SUPABASE_SECRET', projects: ['shop'], scope: SECRET, location: AT } as const;
+  assert.deepEqual(await execute({ approvalId: 'apr_x', revision: 1, action, requester: { kind: 'box' }, proof: undefined }), { result: 'done' });
+  const keyref = 'supabase/shop/SUPABASE_SECRET';
+  w.rotation.orchestrator.start({ keyref, origin: 'owner' });
+  await w.rotation.orchestrator.idle();
+  w.clock.advance(2 * 3600_000);
+  await w.rotation.orchestrator.idle();
+  assert.equal(w.rotation.store.gen(keyref, 1)?.status, 'retired');
+  assert.ok(http.sent.some((r) => r.method === 'GET' && r.target === `/v1/projects/${REF}/api-keys`), 'the lister confirmed it');
+  assert.deepEqual(http.sent.filter((r) => r.target === '/v1/projects'), [], 'no verifier call');
+  assert.deepEqual(http.sent.filter((r) => (r.headers['authorization'] ?? '').startsWith('Bearer sb_secret_')), [], 'no project key as a bearer');
 });
