@@ -855,7 +855,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   /** `promoting`: N' must still be lendable and proven; it becomes current, N goes to grace, and the wait time is the end of grace. */
   async function boxPromote(run: RunRow, head: KeyHead): Promise<Next> {
     if (lendOrUndefined(run.keyref, run.genNew) === undefined) return fail(run, 'promoting', 'pending_missing');
-    if (store.gen(run.keyref, run.genNew)?.provedAt === null) return fail(run, 'promoting', 'not_proven');
+    if ((store.gen(run.keyref, run.genNew)?.provedAt ?? null) === null) return fail(run, 'promoting', 'not_proven');
     store.setGenStatus(run.keyref, run.genNew, 'current');
     if (run.genOld > 0) store.setGenStatus(run.keyref, run.genOld, 'grace');
     store.setStatus(run.keyref, 'works', run.genNew);
