@@ -160,7 +160,7 @@ export const EVENT_SCHEMAS = {
   'machine.changed': { label: text(LABEL), change: oneOf('enrolled', 'revoked') },
   'token.new_network': { label: text(LABEL), network: text(NETWORK) },
   'update.state': { approval_id: text(NAME), state: oneOf('pending', 'installed', 'rolled_back') },
-  'box.notice': { code: text(CODE), text: oneOf(...BOX_NOTICE_TEXTS), title: optional(text(TITLE)) },
+  'box.notice': { code: text(CODE), text: oneOf(...BOX_NOTICE_TEXTS) },
 } as const satisfies Readonly<Record<string, Schema>>;
 
 export type EventKind = keyof typeof EVENT_SCHEMAS;

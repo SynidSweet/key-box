@@ -97,7 +97,7 @@ export interface Approvals {
   executed(approvalId: string, result: 'done' | 'failed', reason: string): void;
   /**
    * KBOX-60 F3: every approval that is `approved` with no result, except those of the kinds in `except` (which resume on their own), is recorded
-   * `failed` with reason `interrupted` and raises one `box.notice` naming its title. It runs no executor: the state the approval saw may be gone.
+   * `failed` with reason `interrupted` and raises one `box.notice` (the approval list shows which one). It runs no executor: the state the approval saw may be gone.
    */
   interruptStranded(except: readonly ActionKind[]): void;
   /** Expires every pending proposal older than 14 days. */
@@ -290,12 +290,12 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
   const interruptStranded: Approvals['interruptStranded'] = (except) => {
     const marks = except.map(() => '?').join(', ');
     const stranded = db
-      .prepare(`SELECT approval_id, title FROM approvals WHERE status = 'approved' AND result IS NULL ${except.length === 0 ? '' : `AND kind NOT IN (${marks})`} ORDER BY decided_at, approval_id`)
-      .all(...except) as unknown as { approval_id: string; title: string }[];
-    for (const { approval_id, title } of stranded) {
+      .prepare(`SELECT approval_id FROM approvals WHERE status = 'approved' AND result IS NULL ${except.length === 0 ? '' : `AND kind NOT IN (${marks})`} ORDER BY decided_at, approval_id`)
+      .all(...except) as unknown as { approval_id: string }[];
+    for (const { approval_id } of stranded) {
       write(() => {
         recordResult(approval_id, 'failed', 'interrupted');
-        insertEvent(db, deps.clock.now(), 'box.notice', { code: 'approval_interrupted', text: 'approval interrupted', title });
+        insertEvent(db, deps.clock.now(), 'box.notice', { code: 'approval_interrupted', text: 'approval interrupted' });
       });
       audit('approval.executed', approval_id, { result: 'failed', reason_code: 'interrupted' });
     }

@@ -345,7 +345,7 @@ function reopened(w: Awaited<ReturnType<typeof approveWorld>>, executors: Partia
 const notices = (w: Awaited<ReturnType<typeof approveWorld>>): readonly { code?: unknown; text?: unknown; title?: unknown }[] =>
   w.parts.events.after(0).filter((e) => e.kind === 'box.notice').map((e) => e.data);
 
-test('KBOX-60 F3 a crash after the approval committed (the executor died): at the next start the row is failed/interrupted with one notice naming its title, and the executor is not called again', async (t) => {
+test('KBOX-60 F3 a crash after the approval committed (the executor died): at the next start the row is failed/interrupted with one notice, and the executor is not called again', async (t) => {
   let calls = 0;
   const dying: Executor = () => {
     calls += 1;
@@ -368,7 +368,7 @@ test('KBOX-60 F3 a crash after the approval committed (the executor died): at th
   assert.deepEqual(restarted.approvals.waiting('set_schedule'), [], 'no longer waiting');
   const executed = w.parts.events.after(0).filter((e) => e.kind === 'approval.executed');
   assert.deepEqual(executed.map((e) => e.data), [{ approval_id: proposed.approval_id, result: 'failed', reason_code: 'interrupted' }]);
-  assert.deepEqual(notices(w), [{ code: 'approval_interrupted', text: 'approval interrupted', title: item.title }]);
+  assert.deepEqual(notices(w), [{ code: 'approval_interrupted', text: 'approval interrupted' }]);
   assert.deepEqual(
     w.parts.audit.read(0).entries.filter((r) => r.action === 'approval.executed').map((r) => [r.ref, r.detail]),
     [[proposed.approval_id, { result: 'failed', reason_code: 'interrupted' }]],
