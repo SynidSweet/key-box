@@ -31,7 +31,8 @@ import { createMetaShareSource } from '../src/shell/share-source.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
 import { issuerWith, sourceOf } from './fakes/platform-entry.ts';
 import { rotationWorld } from './support/rotation-world.ts';
-import { TimedClock, adapterHttpTo, bytesOf, drive, lent, seededRandom, tempDir } from './kit/index.ts';
+import { TimedClock, bytesOf, drive, lent, seededRandom, tempDir } from './kit/index.ts';
+import { adapterHttpTo } from './kit/adapter-http.ts';
 import { fakeGoogle } from './fakes/google.ts';
 import { BOX_SUBJECT } from '../src/platforms/google/oidc.ts';
 
