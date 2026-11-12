@@ -42,7 +42,8 @@ const OTHER_SA = 'kbox-test-other@kbox-test-two.iam.gserviceaccount.com';
 const OTHER_ITEM = 'sa:kbox-test-two/kbox-test-other';
 const API_ITEM = 'api:firestore.googleapis.com';
 const KEYREF = 'google/kbox-test-proj/FIRESTORE';
-const MASTER_REF = 'google/box/KBOX_SIGNING_KEY';
+/** KBOX-55: the box's signing key is keyrefOf('google', [], 'OIDC_SIGNING_KEY'); any other google master row stops its creation. */
+const MASTER_REF = 'google/p/OIDC_SIGNING_KEY';
 const SECOND_MASTER_REF = 'google/box/KBOX_SIGNING_KEY_2';
 const READ_ONLY = 'https://www.googleapis.com/auth/cloud-platform.read-only';
 const CRM = 'cloudresourcemanager.googleapis.com';
@@ -106,9 +107,11 @@ interface Seed {
 function seed(parts: Pick<CoreParts, 'meta' | 'vault' | 'db' | 'hub'>, clock: TimedClock, options: Seed = {}): void {
   const rotation = createRotationStore(parts.db, clock, parts.hub);
   for (const ref of [MASTER_REF, SECOND_MASTER_REF].slice(0, options.masters ?? 1)) {
-    parts.meta.putKey(row(ref, 'master', ['box']));
+    parts.meta.putKey(row(ref, 'master', ref === MASTER_REF ? [] : ['box']));
     parts.vault.put(ref, 1, Buffer.from(SIGNING_VALUE));
     rotation.putKeyInfo(ref, { scopeItems: [], location: {}, rotatedAt: clock.now(), markAdmin: false });
+    // The generation row the box key's creation at start finds, so a restart makes no second key (KBOX-55).
+    rotation.putGen({ keyref: ref, gen: 1, status: 'current', platformKeyId: null, location: {} });
   }
   parts.meta.putKey(row(KEYREF, 'admin', options.projects ?? ['kbox-test-proj']));
   if (options.scope !== null) rotation.putKeyInfo(KEYREF, { scopeItems: options.scope ?? [SA_ITEM], location: {}, rotatedAt: clock.now(), markAdmin: false });
