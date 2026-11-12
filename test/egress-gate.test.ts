@@ -240,3 +240,21 @@ test('KBOX-47 the hosts file is closed: an unknown member, an unknown caller or 
     assert.equal(parseEgressHosts(raw).ok, false, JSON.stringify(raw));
   }
 });
+
+test('KBOX-47 a project-host domain lets a relay call reach exactly one ref label under it; nothing wider, and no adapter call', async () => {
+  const clock = new TimedClock(0);
+  const connects: ConnectTarget[] = [];
+  const connector: Connector = {
+    connect: (target) => {
+      connects.push(target);
+      return Promise.resolve(new Duplex({ read() {}, write(_c, _e, done) { done(); } }));
+    },
+  };
+  const egress = createEgress({ adapterHosts: [], projectOrigins: [{ kind: 'project-host', domain: 'projplat.example', refLength: 8 }], listed: [], resolver: { resolve: () => Promise.resolve([PUBLIC]) }, connector, scheduler: clock });
+  const w: World = { egress, clock, connects, lookups: [] };
+  assert.equal(await refusal(w, 'relay', 'https://abcdefgh.projplat.example/rest/v1/x'), 'opened');
+  for (const host of ['projplat.example', 'a.abcdefgh.projplat.example', 'abcdefghi.projplat.example', 'abcdefg.projplat.example', 'abcdefgh.projplat.example.evil.example', 'abcdefgh.other.example', 'abcdefgh-projplat.example'])
+    assert.equal(await refusal(w, 'relay', `https://${host}/x`), 'undeclared_host', host);
+  assert.equal(await refusal(w, 'adapter', 'https://abcdefgh.projplat.example/x'), 'wrong_caller');
+  assert.deepEqual(connects.map((c) => c.servername), ['abcdefgh.projplat.example']);
+});
