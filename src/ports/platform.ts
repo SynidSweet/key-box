@@ -5,7 +5,7 @@ import type { Issuer, KeyLister, Verifier } from './issuer.ts';
 import type { Clock } from './clock.ts';
 import type { AdapterHttp } from './http.ts';
 import type { DenyRule, RelayProfile } from './relay-profile.ts';
-import type { KeyClass, KeyShape, PlatformId, Scope } from './types.ts';
+import type { KeyClass, KeyLocation, KeyShape, LocationSchema, PlatformId, Scope } from './types.ts';
 
 export interface PlatformEntry {
   readonly id: PlatformId;
@@ -28,7 +28,12 @@ export interface PlatformEntry {
    * an ordinary key is not the box's business). One source, like `shape`: an entry with an issuer leaves this out; the registry check
    * refuses both and neither.
    */
-  readonly classify?: (scope: Scope) => KeyClass;
+  readonly classify?: (scope: Scope, at: KeyLocation) => KeyClass;
+  /**
+   * The location fields the platform's keys take (KBOX-57): each with a full-match pattern, the classes that must name it and whether it names
+   * an upstream host. An entry that declares none takes no location.
+   */
+  readonly location?: LocationSchema;
   /** The destination adapters this platform provides; the kind of each is its `destination.kind`. A kind has at most one provider. */
   readonly destinations?: readonly DestinationKit[];
   /**

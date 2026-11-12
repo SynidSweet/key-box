@@ -3,6 +3,7 @@
 // plain text. The page is lines of plain text: the app shows each line as text, never as markup.
 import type { Action, Destination } from './actions.ts';
 import type { Requester } from './slots.ts';
+import type { KeyLocation } from '../ports/types.ts';
 
 /** The fixed sentences of the spec's "Fixed words" list that this unit's pages carry. */
 export const FIXED = {
@@ -67,10 +68,18 @@ export function titleOf(action: Action): string {
   }
 }
 
+/** KBOX-57, KBOX-12: where the platform will hold the key, each field the location names (the action parser refuses an empty one). */
+const locationLine = (at: KeyLocation): string =>
+  `Where the platform holds it: ${[...(at.region === undefined ? [] : [`region ${at.region}`]), ...(at.project === undefined ? [] : [`project ${at.project}`])].join(', ')}.`;
+
 function sentences(action: Action, ctx: PageContext): string[] {
   switch (action.kind) {
     case 'add_key':
-      return [`Add the ${action.platform} key ${action.name} for ${action.projects.join(', ')}.`, `Scope: ${action.scope.items.length === 0 ? 'none' : action.scope.items.join(', ')}.`];
+      return [
+        `Add the ${action.platform} key ${action.name} for ${action.projects.join(', ')}.`,
+        `Scope: ${action.scope.items.length === 0 ? 'none' : action.scope.items.join(', ')}.`,
+        ...(action.location === undefined ? [] : [locationLine(action.location)]),
+      ];
     case 'delete_key':
       return [`Delete the key ${action.keyref} at its platform.`];
     case 'rotate_key':

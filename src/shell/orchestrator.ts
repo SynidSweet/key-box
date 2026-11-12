@@ -15,10 +15,11 @@ import type { KeyClass, KeyLocation, Lent } from '../ports/types.ts';
 import type { Vault } from '../ports/vault.ts';
 import { ApiError } from '../pure/errors.ts';
 import { admitDestination, mintValue } from '../pure/class.ts';
+import { sameLocation } from '../pure/location.ts';
 import { intentName, nextStep, retryDelayMs } from '../pure/rotation-machine.ts';
 import type { Step } from '../pure/rotation-machine.ts';
 import { revokeAndConfirm } from './revoke-confirm.ts';
-import { isPasteSource, overlapOf, setterOf, tryLend } from './rotation-ports.ts';
+import { isPasteSource, overlapOf, setterOf, storedPlacement, tryLend } from './rotation-ports.ts';
 import type { PlatformKit, PlatformSource, Point } from './rotation-ports.ts';
 import type { DestinationRow, KeyHead, Receipt, RotationStore, RunOrigin, RunRow } from './rotation-store.ts';
 
@@ -66,12 +67,14 @@ export interface OrchestratorDeps extends PlatformSource {
 export interface Orchestrator {
   /**
    * Opens a run for the key and works on it in the background: `not_found` for no such key, `conflict` for a run already open, `rejected`
-   * (`no_issuer`) for a run without a value on a paste-source platform (KBOX-34).
+   * with a location code for a stored location the entry now refuses (KBOX-57), `rejected` (`no_issuer`) for a run without a value on a
+   * paste-source platform (KBOX-34).
    */
   start(input: StartInput): RunRow;
   /**
    * Writes a key's rows and runs its first generation to the end. Answers the status the key ended in. Without a value the platform issues it;
-   * `rejected` (`overlap_needs_paste`) for an `overlap: false` platform, whose keys are added by paste.
+   * `rejected` (`overlap_needs_paste`) for an `overlap: false` platform, whose keys are added by paste; `conflict` (`key_exists`) before any
+   * write for a reference a `keys` or `rotation_keys` row holds (KBOX-57).
    */
   create(key: NewKey, value?: Uint8Array): Promise<{ readonly status: 'works' | 'failed' }>;
   /** After a start: works on every unfinished run again, re-leasing it, except an `issuing` run that stored nothing (reconcile's). */
@@ -97,6 +100,8 @@ type Outcome = { readonly ok: true } | { readonly ok: false; readonly code: stri
 interface Fresh {
   readonly id: string;
   readonly value: Lent;
+  /** Where the platform says it made the key (KBOX-57): what a revoke of it is confirmed against. */
+  readonly at: KeyLocation;
 }
 
 /** The process stopped at a checkpoint (a test's crash): the drive ends there and recovery is the next start's. */
@@ -314,13 +319,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       run,
       'issuing',
       async () => {
-        made.issued = await issuer.issue({ scope: { items: info.scopeItems } }, run.intentName, master.value);
+        made.issued = await issuer.issue({ scope: { items: info.scopeItems }, at: info.location }, run.intentName, master.value);
       },
       'issue_failed',
     );
     const issued = made.issued;
     if (!created.ok || issued === undefined) return fail(run, 'issuing', 'issue_failed');
     await point('issued');
+    // KBOX-57: a platform that says it made the key anywhere but the stored location fails the run; the key is revoked where it says it is.
+    const at = issued.location ?? info.location;
+    if (!sameLocation(at, info.location)) return fail(run, 'issuing', 'location_mismatch', { id: issued.platformKeyId, value: issued.value, at });
     const stored = await attempt(
       run,
       'issuing',
@@ -329,11 +337,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           deps.vault.put(run.keyref, run.genNew, bytes);
           return Promise.resolve();
         });
-        store.putGen({ keyref: run.keyref, gen: run.genNew, status: 'pending', platformKeyId: issued.platformKeyId, location: info.location });
+        store.putGen({ keyref: run.keyref, gen: run.genNew, status: 'pending', platformKeyId: issued.platformKeyId, location: at });
       },
       'store_failed',
     );
-    if (!stored.ok) return fail(run, 'issuing', 'store_failed', { id: issued.platformKeyId, value: issued.value });
+    if (!stored.ok) return fail(run, 'issuing', 'store_failed', { id: issued.platformKeyId, value: issued.value, at });
     await point('stored');
     deps.audit.append({ action: 'key.issued', subject: run.keyref, at: now() });
     return advance(run, 'issuing');
@@ -388,7 +396,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     if (verifier !== undefined) {
       const value = lendOrUndefined(run.keyref, run.genNew);
       if (value === undefined) return fail(run, stepName, `${word}_failed`);
-      const verdict = await attempt0(() => verifier.verify(value, { platform: head.platform }));
+      const at = store.gen(run.keyref, run.genNew)?.location ?? store.keyInfo(run.keyref)?.location ?? {};
+      const verdict = await attempt0(() => verifier.verify(value, { platform: head.platform, at }));
       if (verdict !== 'ok') return fail(run, stepName, verdict === 'rejected' ? `${word}_rejected` : `${word}_unreachable`);
     }
     return advance(run, stepName);
@@ -654,7 +663,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     const id = created?.platformKeyId ?? fresh?.id ?? null;
     // A key the box did not make (pasted) has nothing to revoke here; one it made is revoked and confirmed before the run ends.
     if (id !== null) {
-      const dead = await revokeAndConfirm({ kit, platform: head.platform, id, at: created?.location ?? store.keyInfo(run.keyref)?.location ?? {}, value: fresh?.value ?? lendOrUndefined(run.keyref, run.genNew), master });
+      const dead = await revokeAndConfirm({ kit, platform: head.platform, id, at: created?.location ?? fresh?.at ?? store.keyInfo(run.keyref)?.location ?? {}, value: fresh?.value ?? lendOrUndefined(run.keyref, run.genNew), master });
       if (!dead) {
         const attempts = run.attempts + 1;
         store.update(run.runId, { attempts });
@@ -674,7 +683,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
   function start(input: StartInput): RunRow {
     const head = store.key(input.keyref);
-    if (head === undefined || store.keyInfo(input.keyref) === undefined) throw new ApiError('not_found');
+    const info = store.keyInfo(input.keyref);
+    if (head === undefined || info === undefined) throw new ApiError('not_found');
+    // KBOX-57: the stored location is checked against the entry as it is now; one it refuses starts no run (nothing is rewritten).
+    const placed = storedPlacement(deps, head, info);
+    if (placed !== 'ok') throw new ApiError('rejected', placed);
     // KBOX-34: a paste-source platform cannot issue; its keys change only by a paste (a value), never by an api run.
     if (input.value === undefined && isPasteSource(deps, head.platform)) throw new ApiError('rejected', 'no_issuer');
     const genOld = store.gens(input.keyref).find((g) => g.status === 'current')?.gen ?? 0;
@@ -688,7 +701,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     if (input.value !== undefined) {
       try {
         deps.vault.put(input.keyref, genNew, input.value);
-        store.putGen({ keyref: input.keyref, gen: genNew, status: 'pending', platformKeyId: null, location: store.keyInfo(input.keyref)?.location ?? {} });
+        store.putGen({ keyref: input.keyref, gen: genNew, status: 'pending', platformKeyId: null, location: info.location });
       } catch {
         store.update(runId, { state: 'failed', failedStep: 'issuing', reasonCode: 'store_failed', failedAt: now() });
         deps.audit.append({ action: 'rotation.step_failed', subject: input.keyref, at: now(), detail: { run_id: runId, step: 'issuing', code: 'store_failed' } });
@@ -711,6 +724,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       // A platform that holds one credential is never created by a run: a failed run would have no old value to set back (the owner's law:
       // a failed rotation keeps the old key working). The key is added by paste and then rotated.
       if (value === undefined && !overlapOf(deps.platform(key.platform))) throw new ApiError('rejected', 'overlap_needs_paste');
+      // KBOX-57: a key elsewhere is a new key, never this one moved; refused before the first write.
+      if (store.keyExists(key.keyref)) throw new ApiError('conflict', 'key_exists');
       deps.meta.putKey({
         keyref: key.keyref,
         platform: key.platform,

@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { bytesOf, canary } from './kit/index.ts';
+import { ApiError } from '../src/pure/errors.ts';
 import { PASTE_PLATFORM, routesWorld } from './support/routes-world.ts';
 import type { RoutesWorld } from './support/routes-world.ts';
 
@@ -368,15 +369,6 @@ test('KBOX-57 POST /api/keys for a keyref that exists, at another location and a
   assert.deepEqual(w.issuedAt, []);
 });
 
-test('KBOX-57 a keyref held only by a rotation record (no keys row) is key_exists too', async (t) => {
-  const w = await routesWorld(t, { location: PROJECT_ENTRY });
-  w.rotation.store.putKeyInfo(KEYREF, { scopeItems: [], location: { project: REF }, rotatedAt: 1, markAdmin: false });
-  const reply = await w.api('/api/keys', { json: body({ location: { project: OTHER_REF } }) });
-  assert.deepEqual([reply.status, errorOf(reply).detail?.code], [409, 'key_exists']);
-  assert.deepEqual(w.rotation.store.keyInfo(KEYREF)?.location, { project: REF });
-  assert.deepEqual(w.issuedAt, []);
-});
-
 test('KBOX-57 a retired-value record on a location-requiring entry is refused rotation (location_missing): no run, no approval', async (t) => {
   const w = await routesWorld(t, { location: PROJECT_ENTRY });
   assert.equal((await w.api(retiredPath(), { bytes: Buffer.from(`fk-${'ab'.repeat(16)}`) })).status, 201);
@@ -384,7 +376,7 @@ test('KBOX-57 a retired-value record on a location-requiring entry is refused ro
   assert.deepEqual([reply.status, errorOf(reply).code, errorOf(reply).detail?.code], [422, 'rejected', 'location_missing']);
   assert.equal(w.rotation.store.activeRunOf('fake/shop/OLD_KEY'), undefined);
   assert.equal(opened(w), 0);
-  assert.throws(() => w.rotation.orchestrator.start({ keyref: 'fake/shop/OLD_KEY', origin: 'owner' }), /rejected/);
+  assert.throws(() => w.rotation.orchestrator.start({ keyref: 'fake/shop/OLD_KEY', origin: 'owner' }), (e: unknown) => e instanceof ApiError && JSON.stringify(e.detail) === JSON.stringify({ code: 'location_missing' }));
   assert.equal(w.rotation.store.runs().length, 0);
 });
 

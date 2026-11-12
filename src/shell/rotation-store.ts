@@ -6,6 +6,7 @@ import type { Clock } from '../ports/clock.ts';
 import type { EventSignal } from '../ports/events.ts';
 import type { KeyClass, KeyLocation, PlatformKeyId } from '../ports/types.ts';
 import { ApiError } from '../pure/errors.ts';
+import { sameLocation } from '../pure/location.ts';
 import { insertEvent } from './events.ts';
 import { inTransaction } from './db.ts';
 import type { MetaKey } from '../ports/meta.ts';
@@ -221,7 +222,10 @@ export interface RotationStore {
   runs(): readonly RunRow[];
   update(runId: string, patch: RunPatch): RunRow;
 
+  /** Writes the key's rotation record. A record that exists keeps its location: another one is `conflict` (`location_immutable`) and nothing is written (KBOX-57). */
   putKeyInfo(keyref: string, info: KeyInfo): void;
+  /** True when a `keys` or a `rotation_keys` row holds the reference (KBOX-57: a key elsewhere is a new key, never this one moved). */
+  keyExists(keyref: string): boolean;
   keyInfo(keyref: string): KeyInfo | undefined;
   /** Stores which read call the key's verification makes; `not_found` when the key has no rotation record. */
   setVerifyHint(keyref: string, hint: string): void;
@@ -334,12 +338,16 @@ export function createRotationStore(db: DatabaseSync, clock: Clock, hub: EventSi
 
     putKeyInfo(keyref, info) {
       write(() => {
+        const stored = db.prepare('SELECT region, project FROM rotation_keys WHERE keyref = ?').get(keyref) as { region: string | null; project: string | null } | undefined;
+        if (stored !== undefined && !sameLocation(locationOf(stored.region, stored.project), info.location)) throw new ApiError('conflict', 'location_immutable');
         db.prepare(
           `INSERT INTO rotation_keys (keyref, scope_json, region, project, rotated_at, mark_admin) VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT (keyref) DO UPDATE SET scope_json = excluded.scope_json, region = excluded.region, project = excluded.project, rotated_at = excluded.rotated_at, mark_admin = excluded.mark_admin`,
         ).run(keyref, JSON.stringify(info.scopeItems), info.location.region ?? null, info.location.project ?? null, info.rotatedAt, info.markAdmin ? 1 : 0);
       });
     },
+    keyExists: (keyref) =>
+      db.prepare('SELECT 1 AS one FROM keys WHERE keyref = ? UNION ALL SELECT 1 FROM rotation_keys WHERE keyref = ?').get(keyref, keyref) !== undefined,
     keyInfo(keyref) {
       const r = db.prepare('SELECT scope_json, region, project, rotated_at, mark_admin, verify_hint FROM rotation_keys WHERE keyref = ?').get(keyref) as
         | { scope_json: string; region: string | null; project: string | null; rotated_at: number; mark_admin: number; verify_hint: string | null }

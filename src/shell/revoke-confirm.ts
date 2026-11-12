@@ -42,7 +42,7 @@ async function confirm(target: RevokeTarget): Promise<boolean> {
   const { kit, id, value } = target;
   if (kit.verifier !== undefined && value !== undefined) {
     const verifier = kit.verifier;
-    const verdict = await settled(() => verifier.verify(value, { platform: target.platform }));
+    const verdict = await settled(() => verifier.verify(value, { platform: target.platform, at: target.at }));
     const evidence: Evidence = { by: 'verifier', verdict: verdict.ok ? verdict.value : 'unreachable' };
     return confirmDead(evidence);
   }

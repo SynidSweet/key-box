@@ -1,7 +1,7 @@
 // KBOX-23, KBOX-40: the one source of a platform's key shape. A platform that issues states it in its capabilities; one that does not (a
 // paste-only platform) states it on its registry entry. Works on an entry and on the kit built from it.
 import type { Issuer } from '../ports/issuer.ts';
-import type { KeyClass, KeyShape, Scope } from '../ports/types.ts';
+import type { KeyClass, KeyLocation, KeyShape, Scope } from '../ports/types.ts';
 
 export interface ShapeSource {
   readonly id?: string;
@@ -16,11 +16,11 @@ export const shapeOfPlatform = (registry: readonly ShapeSource[], platform: stri
 
 export interface ClassSource {
   readonly issuer?: Issuer;
-  readonly classify?: (scope: Scope) => KeyClass;
+  readonly classify?: (scope: Scope, at: KeyLocation) => KeyClass;
 }
 
 /** KBOX-40, KBOX-15: the one source of a platform's key class. An issuer classifies its own scopes; a platform with no issuer states `classify`. */
-export function classifierOf(source: ClassSource | undefined): ((scope: Scope) => KeyClass) | undefined {
+export function classifierOf(source: ClassSource | undefined): ((scope: Scope, at: KeyLocation) => KeyClass) | undefined {
   const issuer = source?.issuer;
-  return issuer === undefined ? source?.classify : (scope) => issuer.capabilities().classify(scope);
+  return issuer === undefined ? source?.classify : (scope, at) => issuer.capabilities().classify(scope, at);
 }

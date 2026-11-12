@@ -12,16 +12,15 @@ import type { Approvals } from './approvals.ts';
 import { parsedRoute, route } from './http.ts';
 import type { Route } from './http.ts';
 import { classifierOf, shapeOf } from '../pure/platform-shape.ts';
-import { keyConfigFor, newKeyOf } from './new-key.ts';
+import { keyConfigFor, newKeyOf, placedKey } from './new-key.ts';
 import type { RotateKey } from './new-key.ts';
 import type { Orchestrator } from './orchestrator.ts';
 import type { Paste } from './paste.ts';
 import { isRecord, only } from './routes-approve.ts';
-import { isPasteSource, overlapOf } from './rotation-ports.ts';
+import { isPasteSource, overlapOf, storedPlacement } from './rotation-ports.ts';
 import type { PlatformSource } from './rotation-ports.ts';
 import type { DestinationRow, RotationStore } from './rotation-store.ts';
 import type { Vault } from '../ports/vault.ts';
-import type { KeyClass } from '../ports/types.ts';
 import type { Audit } from '../ports/audit.ts';
 import type { Clock } from '../ports/clock.ts';
 import type { EventLog } from '../ports/events.ts';
@@ -51,12 +50,12 @@ interface KeyRequest {
   readonly rotateEveryDays: number | undefined;
 }
 
-/** `{platform, name, projects, scope, label?, destinations?, rotate_every_days?}`, closed. Members are checked by the action parser. */
+/** `{platform, name, projects, scope, location?, label?, destinations?, rotate_every_days?}`, closed. Members are checked by the action parser. */
 function parseKeyRequest(raw: unknown): Parsed<KeyRequest> {
-  if (!isRecord(raw) || !only(raw, ['platform', 'name', 'projects', 'scope'], ['label', 'destinations', 'rotate_every_days'])) return { ok: false };
-  const { platform, name, projects, scope, label } = raw;
+  if (!isRecord(raw) || !only(raw, ['platform', 'name', 'projects', 'scope'], ['location', 'label', 'destinations', 'rotate_every_days'])) return { ok: false };
+  const { platform, name, projects, scope, location, label } = raw;
   if (typeof name !== 'string' || !ENV_KEY_NAME.test(name)) return { ok: false };
-  const action = parseAction({ kind: 'add_key', platform, name, projects, scope, ...(label === undefined ? {} : { label }) });
+  const action = parseAction({ kind: 'add_key', platform, name, projects, scope, ...(location === undefined ? {} : { location }), ...(label === undefined ? {} : { label }) });
   if (!action.ok || action.value.kind !== 'add_key') return { ok: false };
   const listed = raw['destinations'];
   const destinations: Destination[] = [];
@@ -82,12 +81,6 @@ const parseKeyrefBody = (raw: unknown): Parsed<{ readonly keyref: string }> =>
 export function keyRoutes(deps: KeyRouteDeps): Route[] {
   const { store } = deps;
 
-  /** The adapters and the class of a request, or the reason it cannot be issued. */
-  const classify = (platform: string, items: readonly string[]): { readonly klass: KeyClass; readonly create: 'api' | 'paste' } => {
-    const config = keyConfigFor(deps.source, platform);
-    return { klass: classOf(config.classify({ items }), undefined), create: config.create };
-  };
-
   const rowOf = (d: Destination): DestinationRow => {
     // The workstation is a delivery, not an adapter: its value is fetched by the box's own control route (KBOX-34).
     if (d.kind === 'workstation') return { kind: d.kind, target: 'workstation', readable_by: 'api' };
@@ -106,9 +99,13 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
       handle: async ({ body, actor }) => {
         const { action } = body;
         const keyref = keyrefOf(action.platform, action.projects, action.name);
-        const { klass, create } = classify(action.platform, action.scope.items);
+        const config = keyConfigFor(deps.source, action.platform);
+        // KBOX-57, KBOX-15: the class at the request's location (never below the class without it) and the location the entry accepts for it.
+        const { klass } = placedKey(config, action);
+        // KBOX-57: a key elsewhere is a new key; an existing reference is refused on every branch before anything is asked, opened or written.
+        if (store.keyExists(keyref)) throw new ApiError('conflict', 'key_exists');
         if (klass === 'master') throw rejected('master_not_issuable');
-        if (create === 'paste') {
+        if (config.create === 'paste') {
           if (klass === 'ordinary') throw rejected('no_issuer');
           const opened = deps.paste.open({ action, requester: { kind: 'token', label: actor } });
           return { status: 202, json: { keyref, class: klass, paste_task_id: opened.paste_id } };
@@ -120,7 +117,6 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
           const proposed = deps.approvals.propose({ action, requester: { kind: 'token', label: actor } });
           return { status: 202, json: { keyref, class: klass, approval_id: proposed.approval_id } };
         }
-        if (store.key(keyref) !== undefined) throw new ApiError('conflict', 'key_exists');
         const rows = body.destinations.map(rowOf);
         const created = await deps.orchestrator.create(newKeyOf(action, deps.source, rows, body.rotateEveryDays));
         if (action.label !== undefined) deps.meta.putGrant(keyref, action.label);
@@ -138,6 +134,10 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
         const head = store.key(body.keyref);
         if (head === undefined) throw new ApiError('not_found');
         if (store.activeRunOf(body.keyref) !== undefined) throw new ApiError('conflict', 'run_exists');
+        // KBOX-57: a stored location the entry now refuses is answered with its code, before any run, approval or paste task.
+        const info = store.keyInfo(body.keyref);
+        const placed = info === undefined ? 'ok' : storedPlacement(deps.source, head, info);
+        if (placed !== 'ok') throw rejected(placed);
         if (head.class === 'ordinary') return { status: 201, json: { run_id: deps.orchestrator.start({ keyref: body.keyref, origin: 'agent' }).runId } };
         const action: RotateKey = { kind: 'rotate_key', keyref: body.keyref };
         if (isPasteSource(deps.source, head.platform)) {
@@ -182,7 +182,7 @@ function retire(deps: KeyRouteDeps, q: { readonly platform: string; readonly pro
       platform: q.platform,
       name: q.name,
       projects: [q.project],
-      class: classOf(classify({ items: [] }), undefined),
+      class: classOf(classify({ items: [] }, {}), undefined),
       status: 'works',
       gen_current: 1,
       schedule: { rotate_every_days: 90, grace_hours: 1, next_due_at: null, expires_at: null },

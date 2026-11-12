@@ -2,17 +2,16 @@
 // never lower it. Pure: a fixture schema, no platform.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { KeyClass, KeyLocation, LocationSchema } from '../src/ports/types.ts';
+import type { KeyClass, KeyLocation, LocationRule, LocationSchema } from '../src/ports/types.ts';
 import { flooredClass } from '../src/pure/class.ts';
 import { checkLocation, sameLocation } from '../src/pure/location.ts';
 
 const RANK: readonly KeyClass[] = ['ordinary', 'admin', 'master'];
 
 /** A fixture entry: `region` from a closed list required of every class, `project` a 20-letter ref required of ordinary and admin keys. */
-const SCHEMA: LocationSchema = {
-  region: { pattern: /^(global|us)$/, requiredFor: ['ordinary', 'admin', 'master'] },
-  project: { pattern: /[a-z]{20}/, requiredFor: ['ordinary', 'admin'] },
-};
+const REGION: LocationRule = { pattern: /^(global|us)$/, requiredFor: ['ordinary', 'admin', 'master'] };
+const PROJECT: LocationRule = { pattern: /[a-z]{20}/, requiredFor: ['ordinary', 'admin'] };
+const SCHEMA: LocationSchema = { region: REGION, project: PROJECT };
 const REF = 'abcdefghijabcdefghij';
 
 test('KBOX-57 a location naming each declared field with an accepted value, as the class requires, is ok', () => {
@@ -21,7 +20,7 @@ test('KBOX-57 a location naming each declared field with an accepted value, as t
 });
 
 test('KBOX-57 a field the entry does not declare is location_field_unknown, and an entry that declares none takes no location', () => {
-  assert.equal(checkLocation({ region: SCHEMA.region }, { region: 'us', project: REF }, 'ordinary', []), 'location_field_unknown');
+  assert.equal(checkLocation({ region: REGION }, { region: 'us', project: REF }, 'ordinary', []), 'location_field_unknown');
   assert.equal(checkLocation(undefined, { region: 'us' }, 'ordinary', []), 'location_field_unknown');
   assert.equal(checkLocation({}, { project: REF }, 'ordinary', []), 'location_field_unknown');
   assert.equal(checkLocation(undefined, {}, 'master', []), 'ok', 'no declaration and no location');
@@ -45,7 +44,7 @@ test('KBOX-57 a region: or project: scope item on an entry that declares that fi
   const at: KeyLocation = { region: 'us', project: REF };
   assert.equal(checkLocation(SCHEMA, at, 'ordinary', ['read', `project:${REF}`]), 'location_in_scope');
   assert.equal(checkLocation(SCHEMA, at, 'ordinary', ['region:us']), 'location_in_scope');
-  assert.equal(checkLocation({ project: SCHEMA.project }, { project: REF }, 'ordinary', ['region:us']), 'ok', 'region is not declared, so region: is not placement here');
+  assert.equal(checkLocation({ project: PROJECT }, { project: REF }, 'ordinary', ['region:us']), 'ok', 'region is not declared, so region: is not placement here');
   assert.equal(checkLocation(SCHEMA, at, 'ordinary', ['regional', 'projects']), 'ok', 'only the prefix with its colon is placement');
 });
 

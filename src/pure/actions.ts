@@ -3,10 +3,12 @@
 import { createHash } from 'node:crypto';
 import { LABEL, NAME, parseObject, text, int, oneOf, optional, isTrue } from './schemas.ts';
 import type { Parsed, Schema } from './schemas.ts';
+import type { KeyLocation } from '../ports/types.ts';
 
 const PLATFORM = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const SCOPE_ITEM = /^[A-Za-z0-9_.:/-]{1,128}$/;
+const LOCATION_VALUE = /^[A-Za-z0-9_.-]{1,128}$/;
 const HASH = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
 export const DOMAIN_NAME = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
@@ -33,7 +35,7 @@ export interface AllowRule {
 }
 
 export type Action =
-  | { readonly kind: 'add_key'; readonly platform: string; readonly name: string; readonly projects: readonly string[]; readonly scope: { readonly items: readonly string[] }; readonly mark_admin?: true; readonly label?: string }
+  | { readonly kind: 'add_key'; readonly platform: string; readonly name: string; readonly projects: readonly string[]; readonly scope: { readonly items: readonly string[] }; readonly location?: KeyLocation; readonly mark_admin?: true; readonly label?: string }
   | { readonly kind: 'delete_key' | 'rotate_key' | 'demote'; readonly keyref: string }
   | { readonly kind: 'grant' | 'revoke_grant'; readonly keyref: string; readonly machine: string }
   | { readonly kind: 'add_destination' | 'remove_destination'; readonly keyref: string; readonly destination: Destination }
@@ -96,7 +98,7 @@ const FLAT: { readonly [K in ActionKind]: Schema } = {
 
 /** The nested members of a kind, by name. */
 const NESTED: Partial<Readonly<Record<ActionKind, readonly string[]>>> = {
-  add_key: ['projects', 'scope'],
+  add_key: ['projects', 'scope', 'location'],
   add_destination: ['destination'],
   remove_destination: ['destination'],
   set_allow_rules: ['rules'],
@@ -115,6 +117,13 @@ function destination(v: unknown): Destination | undefined {
   if (!Object.hasOwn(v, 'environments')) return flat.value;
   const environments = stringList(v['environments'], /^(production|preview|development)$/, 1, 3) as Destination['environments'];
   return environments === undefined ? undefined : { ...flat.value, environments };
+}
+
+/** KBOX-53, KBOX-57: `{region?, project?}`, closed and non-empty, each value a plain name; the registry entry checks it further. */
+function location(v: unknown): KeyLocation | undefined {
+  if (!isRecord(v) || Object.keys(v).length === 0) return undefined;
+  const parsed = parseObject({ region: optional(text(LOCATION_VALUE)), project: optional(text(LOCATION_VALUE)) }, v);
+  return parsed.ok ? parsed.value : undefined;
 }
 
 function rules(v: unknown): readonly AllowRule[] | undefined {
@@ -163,6 +172,11 @@ export function parseAction(input: unknown): Parsed<Action> {
     if (items === undefined) return refused;
     out['projects'] = projects;
     out['scope'] = { items };
+    if (Object.hasOwn(input, 'location')) {
+      const at = location(input['location']);
+      if (at === undefined) return refused;
+      out['location'] = at;
+    }
   } else if (kind === 'add_destination' || kind === 'remove_destination') {
     const d = destination(input['destination']);
     if (d === undefined) return refused;

@@ -10,7 +10,7 @@ import type { MetaStore } from '../ports/meta.ts';
 import type { Push } from '../ports/push.ts';
 import type { Random } from '../ports/random.ts';
 import { actionDigest, pasteChallenge } from '../pure/challenge.ts';
-import { matchesShape } from '../pure/class.ts';
+import { keyrefOf, matchesShape } from '../pure/class.ts';
 import { ApiError } from '../pure/errors.ts';
 import { shapeOf } from '../pure/platform-shape.ts';
 import { decideSlot, parseRequester, requesterText, slotOf } from '../pure/slots.ts';
@@ -25,7 +25,9 @@ import { file } from './routes-approve.ts';
 import { parsedRoute, route } from './http.ts';
 import type { Route } from './http.ts';
 import { inTransaction } from './db.ts';
-import { newKeyOf } from './new-key.ts';
+import { locationOf, newKeyOf } from './new-key.ts';
+import type { RotationStore } from './rotation-store.ts';
+import type { KeyLocation } from '../ports/types.ts';
 import type { PasteAction } from './new-key.ts';
 import type { Orchestrator } from './orchestrator.ts';
 import type { PlatformSource } from './rotation-ports.ts';
@@ -61,6 +63,8 @@ export interface PasteDeps {
   readonly meta: MetaStore;
   readonly source: PlatformSource;
   readonly orchestrator: Orchestrator;
+  /** Whether a reference is taken, and a stored key's location (KBOX-57). */
+  readonly store: Pick<RotationStore, 'keyExists' | 'keyInfo'>;
 }
 
 export interface PasteView {
@@ -123,8 +127,16 @@ export function createPaste(deps: PasteDeps): Paste {
   };
   const settle = (id: string, status: 'done' | 'failed'): void => void inTransaction(db, () => db.prepare('UPDATE paste_tasks SET status = ? WHERE paste_id = ?').run(status, id));
 
+  /** The task's key reference exists: the task is settled failed (no retry can change that) and the paste is refused, `conflict` `key_exists`. */
+  const refuseTaken = (id: string): never => {
+    settle(id, 'failed');
+    deps.events.append('approval.executed', { approval_id: id, result: 'failed', reason_code: 'key_exists' });
+    deps.audit.append({ action: 'approval.executed', subject: id, at: now(), detail: { result: 'failed', reason_code: 'key_exists' } });
+    throw new ApiError('conflict', 'key_exists');
+  };
+
   /** The value checks of KBOX-12, in order: the floor, the strict shape, the platform verifier. Names only. */
-  async function checkValue(platform: string, value: string): Promise<void> {
+  async function checkValue(platform: string, at: KeyLocation, value: string): Promise<void> {
     const kit = deps.source.platform(platform);
     const shape = shapeOf(kit);
     if (kit === undefined || shape === undefined) throw rejected('unknown_platform');
@@ -133,7 +145,7 @@ export function createPaste(deps: PasteDeps): Paste {
     if (kit.verifier === undefined) return;
     const bytes = Uint8Array.from(Buffer.from(value, 'utf8'));
     const lent = makeLent('paste:1', () => Uint8Array.from(bytes));
-    const verdict = await kit.verifier.verify(lent, { platform }).catch((): 'unreachable' => 'unreachable');
+    const verdict = await kit.verifier.verify(lent, { platform, at }).catch((): 'unreachable' => 'unreachable');
     bytes.fill(0);
     if (verdict !== 'ok') throw rejected(verdict === 'rejected' ? 'verifier_rejected' : 'verifier_unreachable');
   }
@@ -236,7 +248,10 @@ export function createPaste(deps: PasteDeps): Paste {
       if (!verdict.ok) throw new ApiError('forbidden', 'proof_refused');
       const action = actionOf(r);
       const platform = action.kind === 'add_key' ? action.platform : (deps.meta.snapshot().keys.find((k) => k.keyref === action.keyref)?.platform ?? '');
-      await checkValue(platform, value);
+      // KBOX-57: a reference taken while the task waited settles it failed, before the verifier sees the value; a key elsewhere is a new key.
+      if (action.kind === 'add_key' && deps.store.keyExists(keyrefOf(action.platform, action.projects, action.name))) refuseTaken(id);
+      const at = action.kind === 'add_key' ? locationOf(action) : (deps.store.keyInfo(action.keyref)?.location ?? {});
+      await checkValue(platform, at, value);
       const bytes = Uint8Array.from(Buffer.from(value, 'utf8'));
       try {
         const keyref = await execute(action, bytes);

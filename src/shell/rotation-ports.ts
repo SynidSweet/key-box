@@ -2,9 +2,11 @@
 // test stops the process. Adapters register these when they are built (the adapter units).
 import type { DestinationKit } from '../ports/destination.ts';
 import type { Issuer, KeyLister, Verifier } from '../ports/issuer.ts';
-import type { KeyClass, KeyShape, Lent, PlatformId, Scope } from '../ports/types.ts';
+import type { KeyClass, KeyLocation, KeyShape, Lent, LocationSchema, PlatformId, Scope } from '../ports/types.ts';
 import type { Vault } from '../ports/vault.ts';
 import type { Step } from '../pure/rotation-machine.ts';
+import { checkLocation } from '../pure/location.ts';
+import type { LocationRefusal } from '../pure/location.ts';
 
 /**
  * A platform's adapters. A paste platform has no issuer: its keys are made on the phone (KBOX-12) and retired by the owner, so
@@ -19,7 +21,9 @@ export interface PlatformKit {
   /** The key shape a paste-only platform states (no issuer); `shapeOf` reads the one shape of a kit. */
   readonly shape?: KeyShape;
   /** The class a paste-only platform states (no issuer); `classifierOf` reads the one class source of a kit. */
-  readonly classify?: (scope: Scope) => KeyClass;
+  readonly classify?: (scope: Scope, at: KeyLocation) => KeyClass;
+  /** The location fields the entry declares (KBOX-57); none: the platform's keys take no location. */
+  readonly location?: LocationSchema;
 }
 
 /** A registered platform whose keys are made on the phone (KBOX-12, KBOX-34), one with no issuer or an issuer that says `paste`: the box cannot issue one, so it never runs an api run for it. */
@@ -27,6 +31,16 @@ export function isPasteSource(source: Pick<PlatformSource, 'platform'>, platform
   const kit = source.platform(platform);
   return kit !== undefined && (kit.issuer === undefined || kit.issuer.capabilities().create === 'paste');
 }
+
+/**
+ * KBOX-57: whether a stored key's location still passes its entry's declaration as it is now (`ok`), else the refusal code. Every place that
+ * starts work on a stored key asks this one function: a run's start and the schedule's due check.
+ */
+export const storedPlacement = (
+  source: Pick<PlatformSource, 'platform'>,
+  head: { readonly platform: PlatformId; readonly class: KeyClass },
+  info: { readonly location: KeyLocation; readonly scopeItems: readonly string[] },
+): 'ok' | LocationRefusal => checkLocation(source.platform(head.platform)?.location, info.location, head.class, info.scopeItems);
 
 /** Whether the platform can hold two valid keys at once (true when it says nothing: there is then no one-credential order to follow). */
 export const overlapOf = (kit: PlatformKit | undefined): boolean => kit?.issuer?.capabilities().overlap ?? true;
