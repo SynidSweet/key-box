@@ -88,7 +88,7 @@ export function refuseBoxKeyAction(registry: readonly PlatformEntry[], action: A
   };
   switch (action.kind) {
     case 'add_key':
-      if (isBoxKeyref(registry, keyrefOf(action.platform, action.projects, action.name))) refused();
+      if (registry.some((e) => e.id === action.platform && e.boxKey?.name === action.name)) refused();
       return;
     case 'grant':
     case 'add_destination':

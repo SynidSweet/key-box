@@ -102,7 +102,7 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
         const { action } = body;
         const keyref = keyrefOf(action.platform, action.projects, action.name);
         // KBOX-55: the box's own key never enters through here, before it exists or after; the first thing asked, so no later check answers for it.
-        refuseBoxMade(deps.source, action.platform, keyref);
+        refuseBoxMade(deps.source, action.platform, action.name);
         const config = keyConfigFor(deps.source, action.platform);
         // KBOX-57, KBOX-15: the class at the request's location (never below the class without it) and the location the entry accepts for it.
         const { klass, at } = placedKey(config, action);
@@ -178,9 +178,9 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
   ];
 }
 
-/** KBOX-55: a request naming the box-made key's reference (`POST /api/keys`, `POST /api/retired`) is `rejected` (`box_made`). */
-function refuseBoxMade(source: PlatformSource, platform: string, keyref: string): void {
-  if (kitFor(source, { platform, keyref })?.boxKey !== undefined) throw rejected('box_made');
+/** KBOX-34, KBOX-55: a request naming the platform and name of the box-made key, under any project (`POST /api/keys`, `POST /api/retired`), is `rejected` (`box_made`). */
+function refuseBoxMade(source: PlatformSource, platform: string, name: string): void {
+  if (source.platform(platform)?.boxKey?.name === name) throw rejected('box_made');
 }
 
 /**
@@ -228,7 +228,7 @@ async function provenPlacement(source: PlatformSource, action: AddKey, at: KeyLo
 /** Stores a retired value as a retired generation: never lent, never pushed; fingerprinted only when it passes the shape check (KBOX-34). */
 function retire(deps: KeyRouteDeps, q: { readonly platform: string; readonly project: string; readonly name: string }, bytes: Uint8Array): { readonly status: number; readonly json: unknown } {
   const keyref = keyrefOf(q.platform, [q.project], q.name);
-  refuseBoxMade(deps.source, q.platform, keyref);
+  refuseBoxMade(deps.source, q.platform, q.name);
   // KBOX-55: the retired value is of this key, so its class and shape are its own kit's.
   const kit = kitFor(deps.source, { platform: q.platform, keyref });
   const classify = classifierOf(kit);
