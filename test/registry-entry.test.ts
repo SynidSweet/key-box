@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { PlatformEntry } from '../src/ports/platform.ts';
-import type { KeyShape } from '../src/ports/types.ts';
+import type { KeyShape, LocationSchema } from '../src/ports/types.ts';
 import { checkRegistry } from '../src/pure/profile.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
 import { fakeEntry, pasteOnlyEntry } from './fakes/platform-entry.ts';
@@ -54,6 +54,6 @@ test('KBOX-23 KBOX-57 an entry\'s location declares only region and project: ano
   const rule = { pattern: /[a-z]{1,8}/, requiredFor: [] };
   assert.equal(failure([fakeEntry(w, { location: { region: rule, project: rule } })]), 'passed');
   assert.equal(failure([fakeEntry(w, { location: {} })]), 'passed', 'an entry may declare none');
-  const zoned = { region: rule, zone: rule } as unknown as PlatformEntry['location'];
+  const zoned = { region: rule, zone: rule } as unknown as LocationSchema;
   assert.equal(failure([fakeEntry(w, { location: zoned })]), 'location_field_unknown fake');
 });
