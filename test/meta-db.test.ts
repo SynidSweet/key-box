@@ -101,3 +101,33 @@ test('KBOX-5 no code outside private-db.ts and main-core.ts opens private.db or 
     .sort();
   assert.deepEqual(naming, ['main-core.ts', 'shell/private-db.ts']);
 });
+
+test('KBOX-5 opening a set-up meta.db while another connection holds the write lock returns at once and reads box_info', async (t) => {
+  const dir = await tempDir(t);
+  const path = join(dir, 'a.db');
+  const first = openMetaDatabase(path, seededRandom(seed));
+  const epoch = (first.prepare('SELECT epoch FROM box_info').get() as { epoch: string }).epoch;
+  const writer = new DatabaseSync(path);
+  t.after(() => writer.close());
+  writer.exec('BEGIN IMMEDIATE');
+  // The write lock is held and never released inside this test: an open that needs it can only fail after the busy timeout.
+  const second = openMetaDatabase(path, seededRandom(seed + 1));
+  t.after(() => second.close());
+  first.close();
+  assert.equal((second.prepare('SELECT epoch FROM box_info').get() as { epoch: string }).epoch, epoch);
+  writer.exec('ROLLBACK');
+});
+
+test('KBOX-5 two first opens of a new meta.db at once end with one box_info row and one epoch', async (t) => {
+  const dir = await tempDir(t);
+  const path = join(dir, 'a.db');
+  const one = openMetaDatabase(path, seededRandom(seed));
+  const two = openMetaDatabase(path, seededRandom(seed + 1));
+  t.after(() => {
+    one.close();
+    two.close();
+  });
+  const rows = (db: DatabaseSync): { epoch: string }[] => db.prepare('SELECT epoch FROM box_info').all() as { epoch: string }[];
+  assert.equal(rows(one).length, 1);
+  assert.deepEqual(rows(two), rows(one));
+});

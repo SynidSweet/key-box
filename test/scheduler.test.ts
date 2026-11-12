@@ -330,3 +330,106 @@ test('KBOX-52 the tick is guarded per key: an approval that cannot be proposed f
   assert.equal(w.rotation.store.activeRunOf(KEYREF)?.origin, 'schedule', 'the key after it in the tick still opened its run');
   await w.rotation.orchestrator.idle();
 });
+
+// --- a refused or expired scheduled request is waited out (KBOX-52 revision 2026-11-12) -----------------------------------------
+
+const REFUSAL_WAIT = 7 * DAY;
+const EXPIRY_WAIT = DAY;
+/** How many rotation requests (approvals, or paste tasks) the box has ever opened, whatever became of them. */
+const countOf = (w: RoutesWorld, table: 'approvals' | 'paste_tasks'): number =>
+  (w.parts.db.prepare(table === 'approvals' ? "SELECT count(*) AS n FROM approvals WHERE kind = 'rotate_key'" : "SELECT count(*) AS n FROM paste_tasks WHERE json_extract(action_json, '$.kind') = 'rotate_key'").get() as { n: number }).n;
+/** Ticks every hour for `span` milliseconds (a multiple of an hour), the way the schedule does. */
+const hourlyTicks = (w: RoutesWorld, span: number): void => {
+  for (let spent = 0; spent < span; spent += HOUR) {
+    w.clock.advance(HOUR);
+    w.rotation.tick();
+  }
+};
+const denyTheRequest = async (w: RoutesWorld): Promise<void> => {
+  const [item] = await w.queue();
+  assert.ok(item);
+  assert.equal((await w.decide(item.approval_id, 'deny', w.proofFor(item, undefined, undefined, 'deny'))).status, 200);
+};
+
+test('KBOX-52 a due admin key whose approval is refused gets no new approval from any tick for 7 days and exactly one at the first tick after', async (t) => {
+  const w = await routesWorld(t);
+  await addAdminKey(w);
+  w.clock.advance(91 * DAY);
+  w.rotation.tick();
+  await denyTheRequest(w);
+  assert.equal(countOf(w, 'approvals'), 1);
+  hourlyTicks(w, REFUSAL_WAIT - HOUR);
+  w.clock.advance(HOUR - 1);
+  w.rotation.tick();
+  assert.equal(countOf(w, 'approvals'), 1, 'one millisecond short of 7 days after the refusal: no new approval');
+  w.clock.advance(1);
+  w.rotation.tick();
+  assert.equal(countOf(w, 'approvals'), 2, 'the first tick 7 days after the refusal asks again');
+  w.rotation.tick();
+  assert.equal(countOf(w, 'approvals'), 2, 'and only once');
+});
+
+test('KBOX-52 a due admin key whose approval expires unanswered gets none for 24 hours after the expiry and exactly one at the first tick after', async (t) => {
+  const w = await routesWorld(t);
+  await addAdminKey(w);
+  w.clock.advance(91 * DAY);
+  w.rotation.tick();
+  w.clock.advance(14 * DAY); // the approval's lifetime: this tick finds it expired at once
+  w.rotation.tick();
+  assert.equal(countOf(w, 'approvals'), 1, 'the tick that expires the request does not ask again in the same breath');
+  hourlyTicks(w, EXPIRY_WAIT - HOUR);
+  w.clock.advance(HOUR - 1);
+  w.rotation.tick();
+  assert.equal(countOf(w, 'approvals'), 1, 'one millisecond short of 24 hours after the expiry: no new approval');
+  w.clock.advance(1);
+  w.rotation.tick();
+  assert.equal(countOf(w, 'approvals'), 2, 'the first tick 24 hours after the expiry asks again');
+  w.rotation.tick();
+  assert.equal(countOf(w, 'approvals'), 2);
+});
+
+test('KBOX-52 a manual rotation right after a refusal starts at once, and the scheduler stays quiet meanwhile', async (t) => {
+  const w = await routesWorld(t);
+  await addAdminKey(w);
+  w.clock.advance(91 * DAY);
+  w.rotation.tick();
+  await denyTheRequest(w);
+  const manual = await w.api('/api/rotations', { json: { keyref: KEYREF } });
+  assert.equal(manual.status, 202, manual.body);
+  assert.equal(countOf(w, 'approvals'), 2, 'the manual request is proposed at once');
+  const [item] = await w.queue();
+  assert.ok(item);
+  await w.decide(item.approval_id, 'deny', w.proofFor(item, undefined, undefined, 'deny'));
+  hourlyTicks(w, REFUSAL_WAIT - HOUR);
+  assert.equal(countOf(w, 'approvals'), 2, 'the scheduler adds nothing while the first refusal is within its 7 days');
+});
+
+test('KBOX-52 a due admin key on a paste-source platform whose task expires gets no new task for 24 hours after the expiry and one after', async (t) => {
+  const w = await routesWorld(t);
+  await addAdminKey(w, PASTE_PLATFORM);
+  w.clock.advance(91 * DAY);
+  w.rotation.tick();
+  assert.equal(countOf(w, 'paste_tasks'), 1);
+  const expiresAt = (w.parts.db.prepare("SELECT expires_at AS at FROM paste_tasks WHERE json_extract(action_json, '$.kind') = 'rotate_key'").get() as { at: number }).at;
+  w.clock.advance(expiresAt - w.clock.now());
+  w.rotation.tick();
+  assert.equal(countOf(w, 'paste_tasks'), 1, 'at the expiry no new task');
+  hourlyTicks(w, EXPIRY_WAIT - HOUR);
+  w.clock.advance(HOUR - 1);
+  w.rotation.tick();
+  assert.equal(countOf(w, 'paste_tasks'), 1, 'one millisecond short of 24 hours after the expiry: no new task');
+  w.clock.advance(1);
+  w.rotation.tick();
+  assert.equal(countOf(w, 'paste_tasks'), 2, 'the first tick 24 hours after the expiry opens a new task');
+});
+
+test('KBOX-52 the wait after an expiry is counted from when the request expired, not from the later tick that swept it: a tick 3 days after the expiry asks again at once', async (t) => {
+  const w = await routesWorld(t);
+  await addAdminKey(w);
+  w.clock.advance(91 * DAY);
+  w.rotation.tick();
+  const expiresAt = (w.parts.db.prepare("SELECT expires_at AS at FROM approvals WHERE kind = 'rotate_key'").get() as { at: number }).at;
+  w.clock.advance(expiresAt + 3 * DAY - w.clock.now());
+  w.rotation.tick();
+  assert.equal(countOf(w, 'approvals'), 2);
+});

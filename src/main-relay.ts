@@ -2,12 +2,11 @@
 // grant, lent value, scan and audit row over the lend socket, and reaches upstream only through the egress gate. It holds
 // no state and reads no vault; it stops on SIGTERM (KBOX-3, KBOX-13, KBOX-45, KBOX-47).
 import { isAbsolute } from 'node:path';
-import { createRegistry } from './platforms/registry.ts';
+import { createRelayRegistry } from './platforms/registry.ts';
 import { DOMAIN_NAME } from './pure/actions.ts';
 import { osErrorCode } from './pure/errors.ts';
 import { RegistryRefused } from './pure/profile.ts';
 import { createSystemEgress } from './shell/egress-system.ts';
-import { refusingAdapterHttp } from './ports/http.ts';
 import { systemClock } from './shell/clock.ts';
 import { createLendClient } from './shell/lend-socket.ts';
 import { createRelayServer } from './shell/relay-http.ts';
@@ -32,7 +31,7 @@ function readConfig(env: NodeJS.ProcessEnv): Config {
 async function main(): Promise<void> {
   const config = readConfig(process.env);
   const journal = (code: string): void => void process.stderr.write(`keybox relay: ${code}\n`);
-  const registry = createRegistry({ http: refusingAdapterHttp, clock: systemClock });
+  const registry = createRelayRegistry(systemClock);
   const egress = createSystemEgress(registry);
   const server = createRelayServer({ registry, lend: createLendClient(config.lendSocket), egress, domain: config.domain, journal });
   if (config.domain === undefined) journal('no_domain');

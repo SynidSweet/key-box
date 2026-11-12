@@ -13,17 +13,19 @@ import { inspect } from 'node:util';
 import { HTTP_BODY_CAP_BYTES, HTTP_TIMEOUT_MS, HttpTransportError, refusingAdapterHttp } from '../src/ports/http.ts';
 import type { AdapterHttp, HttpFailureCode, HttpRequest, HttpResponse } from '../src/ports/http.ts';
 import type { PlatformEntry } from '../src/ports/platform.ts';
-import { createRegistry } from '../src/platforms/registry.ts';
+import { createRegistry, createRelayRegistry } from '../src/platforms/registry.ts';
 import { hostVerdict } from '../src/pure/egress-policy.ts';
 import { RegistryRefused, assertRegistry, checkRegistry } from '../src/pure/profile.ts';
 import { createAdapterHttp } from '../src/shell/adapter-http.ts';
 import { EgressRefused, createEgress, createTlsConnector } from '../src/shell/egress.ts';
-import type { Connector, Egress } from '../src/shell/egress.ts';
+import type { Connector, Egress, Resolver } from '../src/shell/egress.ts';
 import { NO_ISSUER_CLASSIFY, NO_ISSUER_SHAPE } from './fixtures/profiles.ts';
 import { TimedClock, adapterHttpTo, canary, fakePlatform, waitUntil } from './kit/index.ts';
 import { selfSignedCertificate } from './kit/tls.ts';
 
 const HOST = 'api.vendor.example';
+/** A public address for the fake resolver of the tests written for the deadline and abort rules. */
+const PUBLIC_ADDRESS = '8.8.8.8';
 const URL_OK = `https://${HOST}/v1/keys?limit=2&a=b%20c`;
 
 interface Seen {
@@ -43,7 +45,15 @@ interface World {
   respond(responder: Responder): void;
 }
 
-async function world(t: TestContext, options: { readonly bodyCapBytes?: number; readonly hosts?: readonly string[]; readonly connector?: Connector } = {}): Promise<World> {
+interface WorldOptions {
+  readonly bodyCapBytes?: number;
+  readonly hosts?: readonly string[];
+  readonly connector?: Connector;
+  readonly resolver?: Resolver;
+  readonly clock?: TimedClock;
+}
+
+async function world(t: TestContext, options: WorldOptions = {}): Promise<World> {
   const cert = await selfSignedCertificate(t, HOST);
   const seen: Seen[] = [];
   let responder: Responder = (_req, res) => {
@@ -65,12 +75,12 @@ async function world(t: TestContext, options: { readonly bodyCapBytes?: number; 
   });
   const port = (server.address() as AddressInfo).port;
   const tls = createTlsConnector({ ca: cert.cert });
-  const clock = new TimedClock(0);
+  const clock = options.clock ?? new TimedClock(0);
   const egress = createEgress({
     adapterHosts: [],
     registryHosts: options.hosts ?? [HOST],
     listed: [],
-    resolver: { resolve: () => Promise.resolve(['203.0.113.10']) },
+    resolver: options.resolver ?? { resolve: () => Promise.resolve(['203.0.113.10']) },
     connector: options.connector ?? { connect: (target, signal) => tls.connect({ ...target, address: '127.0.0.1', port }, signal) },
     scheduler: clock,
   });
@@ -318,4 +328,151 @@ test('KBOX-35 the kit AdapterHttp delivers a body whole to the server, returns a
     server.closeAllConnections();
   });
   assert.equal(await failure(http.request({ method: 'GET', url: 'https://api.x.example/p' })), 'unreachable');
+});
+
+test('KBOX-47 KBOX-23 the call deadline bounds name resolution: a lookup that outlasts timeoutMs ends the call as timeout at the deadline, not when the lookup ends', async (t) => {
+  const clock = new TimedClock(0);
+  let lookups = 0;
+  const w = await world(t, {
+    clock,
+    resolver: {
+      resolve: () =>
+        new Promise((resolve) => {
+          lookups += 1;
+          clock.after(3000, () => resolve([PUBLIC_ADDRESS]));
+        }),
+    },
+  });
+  let ended: HttpFailureCode | 'no failure' | undefined;
+  const call = failure(w.http.request(get(URL_OK, { timeoutMs: 300 }))).then((code) => void (ended = code));
+  await waitUntil(() => lookups === 1, 'the lookup to start');
+  clock.advance(300);
+  await waitUntil(() => ended !== undefined, 'the call to end at its deadline, before the lookup ends');
+  await call;
+  assert.equal(ended, 'timeout');
+  assert.equal(w.seen.length, 0, 'nothing was sent');
+});
+
+test('KBOX-47 an already-aborted signal stops the gate before it resolves or connects', async () => {
+  let resolves = 0;
+  let connects = 0;
+  const egress = createEgress({
+    adapterHosts: [],
+    registryHosts: [HOST],
+    listed: [],
+    resolver: {
+      resolve: () => {
+        resolves += 1;
+        return Promise.resolve([PUBLIC_ADDRESS]);
+      },
+    },
+    connector: {
+      connect: () => {
+        connects += 1;
+        return Promise.reject(new Error('must not connect'));
+      },
+    },
+    scheduler: new TimedClock(0),
+  });
+  const aborted = new AbortController();
+  aborted.abort();
+  await assert.rejects(egress.open('adapter', new URL(URL_OK), aborted.signal), (e: unknown) => e instanceof EgressRefused);
+  assert.equal(connects, 0);
+  assert.equal(resolves, 0);
+});
+
+test('KBOX-47 a signal aborted while the lookup runs never reaches the connector', async () => {
+  let connects = 0;
+  const abort = new AbortController();
+  const egress = createEgress({
+    adapterHosts: [],
+    registryHosts: [HOST],
+    listed: [],
+    resolver: {
+      resolve: () => {
+        abort.abort();
+        return Promise.resolve([PUBLIC_ADDRESS]);
+      },
+    },
+    connector: {
+      connect: () => {
+        connects += 1;
+        return Promise.reject(new Error('must not connect'));
+      },
+    },
+    scheduler: new TimedClock(0),
+  });
+  await assert.rejects(egress.open('adapter', new URL(URL_OK), abort.signal), (e: unknown) => e instanceof EgressRefused);
+  assert.equal(connects, 0);
+});
+
+test('KBOX-23 a request the client cannot send (a header value with a line break, a bad header name, a bad method) rejects as HttpTransportError invalid_request, with no value in the error', async (t) => {
+  const c = canary();
+  const secret = Buffer.from(c.bytes).toString('hex');
+  const w = await world(t);
+  const bad: HttpRequest[] = [
+    get(URL_OK, { headers: { 'x-k': `${secret}\r\nzz` } }),
+    get(URL_OK, { headers: { [`bad name ${secret}`]: 'v' } }),
+    { method: `BAD METHOD ${secret}`, url: URL_OK },
+  ];
+  for (const req of bad) {
+    const error = await w.http.request(req).then(
+      () => assert.fail('a failure was expected'),
+      (e: unknown) => e,
+    );
+    assert.ok(error instanceof HttpTransportError, String(error));
+    assert.equal(error.code, 'invalid_request');
+    c.assertAbsent({ message: error.message, inspected: inspect(error, { depth: 10 }), json: JSON.stringify(error) });
+  }
+  assert.equal(w.seen.length, 0);
+});
+
+test('KBOX-23 a gate failure that is not a refusal (a resolver that throws) still rejects as HttpTransportError', async (t) => {
+  const w = await world(t, {
+    resolver: {
+      resolve: () => {
+        throw new TypeError('a resolver that throws instead of rejecting');
+      },
+    },
+  });
+  assert.equal(await failure(w.http.request(get())), 'unreachable');
+});
+
+test('KBOX-47 the main-relay registry is built with the refusing client: every adapter call the relay process could make is refused', async () => {
+  const given: AdapterHttp[] = [];
+  const registry = createRelayRegistry({ now: () => 0 }, (deps) => {
+    given.push(deps.http);
+    return [];
+  });
+  assert.deepEqual(registry, []);
+  assert.equal(given.length, 1);
+  assert.equal(given[0], refusingAdapterHttp);
+  assert.equal(await failure(given[0]?.request(get()) ?? Promise.reject(new Error('no client'))), 'refused');
+});
+
+test('KBOX-23 KBOX-14 a body that drips past the deadline ends as timeout and never returns the partial body as an answer', async (t) => {
+  const w = await world(t);
+  let held: ServerResponse | undefined;
+  w.respond((_req, res) => {
+    res.writeHead(200, { 'content-length': '1000' });
+    held = res;
+  });
+  let outcome: HttpFailureCode | 'answered' | undefined;
+  const call = w.http
+    .request(get(URL_OK, { timeoutMs: 5000 }))
+    .then(
+      () => 'answered' as const,
+      (e: unknown) => (e instanceof HttpTransportError ? e.code : undefined),
+    )
+    .then((code) => void (outcome = code));
+  await waitUntil(() => held !== undefined, 'the server to hold the response');
+  for (let i = 0; i < 3; i += 1) {
+    await new Promise<void>((resolve) => void held?.write('a', () => resolve()));
+    w.clock.advance(1000);
+  }
+  assert.equal(outcome, undefined, 'still waiting before the deadline');
+  w.clock.advance(2000);
+  await waitUntil(() => outcome !== undefined, 'the call to end');
+  await call;
+  assert.equal(outcome, 'timeout');
 });
