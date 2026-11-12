@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, statSync } from 'node:fs';
 import { connect } from 'node:net';
 import { test } from 'node:test';
-import { FRAME_JSON } from '../src/pure/lend-protocol.ts';
+import { FRAME_JSON, parseGrantsAnswer } from '../src/pure/lend-protocol.ts';
 import { relayErrorBody } from '../src/pure/relay-errors.ts';
 import { hashToken } from '../src/pure/tokens.ts';
 import { FrameDecoder, LendUnavailable, createLendClient, encodeFrame } from '../src/shell/lend-socket.ts';
@@ -407,4 +407,40 @@ test('KBOX-3 a lend naming a project for a key whose profile is not project-host
   assert.deepEqual(await w.client.lend(projectLend('pathkey01', pass, STORED, 'models-list')), { ok: false, code: 'forbidden' });
   assert.deepEqual(mismatchRows(w), [['laptop', 'pathkey01', 'lend', 'location_mismatch']]);
   assert.equal((await w.client.lend(projectLend('pathkey01', pass, undefined, 'models-list'))).ok, true, 'control: without a project it is lent');
+});
+
+// ---------------------------------------------------------------- KBOX-3: every keyref on the lend socket has the stored shape
+
+const REAL_KEYREF = 'openai/shop/OPENAI_KEY';
+
+test('KBOX-3 resolve, lend, scan, audit and grants all accept a real keyref (a stored keyref has "/" and upper case)', async (t) => {
+  const w = await lendWorld(t);
+  const pass = w.enrol('laptop');
+  w.addKey({ keyref: REAL_KEYREF, value: textValue(canary().bytes), platform: 'pathplat', grants: ['laptop'] });
+  const token_hash = hashToken(pass);
+  assert.equal((await w.client.resolve({ op: 'resolve', token_hash, keyref: REAL_KEYREF, network: NETWORK })).ok, true);
+  const lent = await w.client.lend({ op: 'lend', token_hash, keyref: REAL_KEYREF, rule_id: 'models-list' });
+  assert.equal(lent.ok, true);
+  assert.equal((await w.client.scan({ op: 'scan', token_hash, keyref: REAL_KEYREF })).ok, true);
+  await w.client.audit({ label: 'laptop', source: '203.0.113.9', keyref: REAL_KEYREF, route: 'relay', method: 'GET', rule_id: 'models-list', status: 200, bytes: 1 });
+  assert.deepEqual(w.core.audit.read(0).entries.filter((r) => r.action === 'relay.request').map((r) => r.ref), [REAL_KEYREF]);
+  const grants = await w.client.grants({ op: 'grants', token_hash, network: NETWORK });
+  assert.deepEqual(grants.ok ? grants.grants.map((g) => g.keyref) : 'refused', [REAL_KEYREF]);
+});
+
+test('KBOX-3 resolve, lend and scan refuse a keyref that is not a stored shape ("~", "%2F", 129 characters) as bad_request', async (t) => {
+  const { w, pass } = await granted(t);
+  const token_hash = hashToken(pass);
+  for (const keyref of ['a~b', 'a%2Fb', 'a'.repeat(129)]) {
+    for (const request of [{ op: 'resolve', token_hash, keyref, network: NETWORK }, { op: 'lend', token_hash, keyref, rule_id: 'models-list' }, { op: 'scan', token_hash, keyref }]) {
+      const frames = new FrameDecoder().push(await rawExchange(w.socket, request));
+      assert.deepEqual(JSON.parse(Buffer.from(frames[0]?.body ?? []).toString()), { ok: 'false', code: 'bad_request' }, `${request.op} ${keyref.slice(0, 8)}`);
+    }
+  }
+});
+
+test('KBOX-3 parseGrantsAnswer accepts a grant whose keyref holds "/" and refuses one holding "~"', () => {
+  const answer = (keyref: string) => ({ ok: 'true', machine: 'laptop', grants: [{ keyref, platform: 'pathplat', name: 'OPENAI_KEY', projects: ['shop'] }] });
+  assert.equal(parseGrantsAnswer(answer(REAL_KEYREF)).ok, true);
+  assert.equal(parseGrantsAnswer(answer('a~b')).ok, false);
 });

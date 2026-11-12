@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import type { AllowRule, DenyRule, RelayProfile } from '../src/ports/relay-profile.ts';
-import { checkRegistry, compileProfile, refuseWidening } from '../src/pure/profile.ts';
+import { checkRegistry, compileProfile, denyOnlyTargetOf, refuseWidening } from '../src/pure/profile.ts';
 import type { ProfileEngine } from '../src/pure/profile.ts';
 import { parseRelayTarget } from '../src/pure/target-parse.ts';
 import { IAM_HOST, PATH_HOST, STORAGE_HOST, hostProfile, leakyProfile, pathProfile } from './fixtures/profiles.ts';
@@ -199,4 +199,23 @@ test('KBOX-25 positive control: the harness reports the samples a leaky profile 
   const forgetful: RelayProfile = { ...leakyProfile, platform: 'pathplat', mustDeny: pathProfile.mustDeny.filter((d) => d.id === 'login-token') };
   const through = await leaks(t, forgetful, pathProfile.mustDeny);
   assert.deepEqual([...new Set(through.map((s) => s.split(' ')[0]))], ['admin-key-create', 'project-key-create', 'service-account-create']);
+});
+
+// ---------------------------------------------------------------- KBOX-13: a sample target carries the keyref's relay address
+
+test('KBOX-13 the deny-harness target of a keyref holding "/" is its address (`/` written `~`) and parses back to that keyref', () => {
+  const sample = { method: 'GET', url: `https://${PATH_HOST}/v1/models` };
+  const target = engineOf(pathProfile).sampleTarget(sample, 'pathplat/shop/K');
+  assert.equal(target, '/r/pathplat~shop~K/v1/models');
+  const back = parseRelayTarget(target ?? '');
+  assert.deepEqual(back.ok ? [back.value.keyref, back.value.segments] : back.code, ['pathplat/shop/K', ['v1', 'models']]);
+  const hostTarget = engineOf(hostProfile).sampleTarget({ method: 'GET', url: `https://${IAM_HOST}/v1/x` }, 'hostplat/p/K');
+  assert.equal(hostTarget, `/r/hostplat~p~K/${IAM_HOST}/v1/x`);
+});
+
+test('KBOX-13 the deny-only target of a keyref holding "/" is its address and parses back to that keyref', () => {
+  const target = denyOnlyTargetOf({ method: 'GET', url: 'https://api.vercel.example/v6/user/tokens' }, 'pathplat/shop/K');
+  assert.equal(target, '/r/pathplat~shop~K/v6/user/tokens');
+  const back = parseRelayTarget(target ?? '');
+  assert.equal(back.ok ? back.value.keyref : back.code, 'pathplat/shop/K');
 });

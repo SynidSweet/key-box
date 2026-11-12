@@ -6,7 +6,9 @@ import type { TestContext } from 'node:test';
 import type { AuditRow } from '../src/ports/audit.ts';
 import { RegistryRefused } from '../src/pure/profile.ts';
 import { METHOD_OVERRIDE_HEADERS } from '../src/pure/relay-errors.ts';
-import { canonicalPath, canonicalQuery, parseRelayTarget } from '../src/pure/target-parse.ts';
+import { keyrefOf } from '../src/pure/class.ts';
+import { SIGNING_KEYREF } from '../src/platforms/google/signing-key.ts';
+import { canonicalPath, canonicalQuery, parseRelayTarget, relayAddressOf } from '../src/pure/target-parse.ts';
 import { createLendClient } from '../src/shell/lend-socket.ts';
 import { createRelayServer } from '../src/shell/relay-http.ts';
 import { waitUntil } from './kit/index.ts';
@@ -431,4 +433,48 @@ test('KBOX-13 step 3 documents%3ArunQuery and documents:runQuery both match the 
     assert.equal((await w.call(`${PATH}/v1/${spelling}`, { method: 'POST' })).status, 200, spelling);
   }
   assert.deepEqual(w.upstream.requests.map((r) => r.url), ['/v1/documents:runQuery', '/v1/documents:runQuery']);
+});
+
+// ---------------------------------------------------------------- KBOX-13 revision 2026-11-13: the address is the keyref with "/" written "~"
+
+test('KBOX-13 an address is the keyref with each "/" written "~": real keyrefs parse back, a leading "~" is a valid address, an old-shape address still parses', () => {
+  const real = parsed('/r/openai~shop~OPENAI_KEY/v1/models');
+  assert.equal(real.keyref, 'openai/shop/OPENAI_KEY');
+  assert.deepEqual(real.segments, ['v1', 'models']);
+  assert.equal(parsed('/r/google~p~OIDC_SIGNING_KEY/x').keyref, 'google/p/OIDC_SIGNING_KEY');
+  assert.equal(parsed('/r/abcdef/v1/x').keyref, 'abcdef');
+  assert.equal(parsed('/r/~x/v1').keyref, '/x', 'NAME allows a keyref that starts with "/", so its address starts with "~"');
+});
+
+test('KBOX-13 an address that is not a stored keyref shape is not_found: "_", "." first, any "%", a symbol NAME refuses, empty, over 128, and every other prefix', () => {
+  for (const address of ['_', '_x', '.x', 'a%7Eb', 'a%2Fb', 'OPENAI%5FKEY', 'a+b', 'a!b', 'a;b', 'a=b', 'a*b', 'a~b%7E', '', 'a'.repeat(129)]) {
+    assert.equal(refusal(`/r/${address}/v1`), 'not_found', address);
+  }
+  assert.equal(refusal('/r//v1'), 'not_found');
+  assert.equal(refusal(`/r/${'a'.repeat(128)}/v1`), 'accepted', 'control: 128 is the longest address');
+  for (const target of ['/x/abcdef/v1', '/r', '/r/', '/rr/abcdef', 'r/abcdef', '/R/abcdef']) assert.equal(refusal(target), 'not_found', target);
+});
+
+test('KBOX-13 the parse is the inverse of relayAddressOf: every keyref of the corpus round-trips, and its address holds no "/" and no "%"', () => {
+  const corpus = [
+    keyrefOf('openai', ['shop'], 'OPENAI_KEY'),
+    keyrefOf('supabase', ['my shop'], 'SUPABASE_SECRET_KEY'),
+    keyrefOf('supabase', ['a.b'], 'K'),
+    keyrefOf('supabase', ['プロジェクト'], 'K'),
+    keyrefOf('openai', [], 'K'),
+    SIGNING_KEYREF,
+    `p/x/${'N'.repeat(128 - 4)}`,
+  ];
+  assert.equal(corpus.at(-1)?.length, 128);
+  for (const keyref of corpus) {
+    const address = relayAddressOf(keyref);
+    assert.equal(/[/%]/.test(address), false, keyref);
+    assert.equal(parsed(`/r/${address}/v1`).keyref, keyref);
+  }
+});
+
+test('KBOX-13 after a real address the rest parses as before: encoded separators, "..", "//" and ";" are bad_path, a duplicate query key is bad_query', () => {
+  const base = '/r/openai~shop~OPENAI_KEY';
+  for (const path of ['/v1/%2F/x', '/v1/../x', '/v1//x', '/v1/a;x']) assert.equal(refusal(`${base}${path}`), 'bad_path', path);
+  assert.equal(refusal(`${base}/v1/x?a=1&a=2`), 'bad_query');
 });

@@ -2,6 +2,8 @@
 // Rules match the decoded segments and query pairs; what goes upstream is their canonical re-encoding, so the path matched is
 // the path sent. A refusal is a fixed code and never quotes the target.
 
+import { NAME } from './schemas.ts';
+
 export type TargetFailure = 'not_found' | 'bad_path' | 'bad_query';
 
 export type QueryPair = readonly [name: string, value: string];
@@ -17,8 +19,8 @@ export interface RelayTarget {
 
 export type TargetParse = { readonly ok: true; readonly value: RelayTarget } | { readonly ok: false; readonly code: TargetFailure };
 
-/** KBOX-32: a keyref is 6 to 24 lower-case letters and digits; `_` and anything else never routes. */
-export const KEYREF = /^[a-z0-9]{6,24}$/;
+/** KBOX-13: the address of a key is its keyref in one path segment with each `/` written `~`. */
+export const relayAddressOf = (keyref: string): string => keyref.replaceAll('/', '~');
 
 const HEX = /^[0-9A-Fa-f]{2}$/;
 /** Printable ASCII without space. Anything else raw (control, space, DEL, non-ASCII) is refused. */
@@ -88,7 +90,7 @@ function parseQueryText(rawQuery: string): QueryPair[] | undefined {
 
 const PREFIX = '/r/';
 
-/** The one parse of a relay target `/r/<keyref>/<path>?<query>`. */
+/** The one parse of a relay target `/r/<address>/<path>?<query>`; the address is the keyref with each `/` written `~`. */
 export function parseRelayTarget(target: string): TargetParse {
   if (!target.startsWith(PREFIX)) return { ok: false, code: 'not_found' };
   const hash = target.indexOf('#');
@@ -97,8 +99,10 @@ export function parseRelayTarget(target: string): TargetParse {
   if (hash >= 0 && hash < pathEnd) return { ok: false, code: 'bad_path' };
   const rest = target.slice(PREFIX.length, pathEnd);
   const slash = rest.indexOf('/');
-  const keyref = slash < 0 ? rest : rest.slice(0, slash);
-  if (!KEYREF.test(keyref)) return { ok: false, code: 'not_found' };
+  const address = slash < 0 ? rest : rest.slice(0, slash);
+  // The address is read raw, never decoded: a `%` is not in NAME, so an escaped `~` or `/` never routes.
+  const keyref = address.replaceAll('~', '/');
+  if (!NAME.test(keyref)) return { ok: false, code: 'not_found' };
   const path = parsePath(slash < 0 ? '' : rest.slice(slash));
   if (path === undefined) return { ok: false, code: 'bad_path' };
   const query = parseQueryText(mark < 0 ? '' : target.slice(mark + 1));

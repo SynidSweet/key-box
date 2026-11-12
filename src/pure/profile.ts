@@ -9,7 +9,7 @@ import type { EntryFailure } from './registry-entry.ts';
 import { compileTemplate, matchTemplate, queryFits } from './rule-match.ts';
 import type { Template } from './rule-match.ts';
 import { HTTP_METHODS } from './schemas.ts';
-import { canonicalPath, canonicalQuery, parseRelayTarget } from './target-parse.ts';
+import { canonicalPath, canonicalQuery, parseRelayTarget, relayAddressOf } from './target-parse.ts';
 import type { QueryPair, RelayTarget } from './target-parse.ts';
 
 /** Platforms whose keys are never relayed in v1; they export only their mustDeny list (KBOX-23). */
@@ -126,11 +126,11 @@ function relayTargetOf(profile: RelayProfile, sample: SampleRequest, keyref: str
   if (parts === undefined) return undefined;
   switch (profile.origin.kind) {
     case 'fixed':
-      return parts.host === profile.origin.host ? `/r/${keyref}${parts.tail}` : undefined;
+      return parts.host === profile.origin.host ? `/r/${relayAddressOf(keyref)}${parts.tail}` : undefined;
     case 'project-host':
-      return projectOfHost(profile.origin, parts.host) === undefined ? undefined : `/r/${keyref}${parts.tail}`;
+      return projectOfHost(profile.origin, parts.host) === undefined ? undefined : `/r/${relayAddressOf(keyref)}${parts.tail}`;
     case 'host-in-path':
-      return profile.origin.hosts.includes(parts.host) ? `/r/${keyref}/${parts.host}${parts.tail}` : undefined;
+      return profile.origin.hosts.includes(parts.host) ? `/r/${relayAddressOf(keyref)}/${parts.host}${parts.tail}` : undefined;
   }
 }
 
@@ -163,14 +163,17 @@ function classifySample(sample: SampleRequest, targetOf: (sample: SampleRequest)
 const classifyForProfile = (profile: RelayProfile, sample: SampleRequest): SampleKind =>
   classifySample(sample, (s) => relayTargetOf(profile, s, `${SAMPLE_KEYREF}01`), (target) => requestOf(profile, sample.method, target, sampleProject(profile, sample)));
 
+/** The relay target of a denyOnly sample for `keyref`: the host is the sample's own, and it must be a plain host name. */
+export function denyOnlyTargetOf(sample: SampleRequest, keyref: string): string | undefined {
+  const parts = splitSample(sample.url);
+  return parts === undefined || !HOST.test(parts.host) ? undefined : `/r/${relayAddressOf(keyref)}${parts.tail}`;
+}
+
 /** A denyOnly list has no profile: the host is the sample's own, and it must be a plain host name. */
 const classifyDenyOnly = (sample: SampleRequest): SampleKind =>
   classifySample(
     sample,
-    (s) => {
-      const parts = splitSample(s.url);
-      return parts === undefined || !HOST.test(parts.host) ? undefined : `/r/${SAMPLE_KEYREF}01${parts.tail}`;
-    },
+    (s) => denyOnlyTargetOf(s, `${SAMPLE_KEYREF}01`),
     (target) => ({ method: sample.method, host: '', upstream: '', segments: target.segments, query: target.query }),
   );
 

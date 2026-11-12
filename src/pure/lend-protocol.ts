@@ -13,14 +13,13 @@ export const FRAME_END = 0x45; // 'E'
 export const FRAME_MAX = 1024 * 1024;
 
 const TOKEN_HASH = /^[0-9a-f]{64}$/;
-const KEYREF_TEXT = /^[a-z0-9]{6,24}$/;
 
 export const AUDIT_ROW_SCHEMA = {
   label: optional(text(LABEL)),
   source: optional(text(ADDRESS)),
   agent: optional(text(LABEL)),
   project: optional(text(NAME)),
-  keyref: optional(text(KEYREF_TEXT)),
+  keyref: optional(text(NAME)),
   route: oneOf('relay', 'grants', 'unmatched'),
   method: oneOf(...HTTP_METHODS),
   rule_id: optional(text(NAME)),
@@ -33,11 +32,11 @@ export const AUDIT_ROW_SCHEMA = {
 export type RelayAuditRow = Infer<typeof AUDIT_ROW_SCHEMA>;
 
 const REQUESTS = {
-  resolve: { op: oneOf('resolve'), token_hash: text(TOKEN_HASH), keyref: text(KEYREF_TEXT), network: text(NETWORK) },
+  resolve: { op: oneOf('resolve'), token_hash: text(TOKEN_HASH), keyref: text(NAME), network: text(NETWORK) },
   grants: { op: oneOf('grants'), token_hash: text(TOKEN_HASH), network: text(NETWORK) },
   // `project` is present exactly when the key's profile has a project-host origin: the project the relay sends to (KBOX-3, KBOX-57).
-  lend: { op: oneOf('lend'), token_hash: text(TOKEN_HASH), keyref: text(KEYREF_TEXT), rule_id: text(NAME), project: optional(text(NAME)) },
-  scan: { op: oneOf('scan'), token_hash: text(TOKEN_HASH), keyref: text(KEYREF_TEXT) },
+  lend: { op: oneOf('lend'), token_hash: text(TOKEN_HASH), keyref: text(NAME), rule_id: text(NAME), project: optional(text(NAME)) },
+  scan: { op: oneOf('scan'), token_hash: text(TOKEN_HASH), keyref: text(NAME) },
 } as const satisfies Readonly<Record<string, Schema>>;
 
 export type LendRequest =
@@ -95,7 +94,7 @@ export function parseResolveAnswer(raw: unknown): Parsed<ResolveAnswer> {
   return { ok: true, value: { ok: true, label, platform, ...(project === undefined ? {} : { project }) } };
 }
 
-const GRANT = { keyref: text(KEYREF_TEXT), platform: text(/^[a-z0-9][a-z0-9-]{0,31}$/), name: text(NAME) } as const satisfies Schema;
+const GRANT = { keyref: text(NAME), platform: text(/^[a-z0-9][a-z0-9-]{0,31}$/), name: text(NAME) } as const satisfies Schema;
 
 export function parseGrantsAnswer(raw: unknown): Parsed<GrantsAnswer> {
   const refusal = refusalOf(raw);

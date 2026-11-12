@@ -17,7 +17,7 @@ import type { ProfileEngine } from '../pure/profile.ts';
 import { FORCED_RESPONSE_HEADERS, METHOD_OVERRIDE_HEADERS, RELAY_ERRORS, relayErrorBody, upstreamRefusedBody } from '../pure/relay-errors.ts';
 import type { RelayErrorCode } from '../pure/relay-errors.ts';
 import { HTTP_METHODS, LABEL, NAME } from '../pure/schemas.ts';
-import { canonicalPath, canonicalQuery, parseRelayTarget } from '../pure/target-parse.ts';
+import { canonicalPath, canonicalQuery, parseRelayTarget, relayAddressOf } from '../pure/target-parse.ts';
 import type { RelayTarget } from '../pure/target-parse.ts';
 import { hashToken, parsePass } from '../pure/tokens.ts';
 import { EgressRefused } from './egress.ts';
@@ -37,7 +37,7 @@ export interface RelayDeps {
   readonly registry: readonly PlatformEntry[];
   readonly lend: LendClient;
   readonly egress: Egress;
-  /** The box's domain: the relay URL of a key is `https://api.keys.<domain>/r/<keyref>`. Absent until the bootstrap sets it: then /r/_/grants is unavailable. */
+  /** The box's domain: the relay URL of a key is `https://api.keys.<domain>/r/<address>`. Absent until the bootstrap sets it: then /r/_/grants is unavailable. */
   readonly domain: string | undefined;
   /** A fixed code when the relay itself could not do its job. Never text of a request, a value or an answer. */
   readonly journal: (code: string) => void;
@@ -214,7 +214,7 @@ export function createRelayServer(deps: RelayDeps): RelayServer {
     trace.confirmed = true;
     trace.label = answer.machine;
     const list = answer.grants.map((g) => {
-      const relayUrl = `https://api.keys.${domain}/r/${g.keyref}`;
+      const relayUrl = `https://api.keys.${domain}/r/${relayAddressOf(g.keyref)}`;
       const profile = engines.get(g.platform)?.profile;
       return { keyref: g.keyref, platform: g.platform, name: g.name, projects: g.projects, env: profile === undefined ? {} : profile.envForClients(relayUrl) };
     });

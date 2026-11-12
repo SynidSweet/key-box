@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { waitUntil } from './kit/index.ts';
+import { PROJECT_REGISTRY } from './fixtures/profiles.ts';
 import { relayWorld } from './support/relay-world.ts';
 import type { RelayReply } from './support/relay-world.ts';
 
@@ -75,4 +76,74 @@ test('KBOX-32 the OpenAI SDK request shape under the granted base URL reaches mo
   assert.equal(reply.status, 200);
   assert.deepEqual([w.upstream.requests[0]?.url, Object.keys(w.upstream.requests[0]?.headers ?? {}).filter((h) => h.startsWith('x-stainless') || h === 'user-agent')], ['/v1/models', []]);
   await waitUntil(() => w.lend.core.audit.read(0).entries.some((r) => r.action === 'relay.request' && r.detail['rule_id'] === 'models-list'), 'the models-list row');
+});
+
+// ---------------------------------------------------------------- KBOX-13 / KBOX-32 revision 2026-11-13: a real keyref has an address
+
+const REAL = 'pathplat/shop/REAL_KEY';
+const ADDRESS = 'pathplat~shop~REAL_KEY';
+const relayRows = (w: Awaited<ReturnType<typeof relayWorld>>) => w.lend.core.audit.read(0).entries.filter((r) => r.action === 'relay.request');
+
+test('KBOX-32 a real keyref is listed with its address in the env and is relayed by that address, and the audit row names the keyref', async (t) => {
+  const w = await relayWorld(t);
+  w.lend.addKey({ keyref: REAL, value: w.value, grants: ['laptop'] });
+  const listed = json(await w.call('/r/_/grants')) as { grants: { keyref: string; env: Record<string, string> }[] };
+  const entry = listed.grants.find((g) => g.keyref === REAL);
+  assert.equal(entry?.env['PATHPLAT_BASE_URL'], `${RELAY}/r/${ADDRESS}/v1`);
+  assert.equal((await w.call(`/r/${ADDRESS}/v1/models`)).status, 200);
+  assert.equal(w.upstream.requests[0]?.url, '/v1/models');
+  await waitUntil(() => relayRows(w).some((r) => r.detail['route'] === 'relay'), 'the relay audit row');
+  assert.deepEqual(relayRows(w).filter((r) => r.detail['route'] === 'relay').map((r) => r.ref), [REAL]);
+});
+
+test('KBOX-13 a well-formed address of no key is 403 with no upstream call, and the audit names the keyref', async (t) => {
+  const w = await relayWorld(t);
+  const reply = await w.call('/r/pathplat~shop~NO_SUCH_KEY/v1/models');
+  assert.equal(reply.status, 403);
+  assert.equal(w.upstream.requests.length, 0);
+  await waitUntil(() => relayRows(w).length === 1, 'the relay audit row');
+  assert.equal(relayRows(w)[0]?.ref, 'pathplat/shop/NO_SUCH_KEY');
+});
+
+test('KBOX-13 a key granted only to another machine, and a key whose grant was removed, are each 403 with no upstream call', async (t) => {
+  const w = await relayWorld(t);
+  w.lend.enrol('desktop');
+  w.lend.addKey({ keyref: 'pathplat/shop/DESK_ONLY', value: w.value, grants: ['desktop'] });
+  w.lend.addKey({ keyref: REAL, value: w.value, grants: ['laptop'] });
+  assert.equal((await w.call(`/r/${ADDRESS}/v1/models`)).status, 200, 'control: granted');
+  w.lend.core.meta.removeGrant(REAL, 'laptop');
+  assert.equal((await w.call(`/r/${ADDRESS}/v1/models`)).status, 403);
+  assert.equal((await w.call('/r/pathplat~shop~DESK_ONLY/v1/models')).status, 403);
+  assert.equal(w.upstream.requests.length, 1);
+});
+
+test('KBOX-13 each key has one address: an escaped "~" or "_" is 404 and the "/" spelling is 403, none reaches upstream', async (t) => {
+  const w = await relayWorld(t);
+  w.lend.addKey({ keyref: REAL, value: w.value, grants: ['laptop'] });
+  assert.equal((await w.call('/r/pathplat%7Eshop%7EREAL_KEY/v1/models')).status, 404);
+  assert.equal((await w.call('/r/pathplat~shop~REAL%5FKEY/v1/models')).status, 404);
+  assert.equal((await w.call('/r/pathplat/shop/REAL_KEY/v1/models')).status, 403, 'the address "pathplat" names no key');
+  assert.equal(w.upstream.requests.length, 0);
+});
+
+test('KBOX-13 step 3 an encoded "/" inside the address is 404 not_found before auth; after the address it is 400 bad_path after auth', async (t) => {
+  const w = await relayWorld(t);
+  w.lend.addKey({ keyref: REAL, value: w.value, grants: ['laptop'] });
+  const inside = await w.call('/r/pathplat%2Fshop~REAL_KEY/v1/models', { pass: null });
+  assert.deepEqual([inside.status, (json(inside) as { error: { code: string } }).error.code], [404, 'not_found']);
+  assert.equal((await w.call(`/r/${ADDRESS}/v1/a%2Fb`, { pass: null })).status, 401);
+  const after = await w.call(`/r/${ADDRESS}/v1/a%2Fb`);
+  assert.deepEqual([after.status, (json(after) as { error: { code: string } }).error.code], [400, 'bad_path']);
+  assert.equal(w.upstream.requests.length, 0);
+});
+
+test('KBOX-57 a key re-added at another project keeps its address and is relayed to the new project host only', async (t) => {
+  const w = await relayWorld(t, { registry: PROJECT_REGISTRY });
+  const keyref = 'projplat/shop/PROJ_KEY';
+  w.lend.addKey({ keyref, value: w.value, platform: 'projplat', grants: ['laptop'], at: { project: 'abcdefgh' } });
+  assert.equal((await w.call('/r/projplat~shop~PROJ_KEY/rest/v1/things')).status, 200);
+  assert.deepEqual(w.connects, ['abcdefgh.projplat.example']);
+  w.lend.readdAt(keyref, { project: 'zyxwvuts' });
+  assert.equal((await w.call('/r/projplat~shop~PROJ_KEY/rest/v1/things')).status, 200);
+  assert.deepEqual(w.connects, ['abcdefgh.projplat.example', 'zyxwvuts.projplat.example']);
 });
