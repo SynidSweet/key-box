@@ -1,0 +1,7 @@
+[
+  "openai.admin-key-length",
+  "openai.svcacct-key-length",
+  "openai.create-key-path",
+  "openai.verifier-call",
+  "openai.create-key-body"
+]

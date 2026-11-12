@@ -1,0 +1,21 @@
+[
+  "supabase.pat-create-by-api",
+  "supabase.reveal-on-create",
+  "supabase.reveal-on-get",
+  "supabase.edge-secrets-get-value",
+  "supabase.relay-allow-postgrest-tables",
+  "supabase.relay-allow-rpc",
+  "supabase.relay-allow-storage-objects",
+  "supabase.relay-allow-storage-list",
+  "supabase.relay-deny-auth",
+  "supabase.relay-deny-pg",
+  "supabase.relay-deny-graphql",
+  "supabase.relay-deny-functions",
+  "supabase.relay-deny-storage-sign",
+  "supabase.relay-deny-storage-upload-sign",
+  "supabase.relay-deny-storage-bucket",
+  "supabase.relay-deny-realtime",
+  "supabase.relay-deny-rest-root",
+  "supabase.relay-deny-profile-headers",
+  "supabase.sb-secret-length"
+]

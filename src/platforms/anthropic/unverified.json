@@ -1,0 +1,8 @@
+[
+  "anthropic.models-verify",
+  "anthropic.revoked-key-answer",
+  "anthropic.key-list-status-filter",
+  "anthropic.key-retire-statuses",
+  "anthropic.key-formats",
+  "anthropic.key-page"
+]
