@@ -19,7 +19,7 @@ import { RegistryRefused, assertRegistry, checkRegistry } from '../src/pure/prof
 import { createAdapterHttp } from '../src/shell/adapter-http.ts';
 import { EgressRefused, createEgress, createTlsConnector } from '../src/shell/egress.ts';
 import type { Connector, Egress } from '../src/shell/egress.ts';
-import { NO_ISSUER_SHAPE } from './fixtures/profiles.ts';
+import { NO_ISSUER_CLASSIFY, NO_ISSUER_SHAPE } from './fixtures/profiles.ts';
 import { TimedClock, adapterHttpTo, canary, fakePlatform, waitUntil } from './kit/index.ts';
 import { selfSignedCertificate } from './kit/tls.ts';
 
@@ -265,7 +265,7 @@ test('KBOX-23 the refusing client refuses every call', async () => {
   assert.equal(await failure(refusingAdapterHttp.request(get())), 'refused');
 });
 
-const entryWith = (hosts: readonly string[]): PlatformEntry => ({ id: 'hostful', shape: NO_ISSUER_SHAPE, unverified: [], hosts });
+const entryWith = (hosts: readonly string[]): PlatformEntry => ({ id: 'hostful', shape: NO_ISSUER_SHAPE, classify: NO_ISSUER_CLASSIFY, unverified: [], hosts });
 
 test('KBOX-23 a registry entry host is an exact lower-case DNS name; a wildcard, port, path, upper case or address is refused naming the platform', () => {
   assert.equal(checkRegistry([entryWith(['api.vercel.com', 'sts.googleapis.com'])]).ok, true);
