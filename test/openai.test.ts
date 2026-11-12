@@ -441,7 +441,7 @@ test('KBOX-14 KBOX-38 an upstream 401 that quotes the key masked is replaced end
   w.canary.assertAbsent({ body: reply.body, headers: JSON.stringify(reply.headers) });
   const forms = scanForms(value);
   assert.ok(forms.ok);
-  assert.equal(forms.forms.some((f) => reply.body.includes(f.bytes)), false);
+  assert.equal(forms.forms.some((f) => reply.body.includes(Buffer.from(f.bytes))), false);
 });
 
 const sdkRequest = JSON.parse(readFileSync(new URL('./fixtures/openai-sdk-request.json', import.meta.url), 'utf8')) as {

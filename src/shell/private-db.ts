@@ -1,12 +1,13 @@
 // KBOX-5: private.db holds Web Push subscriptions and approver credentials. Only core's main opens it, and no export
 // route can: this adapter is the one place that names the file.
 import { DatabaseSync } from 'node:sqlite';
+import { BUSY_TIMEOUT_MS } from './db.ts';
 import type { ApproverRecord, ApproverRow, PrivateStore, PushSubscriptionRow, VapidKeyPairRow } from '../ports/private.ts';
 
 export function openPrivateDatabase(path: string): PrivateStore {
   const db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA busy_timeout = 5000');
+  db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
   db.exec(`
     CREATE TABLE IF NOT EXISTS push_subscriptions (
       endpoint TEXT PRIMARY KEY,

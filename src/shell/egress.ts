@@ -93,11 +93,24 @@ export function createTlsConnector(options: { readonly ca?: string } = {}): Conn
   };
 }
 
+/** `work`'s answer, or a rejection the moment `signal` aborts (the work is left to finish unheard). */
+function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error('aborted'));
+      return;
+    }
+    const onAbort = (): void => reject(new Error('aborted'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
 export function createEgress(deps: EgressDeps): Egress {
-  const resolveOnce = async (host: string): Promise<string> => {
+  const resolveOnce = async (host: string, signal: AbortSignal): Promise<string> => {
     let answers: readonly string[];
     try {
-      answers = await deps.resolver.resolve(host);
+      answers = await abortable(deps.resolver.resolve(host), signal);
     } catch (cause) {
       throw new EgressRefused('resolve_failed', { cause });
     }
@@ -108,6 +121,7 @@ export function createEgress(deps: EgressDeps): Egress {
   };
 
   const connectInTime = (target: ConnectTarget, signal: AbortSignal): Promise<Duplex> => {
+    if (signal.aborted) return Promise.reject(new EgressRefused('connect_failed'));
     const attempt = new AbortController();
     let timedOut = false;
     const cancel = deps.scheduler.after(CONNECT_TIMEOUT_MS, () => {
@@ -139,7 +153,8 @@ export function createEgress(deps: EgressDeps): Egress {
       if (url.protocol !== 'https:' || url.port !== '' || url.username !== '' || url.password !== '') throw new EgressRefused('bad_url');
       const verdict = hostVerdict(caller, url.hostname, deps.adapterHosts, deps.listed, deps.registryHosts);
       if (verdict !== 'allowed') throw new EgressRefused(verdict);
-      const address = await resolveOnce(url.hostname);
+      if (signal.aborted) throw new EgressRefused('resolve_failed');
+      const address = await resolveOnce(url.hostname, signal);
       return connectInTime({ address, port: 443, servername: url.hostname }, signal);
     },
   };

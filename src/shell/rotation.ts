@@ -8,6 +8,7 @@ import type { ActionKind } from '../pure/actions.ts';
 import { ApiError } from '../pure/errors.ts';
 import { dueDates } from '../pure/scheduler.ts';
 import { slotOf } from '../pure/slots.ts';
+import { lastBoxRequestEnd } from './approvals.ts';
 import type { Approvals, Executor } from './approvals.ts';
 import type { Approvers } from './approvers.ts';
 import type { CoreParts } from './core.ts';
@@ -32,6 +33,10 @@ const TICK_MS = HOUR_MS;
 const RECONCILE_MS = 24 * HOUR_MS;
 /** A key whose last run failed is not tried again by the schedule for this long: one notice per day at most. */
 const AFTER_FAILURE_MS = 24 * HOUR_MS;
+/** A request the scheduler opened and the owner refused is not opened again for this long after the refusal (KBOX-52). */
+const AFTER_REFUSAL_MS = 7 * 24 * HOUR_MS;
+/** One that expired unanswered, for this long after the expiry (KBOX-52). */
+const AFTER_EXPIRY_MS = 24 * HOUR_MS;
 /** The fixed codes a failed part of the schedule is audited with (`rotation.drive_failed`). */
 type ScheduleFault = 'tick_failed' | 'resume_failed' | 'reconcile_failed';
 /** The part of the schedule each code names, recorded as the audit row's `run_id`. */
@@ -137,6 +142,16 @@ export function openRotation(deps: RotationDeps): Rotation {
   };
   const faultOf = (subject: string, code: ScheduleFault): AuditEvent => ({ action: 'rotation.drive_failed', subject, at: deps.clock.now(), detail: { run_id: PART_OF[code], code } });
 
+  /** KBOX-52: whether the scheduler's last request for this slot was refused or expired and its wait still runs. A manual rotation never asks this. */
+  const requestWaits = (slot: string, platform: string, now: number): boolean => {
+    if (isPasteSource(platform)) {
+      const expired = paste.lastExpiredAt(slot);
+      return expired !== undefined && now - expired < AFTER_EXPIRY_MS;
+    }
+    const ended = lastBoxRequestEnd(parts.db, slot);
+    return ended !== undefined && now - ended.at < (ended.outcome === 'denied' ? AFTER_REFUSAL_MS : AFTER_EXPIRY_MS);
+  };
+
   const tickKey = (key: KeyHead, now: number, due: ReadonlyMap<string, number>, waiting: ReadonlySet<string>): void => {
     const slot = slotOf({ kind: 'rotate_key', keyref: key.keyref });
     const pending = waiting.has(slot) || paste.hasPending(slot);
@@ -147,6 +162,7 @@ export function openRotation(deps: RotationDeps): Rotation {
     const last = store.runs().filter((r) => r.keyref === key.keyref).at(-1);
     // KBOX-52: no sooner than 24 hours after the failure itself (the schema refuses a failed run without its failure time).
     if (last?.state === 'failed' && now - (last.failedAt ?? last.openedAt) < AFTER_FAILURE_MS) return;
+    if (key.class !== 'ordinary' && requestWaits(slot, key.platform, now)) return;
     // KBOX-34: an ordinary key on a paste-source platform has no issuer; the box holds no such key and never runs it as an api run.
     if (key.class === 'ordinary' && isPasteSource(key.platform)) return;
     if (key.class === 'ordinary') orchestrator.start({ keyref: key.keyref, origin: 'schedule' });

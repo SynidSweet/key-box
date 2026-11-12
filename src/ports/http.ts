@@ -30,9 +30,10 @@ export interface HttpResponse {
  * - `unreachable`: resolving or connecting failed, or the connection broke before an answer;
  * - `timeout`: the deadline passed;
  * - `too_large`: the body went over the cap;
- * - `malformed`: the answer was not valid HTTP or was cut short.
+ * - `malformed`: the answer was not valid HTTP or was cut short;
+ * - `invalid_request`: the request cannot be sent as given (a header name or value or the method is not valid HTTP).
  */
-export type HttpFailureCode = 'refused' | 'unreachable' | 'timeout' | 'too_large' | 'malformed';
+export type HttpFailureCode = 'refused' | 'unreachable' | 'timeout' | 'too_large' | 'malformed' | 'invalid_request';
 
 export class HttpTransportError extends Error {
   readonly code: HttpFailureCode;
