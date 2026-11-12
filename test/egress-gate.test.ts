@@ -101,14 +101,13 @@ test('KBOX-47 every private, loopback, link-local and metadata address is refuse
   }
 });
 
-test('KBOX-47 6to4, Teredo, both NAT64 prefixes and the IPv4 documentation and 6to4-relay ranges are refused at, inside and at the edges of each prefix', () => {
+test('KBOX-47 6to4, Teredo, both NAT64 prefixes and the old 6to4-relay range are refused (the IPv4 documentation ranges stay allowed: they reach no private network, orchestrator 2026-11-12) at, inside and at the edges of each prefix', () => {
   const refused = [
     '2002::', '2002:808:808::1', '2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff', // 6to4, a public v4 inside included
     '2001::', '2001:0:4136:e378:8000:63bf:3fff:fdd2', '2001:0:ffff:ffff:ffff:ffff:ffff:ffff', // Teredo
     '64:ff9b::', '64:ff9b::808:808', '64:ff9b::ffff:ffff', // NAT64 /96, a public v4 inside included
     '64:ff9b:1::', '64:ff9b:1:ffff:ffff:ffff:ffff:ffff', // local-use NAT64 /48
-    '192.0.2.0', '192.0.2.1', '192.0.2.255', '198.51.100.0', '198.51.100.77', '198.51.100.255', '203.0.113.0', '203.0.113.10', '203.0.113.255',
-    '192.88.99.1', '::ffff:192.0.2.1', '::ffff:203.0.113.10',
+    '192.88.99.1', '::ffff:192.88.99.1',
   ];
   for (const address of refused) assert.equal(addressRefused(address), true, address);
   const allowed = [

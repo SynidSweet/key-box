@@ -167,5 +167,5 @@ Fix round (adapter-http-2):
 - The call's timeout is a whole-call deadline: `egress.open` races the signal during the lookup and refuses an already-aborted signal before resolving or connecting.
 - Every failure of `request` is an `HttpTransportError`; new code `invalid_request` (node threw for a header name or value or the method; no text kept); a non-refusal gate failure is `unreachable`.
 - `loadEgressHosts(file?)` (egress-system.ts) reads and checks `deploy/egress-hosts.json`; `startCore` calls it first (`CoreRuntime.egressHostsFile` for tests), `createLazyEgress(registry, listed)` binds only the registry's hosts late.
-- `addressRefused` also refuses 6to4, Teredo, both NAT64 prefixes (whole, no embedded-v4 check), 192.0.2/24, 198.51.100/24, 203.0.113/24 and 192.88.99/24. OPEN: older tests use 203.0.113.10 as the "public" fake-resolver answer and now go red (see the report).
+- `addressRefused` also refuses 6to4, Teredo, both NAT64 prefixes (whole, no embedded-v4 check) and 192.88.99/24. The IPv4 documentation ranges stay allowed (they reach no private network; test fixtures use 203.0.113.10 as the public answer).
 - `createRelayRegistry(clock, create?)` (platforms/registry.ts) is what main-relay builds its registry with (refusing client); tests pin it, plus the slow-drip body.

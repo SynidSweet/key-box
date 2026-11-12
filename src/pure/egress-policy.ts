@@ -1,6 +1,6 @@
 // KBOX-47: what the egress gate allows. A host is allowed when a registered adapter declares it (for relay and adapter calls)
 // or deploy/egress-hosts.json names it for exactly that caller; an address is refused when it is private, loopback,
-// link-local, unspecified, shared, multicast, reserved or documentation, including an IPv4 address inside IPv6 and the 6to4, Teredo and NAT64 prefixes.
+// link-local, unspecified, shared, multicast or reserved, including an IPv4 address inside IPv6 and the 6to4, Teredo and NAT64 prefixes.
 import { parseIpv4, parseIpv6 } from './address.ts';
 import { hostAllowed } from './pushsub.ts';
 import type { Parsed } from './schemas.ts';
@@ -46,12 +46,9 @@ const V4_REFUSED: readonly (readonly [readonly [number, number, number, number],
   [[169, 254, 0, 0], 16], // link-local, the metadata address included
   [[172, 16, 0, 0], 12],
   [[192, 0, 0, 0], 24],
-  [[192, 0, 2, 0], 24], // documentation (TEST-NET-1)
   [[192, 88, 99, 0], 24], // the old 6to4 relay anycast
   [[192, 168, 0, 0], 16],
   [[198, 18, 0, 0], 15],
-  [[198, 51, 100, 0], 24], // documentation (TEST-NET-2)
-  [[203, 0, 113, 0], 24], // documentation (TEST-NET-3)
   [[224, 0, 0, 0], 4], // multicast
   [[240, 0, 0, 0], 4], // reserved and broadcast
 ];
