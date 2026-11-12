@@ -30,6 +30,7 @@ import type { RotationStore } from './rotation-store.ts';
 import type { KeyLocation } from '../ports/types.ts';
 import type { PasteAction } from './new-key.ts';
 import type { Orchestrator } from './orchestrator.ts';
+import { storedPlacement } from './rotation-ports.ts';
 import type { PlatformSource } from './rotation-ports.ts';
 
 export const PASTE_TTL_MS = 14 * 24 * 3600_000;
@@ -64,7 +65,7 @@ export interface PasteDeps {
   readonly source: PlatformSource;
   readonly orchestrator: Orchestrator;
   /** Whether a reference is taken, and a stored key's location (KBOX-57). */
-  readonly store: Pick<RotationStore, 'keyExists' | 'keyInfo'>;
+  readonly store: Pick<RotationStore, 'key' | 'keyExists' | 'keyInfo'>;
 }
 
 export interface PasteView {
@@ -127,12 +128,21 @@ export function createPaste(deps: PasteDeps): Paste {
   };
   const settle = (id: string, status: 'done' | 'failed'): void => void inTransaction(db, () => db.prepare('UPDATE paste_tasks SET status = ? WHERE paste_id = ?').run(status, id));
 
-  /** The task's key reference exists: the task is settled failed (no retry can change that) and the paste is refused, `conflict` `key_exists`. */
-  const refuseTaken = (id: string): never => {
+  /** The task can no longer be settled by a paste (no retry can change that): it is settled failed with the names-only code, and the paste is refused. */
+  const refuse = (id: string, error: ApiError, code: string): never => {
     settle(id, 'failed');
-    deps.events.append('approval.executed', { approval_id: id, result: 'failed', reason_code: 'key_exists' });
-    deps.audit.append({ action: 'approval.executed', subject: id, at: now(), detail: { result: 'failed', reason_code: 'key_exists' } });
-    throw new ApiError('conflict', 'key_exists');
+    deps.events.append('approval.executed', { approval_id: id, result: 'failed', reason_code: code });
+    deps.audit.append({ action: 'approval.executed', subject: id, at: now(), detail: { result: 'failed', reason_code: code } });
+    throw error;
+  };
+  /** The task's key reference exists: `conflict` `key_exists`. */
+  const refuseTaken = (id: string): never => refuse(id, new ApiError('conflict', 'key_exists'), 'key_exists');
+  /** The stored key's location no longer passes its entry (KBOX-57): `rejected` with the refusal code, before the verifier is asked. */
+  const refuseUnplaced = (id: string, keyref: string): void => {
+    const head = deps.store.key(keyref);
+    const info = deps.store.keyInfo(keyref);
+    const placed = head === undefined || info === undefined ? 'ok' : storedPlacement(deps.source, head, info);
+    if (placed !== 'ok') refuse(id, rejected(placed), placed);
   };
 
   /** The value checks of KBOX-12, in order: the floor, the strict shape, the platform verifier. Names only. */
@@ -250,6 +260,8 @@ export function createPaste(deps: PasteDeps): Paste {
       const platform = action.kind === 'add_key' ? action.platform : (deps.meta.snapshot().keys.find((k) => k.keyref === action.keyref)?.platform ?? '');
       // KBOX-57: a reference taken while the task waited settles it failed, before the verifier sees the value; a key elsewhere is a new key.
       if (action.kind === 'add_key' && deps.store.keyExists(keyrefOf(action.platform, action.projects, action.name))) refuseTaken(id);
+      // KBOX-57: a stored location the entry now refuses fails the task with that code, so the value never reaches the verifier.
+      if (action.kind === 'rotate_key') refuseUnplaced(id, action.keyref);
       const at = action.kind === 'add_key' ? locationOf(action) : (deps.store.keyInfo(action.keyref)?.location ?? {});
       await checkValue(platform, at, value);
       const bytes = Uint8Array.from(Buffer.from(value, 'utf8'));

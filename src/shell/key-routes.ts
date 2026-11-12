@@ -18,7 +18,7 @@ import type { AddKey, RotateKey } from './new-key.ts';
 import type { Orchestrator } from './orchestrator.ts';
 import type { Paste } from './paste.ts';
 import { isRecord, only } from './routes-approve.ts';
-import { isPasteSource, overlapOf, storedPlacement } from './rotation-ports.ts';
+import { overlapOf, proposalRefusal, rotatesByPaste } from './rotation-ports.ts';
 import type { PlatformSource } from './rotation-ports.ts';
 import type { DestinationRow, RotationStore } from './rotation-store.ts';
 import type { Vault } from '../ports/vault.ts';
@@ -106,7 +106,7 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
         const { klass, at } = placedKey(config, action);
         // KBOX-57: a key elsewhere is a new key; an existing reference is refused on every branch before anything is asked, opened or written.
         if (store.keyExists(keyref)) throw new ApiError('conflict', 'key_exists');
-        if (klass === 'master') throw rejected('master_not_issuable');
+        if (klass === 'master') return masterResult(deps, action, keyref, at, actor);
         if (config.create === 'paste') {
           if (klass === 'ordinary') throw rejected('no_issuer');
           await provenPlacement(deps.source, action, at, 'paste');
@@ -140,11 +140,13 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
         if (store.activeRunOf(body.keyref) !== undefined) throw new ApiError('conflict', 'run_exists');
         // KBOX-57: a stored location the entry now refuses is answered with its code, before any run, approval or paste task.
         const info = store.keyInfo(body.keyref);
-        const placed = info === undefined ? 'ok' : storedPlacement(deps.source, head, info);
+        // Where a run makes the key (an approval, not a paste) the platform's master is asked first: none is `no_master`, two `master_ambiguous`.
+        const placed = info === undefined ? 'ok' : proposalRefusal(deps.source, head, info);
         if (placed !== 'ok') throw rejected(placed);
         if (head.class === 'ordinary') return { status: 201, json: { run_id: deps.orchestrator.start({ keyref: body.keyref, origin: 'agent' }).runId } };
         const action: RotateKey = { kind: 'rotate_key', keyref: body.keyref };
-        if (isPasteSource(deps.source, head.platform)) {
+        // KBOX-34: a paste-source platform's key, and a master whose issuer is not selfRotate, are rotated by a paste.
+        if (rotatesByPaste(deps.source, head)) {
           store.setStatus(body.keyref, 'awaiting_paste');
           return { status: 202, json: { paste_task_id: deps.paste.open({ action, requester: { kind: 'token', label: actor } }).paste_id } };
         }
@@ -170,6 +172,28 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
       },
     },
   ];
+}
+
+/**
+ * KBOX-55 fills this: the platforms whose master the box makes itself (Google's signing key). A master result there is `rejected`
+ * (`box_made_master`), checked before anything else about a master, because that master is never pasted. None is registered yet.
+ */
+const BOX_MADE_MASTER_PLATFORMS: ReadonlySet<string> = new Set();
+
+/**
+ * KBOX-34: the answer to a master-class result of `POST /api/keys`, on an issuer platform and a paste platform alike: no issuer can make
+ * another kind's master and none is asked, no approval is opened, the owner pastes it. In this order: a platform whose master the box makes
+ * (`box_made_master`, KBOX-55, none yet); a platform with no verifier (`no_verifier`: only a verifier can confirm a pasted generation dead,
+ * KBOX-51); then the paste task. A location that names a host is proven first, as for any paste; a master that names none needs no master
+ * of its own, or the first one could never enter.
+ */
+async function masterResult(deps: KeyRouteDeps, action: AddKey, keyref: string, at: KeyLocation, actor: string): Promise<{ readonly status: number; readonly json: unknown }> {
+  if (BOX_MADE_MASTER_PLATFORMS.has(action.platform)) throw rejected('box_made_master');
+  const kit = deps.source.platform(action.platform);
+  if (kit?.verifier === undefined) throw rejected('no_verifier');
+  if (namesHost(kit.location, at)) await provenPlacement(deps.source, action, at, 'paste');
+  const opened = deps.paste.open({ action, requester: { kind: 'token', label: actor } });
+  return { status: 202, json: { keyref, class: 'master', paste_task_id: opened.paste_id } };
 }
 
 /**
@@ -216,7 +240,8 @@ function retire(deps: KeyRouteDeps, q: { readonly platform: string; readonly pro
   }
   const gen = store.topGen(keyref) + 1;
   deps.vault.put(keyref, gen, bytes);
-  store.putGen({ keyref, gen, status: 'retired', platformKeyId: null, location: {} });
+  // KBOX-57: a generation of a key records the key's stored location (the one a new record has just been given is empty).
+  store.putGen({ keyref, gen, status: 'retired', platformKeyId: null, location: store.keyInfo(keyref)?.location ?? {} });
   deps.vault.retire(keyref, gen);
   const fits = matchesShape(shape, Buffer.from(bytes).toString('utf8'));
   deps.audit.append({ action: 'key.issued', subject: keyref, at: deps.clock.now() });

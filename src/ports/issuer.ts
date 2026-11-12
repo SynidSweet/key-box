@@ -102,3 +102,12 @@ export interface PasteSource {
 export interface LocationProver {
   prove(at: KeyLocation, master: Lent): Promise<'seen' | 'unseen'>;
 }
+
+/**
+ * KBOX-51 step 10 for a pasted generation (no platform key id): finds the live key whose value is `old`, at the key's location, and ends it
+ * with the master. `absent` when none matches. Throws on ambiguity or failure; the caller never takes either as proof of death, only the
+ * verifier rejecting `old` is.
+ */
+export interface Retirer {
+  retire(old: Lent, at: KeyLocation, master: Lent): Promise<'retired' | 'absent'>;
+}

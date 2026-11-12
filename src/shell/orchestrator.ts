@@ -16,12 +16,14 @@ import type { Vault } from '../ports/vault.ts';
 import { ApiError } from '../pure/errors.ts';
 import { admitDestination, mintValue } from '../pure/class.ts';
 import { sameLocation } from '../pure/location.ts';
+import { ownerEndsLine } from '../pure/words.ts';
 import { intentName, nextStep, retryDelayMs } from '../pure/rotation-machine.ts';
 import type { Step } from '../pure/rotation-machine.ts';
-import { revokeAndConfirm } from './revoke-confirm.ts';
+import { enderOf, revokeAndConfirm } from './revoke-confirm.ts';
+import type { Ender } from './revoke-confirm.ts';
 import { isPasteSource, overlapOf, setterOf, storedPlacement, tryLend } from './rotation-ports.ts';
 import type { MasterResult, PlatformKit, PlatformSource, Point } from './rotation-ports.ts';
-import type { DestinationRow, KeyHead, Receipt, RotationStore, RunOrigin, RunRow } from './rotation-store.ts';
+import type { DestinationRow, KeyHead, KeyInfo, Receipt, RotationStore, RunOrigin, RunRow } from './rotation-store.ts';
 
 const HOUR_MS = 3600_000;
 /** The destination kind that is a delivery to the workstation, not an adapter (KBOX-34). */
@@ -511,11 +513,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   async function revokeOld(run: RunRow, head: KeyHead, kit: PlatformKit): Promise<Next> {
     if (run.genOld > 0) {
       const old = store.gen(run.keyref, run.genOld);
+      const id = old?.platformKeyId ?? null;
       // Step 10 without a master to end the old key with: not proven dead, so the old key stays in grace and the step retries (one notice).
       const master = masterFor(head);
-      if (!master.ok) return retryRevoke(run);
-      const dead = await revokeAndConfirm({ kit, platform: head.platform, id: old?.platformKeyId ?? null, at: old?.location ?? {}, value: lendOrUndefined(run.keyref, run.genOld), master: master.value });
-      if (!dead) return retryRevoke(run);
+      if (!master.ok) return retryRevoke(run, head, enderOf(kit, id));
+      const dead = await revokeAndConfirm({ kit, platform: head.platform, id, at: old?.location ?? {}, value: lendOrUndefined(run.keyref, run.genOld), master: master.value });
+      if (!dead) return retryRevoke(run, head, enderOf(kit, id));
       store.setGenStatus(run.keyref, run.genOld, 'retired');
       deps.vault.retire(run.keyref, run.genOld);
       deps.audit.append({ action: 'key.revoked', subject: run.keyref, at: now() });
@@ -524,21 +527,29 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     return advance(run, 'revoking');
   }
 
-  /** Not proven dead: the old key stays in grace, one notice, retried with backoff (S-249; 1 minute doubling to 1 hour). */
-  function retryRevoke(run: RunRow): Next {
+  /**
+   * Not proven dead: the old key stays in grace, one notice, retried with backoff (S-249; 1 minute doubling to 1 hour). Where only the owner can
+   * end it (`owner_ends`) the notice says so in the box's words and the audit row names the reason.
+   */
+  function retryRevoke(run: RunRow, head: KeyHead, ender: Ender): Next {
     const attempts = run.attempts + 1;
     store.update(run.runId, { attempts });
-    deps.audit.append({ action: 'rotation.revoke_unconfirmed', subject: run.keyref, at: now(), detail: { run_id: run.runId, gen: run.genOld, attempt: attempts } });
-    noticeStillOn(run);
+    const reason = ender === 'owner' ? { reason: 'owner_ends' } : {};
+    deps.audit.append({ action: 'rotation.revoke_unconfirmed', subject: run.keyref, at: now(), detail: { run_id: run.runId, gen: run.genOld, attempt: attempts, ...reason } });
+    noticeStillOn(run, ender === 'owner' ? head : undefined);
     later(run.runId, retryDelayMs(attempts - 1));
     return 'wait';
   }
 
-  /** The run's one `rotation.old_key_still_on` notice, recorded before it goes out. A create run has no old key to keep on, so it sends none. */
-  function noticeStillOn(run: RunRow): void {
+  /**
+   * The run's one `rotation.old_key_still_on` notice, recorded before it goes out. A create run has no old key to keep on, so it sends none.
+   * `ownerEnds` is the key's head when the owner must end the old key: an admin or master key then also sends the phone the words (KBOX-17).
+   */
+  function noticeStillOn(run: RunRow, ownerEnds?: KeyHead): void {
     if (run.stillOnNotified || run.genOld === 0) return;
     store.update(run.runId, { stillOnNotified: true });
     deps.events.append('rotation.old_key_still_on', { run_id: run.runId, keyref: run.keyref, gen: run.genOld });
+    if (ownerEnds !== undefined && ownerEnds.class !== 'ordinary') deps.push.send({ title: ownerEndsLine(ownerEnds.platform), kind: 'rotation_owner_ends' });
   }
 
   // --- failure: the old key stays ---------------------------------------------------------------------------------------------------
@@ -699,13 +710,21 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
   // --- starting ----------------------------------------------------------------------------------------------------------------------
 
-  function start(input: StartInput): RunRow {
-    const head = store.key(input.keyref);
-    const info = store.keyInfo(input.keyref);
+  /**
+   * A stored key's head and record, once its stored location passes the entry as it is now (KBOX-57): `not_found` for no such key, `rejected`
+   * with the refusal code for one the entry declines. Nothing is rewritten, so nothing a caller does after it is undone by a refusal.
+   */
+  function placedKeyOf(keyref: string): { readonly head: KeyHead; readonly info: KeyInfo } {
+    const head = store.key(keyref);
+    const info = store.keyInfo(keyref);
     if (head === undefined || info === undefined) throw new ApiError('not_found');
-    // KBOX-57: the stored location is checked against the entry as it is now; one it refuses starts no run (nothing is rewritten).
     const placed = storedPlacement(deps, head, info);
     if (placed !== 'ok') throw new ApiError('rejected', placed);
+    return { head, info };
+  }
+
+  function start(input: StartInput): RunRow {
+    const { head, info } = placedKeyOf(input.keyref);
     // KBOX-34: a paste-source platform cannot issue; its keys change only by a paste (a value), never by an api run.
     if (input.value === undefined && isPasteSource(deps, head.platform)) throw new ApiError('rejected', 'no_issuer');
     const genOld = store.gens(input.keyref).find((g) => g.status === 'current')?.gen ?? 0;
@@ -773,6 +792,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         launch(runId);
         return old;
       }
+      // KBOX-57: a stored location the entry now refuses is answered before the run is touched: it stays as it was, never abandoned and lost.
+      placedKeyOf(old.keyref);
       store.update(runId, { state: 'abandoned' });
       const next = start({ keyref: old.keyref, origin: 'reconcile' });
       deps.audit.append({ action: 'rotation.restarted', subject: old.keyref, at: now(), detail: { old_run: runId, new_run: next.runId } });

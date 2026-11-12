@@ -1439,6 +1439,7 @@ test('KBOX-57 KBOX-51 reconcile\'s retake of an issuing run that stored nothing 
   const { w, keyref } = await seeded(t, {
     source: (real) => ({ ...real, platform: (id) => { const kit = real.platform(id); return kit === undefined || !strict.on ? kit : { ...kit, location: { project: { pattern: /[a-z]+/, requiredFor: ['ordinary'] } } }; } }),
   });
+  const runsBefore = w.store.runs().length;
   w.checkpoints.arm('issued');
   const run = w.orch.start({ keyref, origin: 'owner' });
   await w.orch.idle();
@@ -1447,5 +1448,5 @@ test('KBOX-57 KBOX-51 reconcile\'s retake of an issuing run that stored nothing 
   strict.on = true;
   assert.throws(() => w.orch.retake(run.runId), (e: unknown) => e instanceof ApiError && e.code === 'rejected' && JSON.stringify(e.detail) === JSON.stringify({ code: 'location_field_unknown' }));
   assert.equal(w.store.run(run.runId)?.state, 'issuing', 'not abandoned');
-  assert.equal(w.store.runs().length, 1, 'no second run');
+  assert.equal(w.store.runs().length, runsBefore + 1, 'no second run: only the interrupted one was added');
 });

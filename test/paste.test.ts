@@ -364,10 +364,11 @@ test('KBOX-57 KBOX-12 a settling rotate_key paste whose key\'s stored location t
   const second = pasteValue('2'.repeat(32));
   w.accepted.add(second);
   const verifiedBefore = w.verifiedAt.length;
+  const runsBefore = w.rotation.store.runs().length;
   const reply = await submit(w, rotId, a.cookie, second, w.pasteProof(r.view));
   assert.deepEqual([reply.status, (reply.json() as { error: { code: string; detail?: { code?: string } } }).error.detail?.code], [422, 'location_missing'], reply.body);
   assert.equal(w.verifiedAt.length, verifiedBefore, 'the value never reached the verifier');
-  assert.equal(w.rotation.store.runs().length, 0);
+  assert.equal(w.rotation.store.runs().length, runsBefore, 'no run started');
   assert.equal((await w.call(`/p/${rotId}`, { cookie: a.cookie })).status, 404, 'the task is settled failed');
   assert.ok(w.parts.events.after(0).some((e) => e.kind === 'approval.executed' && e.data['approval_id'] === rotId && e.data['result'] === 'failed' && e.data['reason_code'] === 'location_missing'));
 });

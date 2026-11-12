@@ -18,6 +18,9 @@ export const FIXED = {
   upstreamRefused: 'upstream refused the key',
 } as const;
 
+/** KBOX-51 step 10 with neither a platform key id nor a retirer: the notice that asks the owner to end the old key (reason `owner_ends`). */
+export const ownerEndsLine = (platform: string): string => `End the old key on ${platform}; the box watches for it to stop working.`;
+
 export const reasonLine = (machine: string, agent: string, text: string): string => `Reason given by ${machine}/${agent} (not checked): ${text}`;
 export const enrolSentence = (label: string, address: string): string => `enrol ${label} for relay (request seen from ${address}; the label and the address are not checked)`;
 

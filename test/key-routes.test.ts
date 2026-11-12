@@ -582,7 +582,6 @@ test('KBOX-34 POST /api/rotations for a master key on an issuer that is not self
   const run = w.rotation.executors.rotate_key;
   assert.ok(run);
   assert.deepEqual(await run({ approvalId: 'apr_y', revision: 1, action: { kind: 'rotate_key', keyref: KEYREF }, requester: { kind: 'box' }, proof: undefined }), { result: 'failed', reason: 'paste_required' });
-  assert.throws(() => w.rotation.orchestrator.start({ keyref: KEYREF, origin: 'owner' }), (e: unknown) => e instanceof ApiError && JSON.stringify(e.detail) === JSON.stringify({ code: 'no_issuer' }));
 });
 
 test('KBOX-34 POST /api/rotations for a master key on a selfRotate issuer opens a rotate_key approval', async (t) => {

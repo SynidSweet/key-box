@@ -344,7 +344,7 @@ test('KBOX-40 KBOX-51 the old key is found by its partial_key_hint among the liv
   const verifier = verifierOf(entry);
   assert.equal(await verifier.verify(L(oldKey), ANTHROPIC), 'ok', 'during the grace the old key still works');
   api.log.length = 0;
-  assert.equal(await retirer.retire(L(oldKey), L(ADMIN)), 'retired');
+  assert.equal(await retirer.retire(L(oldKey), {}, L(ADMIN)), 'retired');
   assert.deepEqual(api.log, ['GET /v1/organizations/api_keys?status=active&limit=1000', `POST /v1/organizations/api_keys/${oldId}`], 'list, then one update');
   assert.deepEqual(JSON.parse(Buffer.from(http.sent[http.sent.length - 1]?.body ?? new Uint8Array()).toString('utf8')), { status: 'inactive' });
   assert.equal(http.sent[http.sent.length - 1]?.headers['x-api-key'], ADMIN, 'the admin key makes the call');
@@ -360,11 +360,11 @@ test('KBOX-40 a hint that matches two live keys retires nothing and says so (amb
   const twin = `${oldKey.slice(0, 14)}-another-middle-${oldKey.slice(-4)}`;
   api.add(oldKey, 'old');
   api.add(twin, 'twin');
-  await assert.rejects(() => retirer.retire(L(oldKey), L(ADMIN)), /ambiguous/);
+  await assert.rejects(() => retirer.retire(L(oldKey), {}, L(ADMIN)), /ambiguous/);
   assert.equal(api.log.some((l) => l.startsWith('POST')), false, 'no key was changed');
   assert.equal([...api.keys.values()].every((k) => k.status === 'active'), true);
   api.log.length = 0;
-  assert.equal(await retirer.retire(L(ordinary('GONE')), L(ADMIN)), 'absent');
+  assert.equal(await retirer.retire(L(ordinary('GONE')), {}, L(ADMIN)), 'absent');
   assert.equal(api.log.some((l) => l.startsWith('POST')), false);
 });
 
@@ -374,7 +374,7 @@ test('KBOX-40 a key that is already switched off is not a candidate: the live ke
   const oldKey = ordinary('SAME');
   api.add(`${oldKey.slice(0, 14)}-an-old-one-${oldKey.slice(-4)}`, 'earlier', 'inactive');
   const id = api.add(oldKey, 'current');
-  assert.equal(await retirer.retire(L(oldKey), L(ADMIN)), 'retired');
+  assert.equal(await retirer.retire(L(oldKey), {}, L(ADMIN)), 'retired');
   assert.equal(api.keys.get(id)?.status, 'inactive');
 });
 
@@ -383,7 +383,7 @@ test('KBOX-40 the retire call: a refused admin key throws rejected, an update an
   const retirer = createAnthropicRetirer({ http });
   const oldKey = ordinary('OLD2');
   const id = api.add(oldKey, 'old');
-  await assert.rejects(() => retirer.retire(L(oldKey), L(ordinary('NOAD'))), /rejected/);
+  await assert.rejects(() => retirer.retire(L(oldKey), {}, L(ordinary('NOAD'))), /rejected/);
   assert.equal(api.keys.get(id)?.status, 'active');
   const racing = createAnthropicRetirer({
     http: {
@@ -394,9 +394,9 @@ test('KBOX-40 the retire call: a refused admin key throws rejected, an update an
       },
     },
   });
-  assert.equal(await racing.retire(L(oldKey), L(ADMIN)), 'absent');
+  assert.equal(await racing.retire(L(oldKey), {}, L(ADMIN)), 'absent');
   api.down = true;
-  await assert.rejects(() => retirer.retire(L(oldKey), L(ADMIN)), /unreachable/);
+  await assert.rejects(() => retirer.retire(L(oldKey), {}, L(ADMIN)), /unreachable/);
 });
 
 // --- the value rules (KBOX-14) ------------------------------------------------------------------------------------------------------
@@ -420,12 +420,12 @@ test('KBOX-14 a platform answer that quotes the key never reaches an error: veri
   await caught('anthropic verify', () => verifierOf(entry).verify(L(secret), ANTHROPIC));
   await caught('anthropic list', () => listerOf(entry).list(L(secret)));
   await caught('anthropic listAt', () => listerOf(entry).listAt({}, L(secret)));
-  await caught('anthropic retire', () => createAnthropicRetirer({ http }).retire(L(ordinary('OLD3')), L(secret)));
+  await caught('anthropic retire', () => createAnthropicRetirer({ http }).retire(L(ordinary('OLD3')), {}, L(secret)));
   api.admins.add(secret);
   api.add(ordinary('OLD3'), 'old');
   api.failPagesFrom(1);
   await caught('anthropic list 500', () => listerOf(entry).list(L(secret)));
-  await caught('anthropic retire 500', () => createAnthropicRetirer({ http }).retire(L(ordinary('OLD3')), L(secret)));
+  await caught('anthropic retire 500', () => createAnthropicRetirer({ http }).retire(L(ordinary('OLD3')), {}, L(secret)));
   await caught('stripe verify', () => verifierOf(stripeWorld.entry).verify(L(`rk_live_${Buffer.from(c.bytes).toString('hex')}`), STRIPE));
   assert.ok(api.log.length > 0 && stripeWorld.api.log.length > 0, 'the fakes were reached');
   c.assertAbsent(surfaces);
@@ -549,7 +549,7 @@ test('KBOX-14 KBOX-40 a key id of "." or ".." in the list never reaches the reti
   for (const id of ['..', '.']) {
     const stub = pagedList({}, () => [{ id, hint: `${value.slice(0, 14)}...${value.slice(-4)}` }]);
     const asked: string[] = stub.asked;
-    await assert.rejects(() => createAnthropicRetirer({ http: stub.http }).retire(L(value), L(ADMIN)), /anthropic: bad_answer/, id);
+    await assert.rejects(() => createAnthropicRetirer({ http: stub.http }).retire(L(value), {}, L(ADMIN)), /anthropic: bad_answer/, id);
     assert.equal(asked.some((a) => a.startsWith('POST')), false);
   }
 });

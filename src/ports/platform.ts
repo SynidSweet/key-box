@@ -1,7 +1,7 @@
 // KBOX-23: one registry line per platform. Adding a platform is one folder `src/platforms/<id>/` plus one entry here; the entry carries
 // everything the adapter registers, so no shared wiring changes with it.
 import type { DestinationKit } from './destination.ts';
-import type { Issuer, KeyLister, LocationProver, Verifier } from './issuer.ts';
+import type { Issuer, KeyLister, LocationProver, Retirer, Verifier } from './issuer.ts';
 import type { Clock } from './clock.ts';
 import type { AdapterHttp } from './http.ts';
 import type { DenyRule, RelayProfile } from './relay-profile.ts';
@@ -36,6 +36,11 @@ export interface PlatformEntry {
   readonly location?: LocationSchema;
   /** Proves a host-naming location before a key is proposed (KBOX-57); the registry check requires it of an entry with such a field. */
   readonly locationProver?: LocationProver;
+  /**
+   * Ends the live key of a pasted generation (no platform key id) at step 10 (KBOX-51): the box never recorded its id, so the retirer finds it
+   * by the old value. An entry without one leaves the ending to the owner (`owner_ends`).
+   */
+  readonly retirer?: Retirer;
   /**
    * The scope-item prefixes that decide a master's authority (KBOX-57; Vercel `team:`): a master serves a key only when it carries the same
    * items with each prefix as the key. Each ends in `:` (the registry check).
