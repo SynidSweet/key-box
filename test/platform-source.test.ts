@@ -9,6 +9,8 @@ import type { KeyRow } from '../src/ports/meta.ts';
 import type { PlatformEntry } from '../src/ports/platform.ts';
 import type { KeyClass, KeyLocation, Scope } from '../src/ports/types.ts';
 import { openCore } from '../src/shell/core.ts';
+import { refusingAdapterHttp } from '../src/ports/http.ts';
+import { createGoogleEntry } from '../src/platforms/google/index.ts';
 import { createPlatformSource } from '../src/shell/platform-source.ts';
 import { createRotationStore } from '../src/shell/rotation-store.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
@@ -194,4 +196,17 @@ test('KBOX-51 KBOX-57 two masters that both still qualify are refused with maste
   putMaster(w, 'fake/three/MASTER', {});
   putMaster(w, 'fake/four/MASTER', {});
   assert.deepEqual(w.source.master('fake', { project: 'third' }, []), { ok: false, code: 'master_ambiguous' }, 'none at the key\'s location and two that cover every place');
+});
+
+test('KBOX-55 a google entry whose classify never answers master still serves the box\'s signing key as master: candidates classify each row through kitFor', async (t) => {
+  const w = await world(t);
+  const deps = { http: refusingAdapterHttp, clock: w.clock };
+  const google: PlatformEntry = { ...createGoogleEntry(deps), classify: () => 'ordinary' };
+  const source = createPlatformSource({ registry: [google], meta: w.parts.meta, vault: w.parts.vault, keyInfo: (keyref) => w.store.keyInfo(keyref) });
+  putMaster(w, 'google/p/OIDC_SIGNING_KEY', { platform: 'google', items: [], value: 'the-box-signing-key' });
+  // Negative control: another google master row is classified by the entry, so it is no candidate.
+  putMaster(w, 'google/shop/MAPS_ADMIN', { platform: 'google', items: [], value: 'an-api-key-master' });
+  const chosen = source.master('google', { project: 'p-proj1' }, []);
+  assert.ok(chosen.ok, JSON.stringify(chosen));
+  assert.equal(Buffer.from(await bytesOf(chosen.value)).toString('utf8'), 'the-box-signing-key');
 });
