@@ -1086,3 +1086,108 @@ test('KBOX-4 KBOX-51 the rotation hands the master to every ready, forward and i
   const expected = Buffer.from(await bytesOf(w.platform.master())).toString('utf8');
   for (const m of masters) assert.equal(Buffer.from(await bytesOf(m)).toString('utf8'), expected);
 });
+
+// --- placement (KBOX-57) -----------------------------------------------------------------------------------------------------------
+
+const rowsOfKey = (w: RotationWorld, keyref: string): string =>
+  JSON.stringify([w.parts.db.prepare('SELECT * FROM keys WHERE keyref = ?').all(keyref), w.parts.db.prepare('SELECT * FROM rotation_keys WHERE keyref = ?').all(keyref)]);
+
+test('KBOX-57 the issuer is handed the key\'s stored location, and the verifier the generation\'s, on a create and on every rotation', async (t) => {
+  const { w, keyref } = await seeded(t);
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.deepEqual(w.seenAt.issue, [{ region: 'eu' }, { region: 'eu' }]);
+  assert.ok(w.seenAt.verify.length >= 3);
+  assert.ok(w.seenAt.verify.every((at) => at.region === 'eu' && at.project === undefined), JSON.stringify(w.seenAt.verify));
+});
+
+for (const [name, answer] of [
+  ['another region', { region: 'us' }],
+  ['the stored region and a project the stored location lacks', { region: 'eu', project: 'p1' }],
+  ['no region where the stored location names one', {}],
+] as const) {
+  test(`KBOX-57 KBOX-17 an issuer answering ${name} fails the run at step 3 with location_mismatch: the new key is revoked, one notice, nothing stored`, async (t) => {
+    const { w, keyref, oldValue } = await seeded(t);
+    w.faults.answerAt = answer;
+    w.orch.start({ keyref, origin: 'owner' });
+    await w.settle();
+    const run = w.store.runs().at(-1);
+    assert.deepEqual([run?.state, run?.failedStep, run?.reasonCode], ['failed', 'issuing', 'location_mismatch']);
+    assert.equal((await w.live()).length, 1, 'only the old key is live: the misplaced one was revoked');
+    assert.equal(genOf(w, keyref, 2), undefined, 'the misplaced key was never stored as a generation');
+    assert.equal(w.events('rotation.failed').length, 1);
+    assert.deepEqual(heldBy(w), [oldValue, oldValue]);
+  });
+}
+
+test('KBOX-57 a misplaced new key is confirmed dead at the location the platform answered, not the stored one', async (t) => {
+  const { w, keyref } = await seeded(t, { verifier: false });
+  w.faults.answerAt = { region: 'us' };
+  w.faults.revoke404 = true;
+  w.seenAt.listAt.length = 0;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'rolling_back', 'a listing of the answered region still shows it: not dead');
+  assert.deepEqual(w.seenAt.listAt, [{ region: 'us' }]);
+  w.faults.revoke404 = false;
+  await w.settle();
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+  assert.equal((await w.live()).length, 1);
+});
+
+test('KBOX-57 an answer naming the stored location is no mismatch, and an answer naming no place is no claim: both runs complete', async (t) => {
+  const { w, keyref } = await seeded(t);
+  w.faults.answerAt = { region: 'eu' };
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.equal(w.store.runs().at(-1)?.state, 'done');
+  assert.deepEqual(genOf(w, keyref, 2)?.location, { region: 'eu' });
+  w.faults.answerAt = undefined;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  assert.equal(w.store.runs().at(-1)?.state, 'done');
+  assert.deepEqual(genOf(w, keyref, 3)?.location, { region: 'eu' }, 'no place in the answer: the stored one is recorded');
+});
+
+test('KBOX-57 putKeyInfo refuses another location for a stored key with location_immutable and changes nothing; the same location is kept', async (t) => {
+  const { w, keyref } = await seeded(t);
+  const before = rowsOfKey(w, keyref);
+  const info = w.store.keyInfo(keyref);
+  assert.ok(info);
+  for (const location of [{ region: 'us' }, {}, { region: 'eu', project: 'p1' }]) {
+    assert.throws(() => w.store.putKeyInfo(keyref, { ...info, location, rotatedAt: info.rotatedAt + 1 }), (e: unknown) => e instanceof ApiError && JSON.stringify(e.detail) === JSON.stringify({ code: 'location_immutable' }), JSON.stringify(location));
+  }
+  assert.equal(rowsOfKey(w, keyref), before);
+  w.store.putKeyInfo(keyref, { ...info, rotatedAt: info.rotatedAt + 1 });
+  assert.equal(w.store.keyInfo(keyref)?.rotatedAt, info.rotatedAt + 1);
+});
+
+test('KBOX-57 create refuses a keyref that exists (a keys or a rotation_keys row) with key_exists before its first write: no run, no issue', async (t) => {
+  const { w, keyref } = await seeded(t);
+  const before = rowsOfKey(w, keyref);
+  const issued = w.seenAt.issue.length;
+  await assert.rejects(() => w.orch.create(w.newKey({ location: { region: 'us' }, class: 'ordinary' })), (e: unknown) => e instanceof ApiError && e.code === 'conflict' && JSON.stringify(e.detail) === JSON.stringify({ code: 'key_exists' }));
+  assert.equal(rowsOfKey(w, keyref), before);
+  assert.equal(w.store.runs().length, 1, 'only the seed run');
+  assert.equal(w.seenAt.issue.length, issued);
+  w.store.putKeyInfo('fake/shop/ORPHAN_INFO', { scopeItems: [], location: {}, rotatedAt: 1, markAdmin: false });
+  await assert.rejects(() => w.orch.create(w.newKey({ keyref: 'fake/shop/ORPHAN_INFO', name: 'ORPHAN_INFO' })), /key_exists|conflict/);
+  assert.equal(w.parts.meta.snapshot().keys.some((k) => k.keyref === 'fake/shop/ORPHAN_INFO'), false);
+});
+
+test('KBOX-57 a run is refused before it starts when the stored location fails the entry\'s current declaration, with the check\'s code', async (t) => {
+  // The entry now requires a project of ordinary keys; the key was stored without one.
+  const strict = { region: { pattern: /[a-z]{2,16}/, requiredFor: [] }, project: { pattern: /p[0-9]/, requiredFor: ['ordinary' as const] } };
+  const w = await rotationWorld(t, { source: (real) => ({ ...real, platform: (id) => ({ ...real.platform(id), location: strict }) }) });
+  const keyref = 'fake/shop/OLD';
+  w.parts.meta.putKey({ keyref, platform: 'fake', name: 'OLD', projects: ['shop'], class: 'ordinary', status: 'works', gen_current: 1, schedule: { rotate_every_days: 90, grace_hours: 1, next_due_at: null, expires_at: null }, coverage: null, last_use_at: null });
+  w.store.putKeyInfo(keyref, { scopeItems: ['read'], location: { region: 'eu' }, rotatedAt: 1, markAdmin: false });
+  for (const value of [undefined, Buffer.from('fk-pasted')]) {
+    assert.throws(
+      () => w.orch.start({ keyref, origin: 'owner', ...(value === undefined ? {} : { value }) }),
+      (e: unknown) => e instanceof ApiError && e.code === 'rejected' && JSON.stringify(e.detail) === JSON.stringify({ code: 'location_missing' }),
+    );
+  }
+  assert.equal(w.store.runs().length, 0);
+  assert.deepEqual(w.seenAt.issue, []);
+});

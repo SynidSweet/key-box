@@ -145,6 +145,30 @@ test('KBOX-53 the add_key scope shape is {items:[text]} with each item [A-Za-z0-
   }
 });
 
+test('KBOX-53 KBOX-57 the add_key location is {region?, project?}, closed and non-empty, each value [A-Za-z0-9_.-]{1,128}, kept as given', () => {
+  const addKey = (location: unknown) => ({ kind: 'add_key', platform: 'openai', name: 'OPENAI_API_KEY', projects: ['shop'], scope: { items: [] }, location });
+  const parsed = parseAction(addKey({ region: 'us', project: 'proj_A-1.x' }));
+  assert.ok(parsed.ok && parsed.value.kind === 'add_key');
+  assert.deepEqual(parsed.value.location, { region: 'us', project: 'proj_A-1.x' });
+  assert.equal(parseAction(addKey({ project: 'p'.repeat(128) })).ok, true);
+  const bare = parseAction({ kind: 'add_key', platform: 'openai', name: 'OPENAI_API_KEY', projects: ['shop'], scope: { items: [] } });
+  assert.ok(bare.ok && bare.value.kind === 'add_key' && !('location' in bare.value), 'no location member is no location');
+  for (const [name, location] of [
+    ['empty', {}],
+    ['an unknown field', { region: 'us', zone: 'a' }],
+    ['a value of 129', { project: 'p'.repeat(129) }],
+    ['an empty value', { region: '' }],
+    ['a colon', { project: 'a:b' }],
+    ['a slash', { project: 'a/b' }],
+    ['a number', { region: 1 }],
+    ['a list', ['us']],
+    ['text', 'us'],
+    ['null', null],
+  ] as const) {
+    assert.equal(parseAction(addKey(location)).ok, false, name);
+  }
+});
+
 test('KBOX-53 add_key, install_update, enrol and a kind outside the list are refused on /api/proposals', async (t) => {
   const w = await approveWorld(t);
   const token = w.token('ctl-1', 'control');

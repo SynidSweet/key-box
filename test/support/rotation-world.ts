@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import type { TestContext } from 'node:test';
 import { join } from 'node:path';
 import type { Issuer, IssuerCapabilities, IssueRequest, IssuedKey, KeyListing, KeyLister, PlatformKeyInfo, Verifier } from '../../src/ports/issuer.ts';
-import type { KeyClass, KeyLocation, Lent, PlatformKeyId, Scope } from '../../src/ports/types.ts';
+import type { KeyClass, KeyLocation, Lent, LocationSchema, PlatformKeyId, Scope } from '../../src/ports/types.ts';
 import type { Vault } from '../../src/ports/vault.ts';
 import type { EventLog } from '../../src/ports/events.ts';
 import type { EventData, EventKind } from '../../src/pure/schemas.ts';
@@ -48,7 +48,12 @@ export interface Faults {
   listingIncomplete: boolean;
   /** The next `set` (overlap:false) changes the platform's credential and then answers an error. */
   setThenThrow: boolean;
+  /** The issuer answers that it made the key here (`IssuedKey.location`); undefined: the answer names no place. */
+  answerAt: KeyLocation | undefined;
 }
+
+/** The world's platform declares a `region` (any lower-case name) that no class must name, so the tests' `{ region: 'eu' }` keys are placed. */
+export const WORLD_LOCATION: LocationSchema = { region: { pattern: /[a-z]{2,16}/, requiredFor: [] } };
 
 export interface WorldOptions {
   readonly seed?: number;
@@ -71,6 +76,8 @@ export interface RotationWorld {
   readonly platform: FakePlatformWorld;
   readonly trace: string[];
   readonly faults: Faults;
+  /** The `at` of every issue call, every listing asked for and every verification, in order. */
+  readonly seenAt: { readonly issue: KeyLocation[]; readonly listAt: KeyLocation[]; readonly verify: KeyLocation[] };
   /** Told the kind of every event the orchestrator and reconcile append, before it is written. */
   appending: ((kind: EventKind) => void) | undefined;
   readonly destinations: { readonly a: RecordingDestination; readonly redeployer: RecordingRedeployer };
@@ -114,7 +121,8 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
   const push = new FakePush();
   const platform = new FakePlatformWorld(random);
   const trace: string[] = [];
-  const faults: Faults = { issue: false, verifyAt: undefined, revoke404: false, vaultPut: false, master: false, masterAmbiguous: false, listerAt: undefined, listingIncomplete: false, setThenThrow: false };
+  const faults: Faults = { issue: false, verifyAt: undefined, revoke404: false, vaultPut: false, master: false, masterAmbiguous: false, listerAt: undefined, listingIncomplete: false, setThenThrow: false, answerAt: undefined };
+  const seenAt: RotationWorld['seenAt'] = { issue: [], listAt: [], verify: [] };
   const regionOf = new Map<PlatformKeyId, string>();
   const destination = new RecordingDestination(trace);
   const recording = { a: destination, redeployer: new RecordingRedeployer(trace, destination) };
@@ -145,9 +153,11 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
       const row = store.runs().find((r) => r.intentName === intentName);
       if (row === undefined || row.state !== 'issuing') throw new Error('KBOX-51: no intent row in state issuing existed before the platform was called');
       if (faults.issue) throw new Error('platform refused to create');
+      seenAt.issue.push(req.at);
       const issued = await platform.issuer.issue(req, intentName, master);
-      regionOf.set(issued.platformKeyId, 'eu');
-      return issued;
+      const answered = faults.answerAt;
+      regionOf.set(issued.platformKeyId, answered?.region ?? 'eu');
+      return answered === undefined ? issued : { ...issued, location: answered };
     },
     revoke: async (id: PlatformKeyId, master: Lent) => {
       trace.push('revoke');
@@ -173,6 +183,7 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
   const lister: KeyLister = {
     list: async (master: Lent): Promise<PlatformKeyInfo[]> => (await platform.lister.list(master)).map((k) => ({ ...k, location: { region: regionOf.get(k.platformKeyId) ?? 'eu' } satisfies KeyLocation })),
     listAt: async (at: KeyLocation, master: Lent): Promise<KeyListing> => {
+      seenAt.listAt.push(at);
       const where = faults.listerAt ?? at;
       const keys = (await lister.list(master)).filter((k) => k.location?.region === where.region && k.location?.project === where.project);
       return { complete: !faults.listingIncomplete, at: where, keys };
@@ -181,6 +192,7 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
   const verifier: Verifier = {
     verify: async (key, target) => {
       trace.push('verify');
+      seenAt.verify.push(target.at);
       if (faults.verifyAt !== undefined) {
         faults.verifyAt -= 1;
         if (faults.verifyAt === 0) {
@@ -225,6 +237,7 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
     platform,
     trace,
     faults,
+    seenAt,
     appending: undefined,
     destinations: recording,
     checkpoints,
@@ -232,7 +245,7 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
     reconciler: undefined as never,
     build() {
       const real: PlatformSource = {
-        platform: () => ({ issuer, lister, ...(options.verifier === false ? {} : { verifier }) }),
+        platform: () => ({ issuer, lister, location: WORLD_LOCATION, ...(options.verifier === false ? {} : { verifier }) }),
         destination: () => ({ destination: recording.a, redeployer: recording.redeployer }),
         master: () => {
           if (faults.master) throw new Error('vault: the master key is unreadable');
