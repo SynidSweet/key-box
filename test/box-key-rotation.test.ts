@@ -1,8 +1,8 @@
 // KBOX-55 (the run): the box's own Google signing key is rotated by publish, wait, prove, switch. The new generation is published in the JWKS
 // at once (pending), the run waits the publish lead, proves Google has taken it with one STS exchange signed with it (retried with the KBOX-17
 // backoff until opened_at + 2 x lead), and only then switches; the old generation stays listed through grace and its value is then deleted.
-// A failure keeps the old key current and deletes the new value. No step, rollback included, ever asks for the platform's master (a second
-// google master row present makes that ask `master_ambiguous`). The real google entry runs against a fake Google; the FakeClock drives every wait.
+// A failure keeps the old key current and deletes the new value. No step, rollback included, ever asks for the platform's master (each test
+// reads the `masterAsked` spy). The real google entry runs against a fake Google; the FakeClock drives every wait.
 import assert from 'node:assert/strict';
 import { createECDH, createHash } from 'node:crypto';
 import { test } from 'node:test';

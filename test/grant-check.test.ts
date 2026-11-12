@@ -258,7 +258,7 @@ test('KBOX-24 an unreachable or failing check fails closed: the grant is refused
   }
 });
 
-test('KBOX-24 without the box\'s identity, without a stored record or with no signing key (two rows are no longer ambiguous as of the API-key issuer), an sa: grant is refused before any call and suspended daily with one notice', async (t) => {
+test('KBOX-24 without the box\'s identity, without a stored record or with no signing key, an sa: grant is refused before any call and suspended daily with one notice', async (t) => {
   const cases: [ShellOptions, string][] = [
     [{ identity: null }, 'grant_check_no_identity'],
     [{ scope: null }, 'grant_check_no_key_info'],
