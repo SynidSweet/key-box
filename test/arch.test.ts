@@ -634,6 +634,7 @@ test("KBOX-23 an adapter file importing src/platforms/registry.ts, as a value, a
 test('KBOX-23 an adapter importing the ports, a sibling file or another adapter passes, and so does a shell file importing the registry', async (t) => {
   await accepts(t, adapterTree('src/platforms/google/index.ts', "import type { RegistryDeps } from '../../ports/platform.ts';\nimport { a } from './api.ts';\nexport const x = a;\nexport type D = RegistryDeps;\n"), checkAdapterRegistryImport);
   await accepts(t, withChanges({ 'src/shell/x.ts': "import { registry } from '../platforms/registry.ts';\nexport const x = registry;\n", 'src/platforms/registry.ts': 'export const registry = [];\n' }), checkAdapterRegistryImport);
+});
 
 // ---------------------------------------------------------------- KBOX-56 (migrations are additive only)
 
