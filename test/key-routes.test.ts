@@ -69,8 +69,9 @@ test('KBOX-15 an approved add_key issues the admin key, as admin, with the class
 test('KBOX-15 a master scope is never issuable through POST /api/keys: refused, nothing issued, no approval', async (t) => {
   const w = await routesWorld(t);
   const reply = await w.api('/api/keys', { json: body({ scope: { items: ['master'] } }) });
-  assert.equal(reply.status, 422);
-  assert.deepEqual([errorOf(reply).code, errorOf(reply).detail?.code], ['rejected', 'master_not_issuable']);
+  // KBOX-34 (shared-2 U6): a master result opens a paste task (202) instead of the former `master_not_issuable`; still nothing is issued.
+  assert.equal(reply.status, 202, reply.body);
+  assert.deepEqual([(reply.json() as { class: string }).class, typeof (reply.json() as { paste_task_id: unknown }).paste_task_id], ['master', 'string']);
   assert.equal((await w.platform.lister.list(w.platform.master())).length, 0);
   assert.equal((await w.queue()).length, 0);
 });
@@ -331,9 +332,9 @@ test('KBOX-57 negative control: a key whose projects look like a valid location 
 test('KBOX-15 a fixture entry classing master without a location and ordinary with one classes the key master: no issuer call, nothing made', async (t) => {
   const w = await routesWorld(t, { location: PROJECT_ENTRY, classifyAt: (_scope, at) => (at.project === undefined ? 'master' : 'ordinary') });
   const reply = await w.api('/api/keys', { json: body({ location: { project: REF } }) });
-  assert.equal(reply.status, 422, reply.body);
-  // The master answer is `master_not_issuable` until the unit that turns it into a paste task (shared-2 U6); the floor is what this pins.
-  assert.equal(errorOf(reply).detail?.code, 'master_not_issuable');
+  // The master answer is a paste task (KBOX-34, shared-2 U6; it was `master_not_issuable`); the floor is what this pins: the class is master.
+  assert.equal(reply.status, 202, reply.body);
+  assert.deepEqual([(reply.json() as { class: string }).class, typeof (reply.json() as { paste_task_id: unknown }).paste_task_id], ['master', 'string']);
   assert.deepEqual(w.issuedAt, []);
   assert.equal(w.parts.meta.snapshot().keys.length, 0);
 });
