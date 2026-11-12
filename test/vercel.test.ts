@@ -155,6 +155,7 @@ test('KBOX-36 KBOX-57 a location project that is empty or not a plain id, a proj
   await assert.rejects(() => issuer.issue({ scope: { items: ['team:a b'] }, at: {} }, 'kbox_bad', master()), /vercel: bad_scope/);
   await assert.rejects(() => issuer.issue({ scope: { items: ['team:t1', 'team:t2'] }, at: {} }, 'kbox_bad', master()), /vercel: bad_scope/, 'two teams');
   await assert.rejects(() => issuer.issue({ scope: { items: ['read'] }, at: {} }, 'kbox_bad', master()), /vercel: bad_scope/, 'an item Vercel does not know');
+  await assert.rejects(() => issuer.issue({ scope: { items: ['teams_abc'] }, at: {} }, 'kbox_bad', master()), /vercel: bad_scope/, 'an item without the team: prefix whose tail is a plain id');
   assert.deepEqual(sentSince(before), []);
   assert.deepEqual(fake.tokenIds(), []);
 });

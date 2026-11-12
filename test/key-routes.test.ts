@@ -380,6 +380,24 @@ test('KBOX-57 a retired-value record on a location-requiring entry is refused ro
   assert.equal(w.rotation.store.runs().length, 0);
 });
 
+test('KBOX-57 an admin key whose stored location the entry now refuses is refused rotation at the route: no approval, its status unchanged', async (t) => {
+  // The entry gains a project field after the key was made, so the key's stored (empty) location is now missing one an admin key needs.
+  const strict = { on: false };
+  const w = await routesWorld(t, {
+    source: (real) => ({ ...real, platform: (id) => { const kit = real.platform(id); return kit === undefined || !strict.on ? kit : { ...kit, location: PROJECT_ENTRY }; } }),
+  });
+  const execute = w.rotation.executors.add_key;
+  assert.ok(execute);
+  await execute({ approvalId: 'apr_x', revision: 1, action: { kind: 'add_key', platform: 'fake', name: 'OPENAI_KEY', projects: ['shop'], scope: { items: ['admin'] } }, requester: { kind: 'box' }, proof: undefined });
+  const status = w.parts.meta.snapshot().keys.find((k) => k.keyref === KEYREF)?.status;
+  strict.on = true;
+  const reply = await w.api('/api/rotations', { json: { keyref: KEYREF } });
+  assert.equal(reply.status, 422, reply.body);
+  assert.deepEqual([reply.status, errorOf(reply).code, errorOf(reply).detail?.code], [422, 'rejected', 'location_missing']);
+  assert.equal(opened(w), 0);
+  assert.equal(w.parts.meta.snapshot().keys.find((k) => k.keyref === KEYREF)?.status, status);
+});
+
 test('KBOX-57 the schedule skips a due key whose stored location the entry refuses: no run and no request, on this tick or the next', async (t) => {
   const w = await routesWorld(t, { location: PROJECT_ENTRY });
   assert.equal((await w.api(retiredPath(), { bytes: Buffer.from(`fk-${'ab'.repeat(16)}`) })).status, 201);
