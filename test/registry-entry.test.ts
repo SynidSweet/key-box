@@ -43,3 +43,9 @@ test('KBOX-23 relay and denyOnly together fail on any platform, and denyOnly is 
   assert.equal(failure([fakeEntry(w, { relay: { ...pathProfile, platform: 'fake' }, denyOnly: pathProfile.mustDeny })]), 'deny_only_with_relay fake');
   assert.equal(failure([fakeEntry(w, { denyOnly: pathProfile.mustDeny })]), 'deny_only_not_listed fake');
 });
+
+test('KBOX-23 KBOX-40 the class has one source: an entry with an issuer states no classify, one without states its own; two sources or none fail', () => {
+  assert.equal(failure([fakeEntry(w, { classify: () => 'ordinary' })]), 'classify_twice fake');
+  assert.equal(failure([{ id: 'pasteonly', verifier: w.verifier, shape: SHAPE, unverified: [] }]), 'classify_missing pasteonly');
+  assert.equal(failure([pasteOnlyEntry(w, SHAPE)]), 'passed');
+});

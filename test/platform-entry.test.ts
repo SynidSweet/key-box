@@ -6,7 +6,7 @@ import type { TestContext } from 'node:test';
 import type { Verifier } from '../src/ports/issuer.ts';
 import type { KeyShape } from '../src/ports/types.ts';
 import { isPasteSource } from '../src/shell/rotation-ports.ts';
-import { shapeOf } from '../src/pure/platform-shape.ts';
+import { classifierOf, shapeOf } from '../src/pure/platform-shape.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
 import { FAKE_KEY_PAGE, fakeEntry, issuerWith, pasteOnlyEntry, sourceOf } from './fakes/platform-entry.ts';
 import { RecordingDestination, RecordingRedeployer } from './fakes/recording-destination.ts';
@@ -113,4 +113,13 @@ test('KBOX-51 a rotation does not promote when the verifier of the registry entr
   assert.equal(w.store.runs().at(-1)?.state, 'failed');
   assert.equal(w.parts.meta.snapshot().keys.find((k) => k.keyref === keyref)?.gen_current, 1);
   assert.notEqual(w.store.gens(keyref).find((g) => g.gen === 2)?.status ?? 'failed', 'current');
+});
+
+test('KBOX-40 KBOX-15 classifierOf reads the issuer\'s classification, or the entry\'s own when it has no issuer, and nothing for a platform that is not registered', () => {
+  const w = world();
+  const own = classifierOf(pasteOnlyEntry(w, SHAPE, { classify: (s) => (s['items'] === 'x' ? 'master' : 'admin') }));
+  assert.deepEqual([own?.({ items: 'x' }), own?.({ items: ['y'] })], ['master', 'admin']);
+  const issued = classifierOf(fakeEntry(w, { issuer: issuerWith(w.issuer, { classify: () => 'admin' }) }));
+  assert.equal(issued?.({ items: ['read'] }), 'admin');
+  assert.equal(classifierOf(undefined), undefined);
 });

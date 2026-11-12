@@ -273,3 +273,27 @@ test('KBOX-12 a paste whose execution fails (a run is already open for the key) 
   assert.equal(Buffer.from(await bytesOf(w.parts.vault.lend(KEYREF, 3))).toString('utf8'), third);
   assert.equal((await w.call(`/p/${rotId}`, { cookie: again.cookie })).status, 404, 'settled once it executed');
 });
+
+test('KBOX-40 KBOX-15 a paste-only platform (no issuer) takes its class from its entry: an admin add_key is proposed, pasted through /p/<id> and stored as admin; an ordinary one is refused', async (t) => {
+  const w = await routesWorld(t, { pasteOnly: true });
+  const refused = await w.api('/api/keys', { json: add(['read']) });
+  assert.equal(refused.status, 422, refused.body);
+  assert.match(refused.body, /no_issuer/);
+  const value = pasteValue(HEX);
+  w.accepted.add(value);
+  const id = await openTask(w);
+  const { view, cookie } = await render(w, id);
+  const stored = await submit(w, id, cookie, value, w.pasteProof(view));
+  assert.equal(stored.status, 201, stored.body);
+  assert.deepEqual(stored.json(), { status: 'stored', keyref: KEYREF });
+  assert.equal(w.parts.meta.snapshot().keys.find((k) => k.keyref === KEYREF)?.class, 'admin');
+  assert.equal(Buffer.from(await bytesOf(w.parts.vault.lend(KEYREF, 1))).toString('utf8'), value);
+});
+
+test('KBOX-40 KBOX-12 a value that fails the shape the paste-only entry states is refused with nothing stored', async (t) => {
+  const w = await routesWorld(t, { pasteOnly: true });
+  const id = await openTask(w);
+  const { view, cookie } = await render(w, id);
+  assert.equal((await submit(w, id, cookie, 'pk-short-but-16-bytes', w.pasteProof(view))).status, 422);
+  nothingStored(w);
+});

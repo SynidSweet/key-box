@@ -25,12 +25,13 @@ export const issuerWith = (base: Issuer, caps: Partial<IssuerCapabilities>): Iss
   capabilities: () => ({ ...base.capabilities(), ...caps }),
 });
 
-/** A paste-only entry: no issuer, so it states its own key shape (KBOX-40). */
+/** A paste-only entry: no issuer, so it states its own key shape and class (KBOX-40). */
 export const pasteOnlyEntry = (world: FakePlatformWorld, shape: KeyShape, patch: Partial<PlatformEntry> = {}): PlatformEntry => ({
   id: 'pasteonly',
   verifier: world.verifier,
   keyPageUrl: FAKE_KEY_PAGE,
   shape,
+  classify: () => 'admin',
   unverified: [],
   ...patch,
 });

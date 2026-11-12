@@ -5,7 +5,8 @@ import type { Action } from '../pure/actions.ts';
 import { ApiError } from '../pure/errors.ts';
 import { defaultGraceHours } from '../pure/rotation-machine.ts';
 import type { NewKey } from './orchestrator.ts';
-import type { IssuerCapabilities } from '../ports/issuer.ts';
+import type { KeyClass, Scope } from '../ports/types.ts';
+import { classifierOf } from '../pure/platform-shape.ts';
 import { setterOf } from './rotation-ports.ts';
 import type { PlatformSource } from './rotation-ports.ts';
 import type { DestinationRow } from './rotation-store.ts';
@@ -18,27 +19,36 @@ export interface RotateKey {
 /** The two kinds a paste can settle (KBOX-12). */
 export type PasteAction = AddKey | RotateKey;
 
+/** What a key request needs of its platform: the class of a scope and how a key is made (a platform with no issuer is always pasted). */
+export interface KeyConfig {
+  readonly classify: (scope: Scope) => KeyClass;
+  readonly create: 'api' | 'paste';
+}
+
 /**
- * The issuer's capabilities for a key's platform, or the refusal of the key's configuration: `unknown_platform` with no adapter;
- * `overlap_needs_set` for a platform that cannot hold two keys and cannot take a chosen value, so a failed run could not set the old one back.
+ * The class source and creation mode for a key's platform, or the refusal of the key's configuration: `unknown_platform` with no adapter;
+ * `overlap_needs_set` for an issuer that cannot hold two keys and cannot take a chosen value, so a failed run could not set the old one back.
+ * A paste-only entry (no issuer) classifies by its own `classify` (KBOX-40).
  */
-export function capabilitiesFor(source: PlatformSource, platform: string): IssuerCapabilities {
-  const issuer = source.platform(platform)?.issuer;
-  if (issuer === undefined) throw new ApiError('rejected', 'unknown_platform');
-  const caps = issuer.capabilities();
-  if (!caps.overlap && setterOf(issuer) === undefined) throw new ApiError('rejected', 'overlap_needs_set');
-  return caps;
+export function keyConfigFor(source: PlatformSource, platform: string): KeyConfig {
+  const kit = source.platform(platform);
+  const classify = classifierOf(kit);
+  if (kit === undefined || classify === undefined) throw new ApiError('rejected', 'unknown_platform');
+  if (kit.issuer === undefined) return { classify, create: 'paste' };
+  const caps = kit.issuer.capabilities();
+  if (!caps.overlap && setterOf(kit.issuer) === undefined) throw new ApiError('rejected', 'overlap_needs_set');
+  return { classify, create: caps.create };
 }
 
 export function newKeyOf(action: AddKey, source: PlatformSource, destinations: readonly DestinationRow[] = [], rotateEveryDays = 90): NewKey {
-  const caps = capabilitiesFor(source, action.platform);
+  const config = keyConfigFor(source, action.platform);
   return {
     keyref: keyrefOf(action.platform, action.projects, action.name),
     platform: action.platform,
     name: action.name,
     projects: action.projects,
     scopeItems: action.scope.items,
-    class: classOf(caps.classify({ items: action.scope.items }), action.mark_admin === true ? 'admin' : undefined),
+    class: classOf(config.classify({ items: action.scope.items }), action.mark_admin === true ? 'admin' : undefined),
     destinations,
     rotateEveryDays,
     graceHours: defaultGraceHours(destinations.map((d) => d.readable_by)),

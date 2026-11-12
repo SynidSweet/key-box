@@ -2,7 +2,7 @@
 // test stops the process. Adapters register these when they are built (the adapter units).
 import type { DestinationKit } from '../ports/destination.ts';
 import type { Issuer, KeyLister, Verifier } from '../ports/issuer.ts';
-import type { KeyShape, Lent, PlatformId } from '../ports/types.ts';
+import type { KeyClass, KeyShape, Lent, PlatformId, Scope } from '../ports/types.ts';
 import type { Vault } from '../ports/vault.ts';
 import type { Step } from '../pure/rotation-machine.ts';
 
@@ -18,6 +18,8 @@ export interface PlatformKit {
   readonly keyPageUrl?: string;
   /** The key shape a paste-only platform states (no issuer); `shapeOf` reads the one shape of a kit. */
   readonly shape?: KeyShape;
+  /** The class a paste-only platform states (no issuer); `classifierOf` reads the one class source of a kit. */
+  readonly classify?: (scope: Scope) => KeyClass;
 }
 
 /** A registered platform whose keys are made on the phone (KBOX-12, KBOX-34), one with no issuer or an issuer that says `paste`: the box cannot issue one, so it never runs an api run for it. */
