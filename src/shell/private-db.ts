@@ -23,9 +23,13 @@ export function openPrivateDatabase(path: string): PrivateStore {
       sign_count INTEGER NOT NULL DEFAULT 0
     ) STRICT;
   `);
-  // A private.db from before subscriptions belonged to approvers has no owner column: add it; such rows stay ownerless.
+  // A private.db from before subscriptions belonged to approvers has no owner column: add it and delete the rows that had no owner
+  // (no key box exists in the wild yet, so none of them is real; none would ever be forgotten with its approver).
   const columns = db.prepare('PRAGMA table_info(push_subscriptions)').all() as unknown as { name: string }[];
-  if (!columns.some((c) => c.name === 'approver_id')) db.exec('ALTER TABLE push_subscriptions ADD COLUMN approver_id TEXT');
+  if (!columns.some((c) => c.name === 'approver_id')) {
+    db.exec('ALTER TABLE push_subscriptions ADD COLUMN approver_id TEXT');
+    db.exec('DELETE FROM push_subscriptions WHERE approver_id IS NULL');
+  }
   const putApprover =(r: ApproverRecord): void => {
     db.prepare('INSERT OR REPLACE INTO approvers (approver_id, credential_id, public_key, device_public_key, phrase, sign_count) VALUES (?, ?, ?, ?, ?, ?)').run(r.approverId, r.credentialId, r.coseKey, r.devicePublicKey, r.phrase, r.signCount);
   };

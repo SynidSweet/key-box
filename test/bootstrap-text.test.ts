@@ -106,7 +106,7 @@ const runCheck = async (t: TestContext, fixture: Fixture): Promise<CheckWorld> =
 
 interface Facts {
   readonly directories: readonly { readonly path: string; readonly names: readonly string[] }[];
-  readonly found: { readonly sudoers: readonly string[]; readonly processes: readonly string[] };
+  readonly found: { readonly sudoers: readonly string[]; readonly processes: readonly string[]; readonly removed_sudoers: readonly string[] };
 }
 const factsOf = (w: CheckWorld): Facts => JSON.parse(readFileSync(join(w.root, FACTS_PATH), 'utf8')) as Facts;
 
@@ -125,29 +125,65 @@ test('KBOX-1 with no sudoers grant and no running Run Command the check goes on 
       { path: '/var/log/oracle-cloud-agent', names: ['agent.log'] },
       { path: '/etc/oracle-cloud-agent', names: [] },
     ],
-    found: { sudoers: [], processes: [] },
+    found: { sudoers: [], processes: [], removed_sudoers: [] },
   });
   assert.equal(statSync(join(w.root, FACTS_PATH)).mode & 0o7777, 0o644);
 });
 
-test('KBOX-1 a sudoers line naming ocarun, in /etc/sudoers or any /etc/sudoers.d file, stops the bootstrap loudly after the facts are written: error in the journal and on the console, a failed result, nothing after it runs', async (t) => {
+test('KBOX-1 a file in /etc/sudoers.d naming ocarun is removed and recorded, and the bootstrap goes on; other sudoers files and near names stay', async (t) => {
   const grants: readonly (readonly [string, string])[] = [
-    ['/etc/sudoers', 'root ALL=(ALL:ALL) ALL\nocarun ALL=(ALL) NOPASSWD:ALL\n'],
     ['/etc/sudoers.d/ocarun', 'ocarun ALL=(ALL) NOPASSWD: ALL\n'],
     ['/etc/sudoers.d/90-agent', 'Defaults:ocarun !requiretty\n'],
     ['/etc/sudoers.d/91-agent', '  User_Alias PLUGINS = ubuntu,ocarun\n'],
+    ['/etc/sudoers.d/92-agent', '%ocarun ALL=(ALL) NOPASSWD: ALL\n'],
+    ['/etc/sudoers.d/93-agent', 'ubuntu ALL=(ocarun) NOPASSWD: ALL\n'],
   ];
   for (const [path, line] of grants) {
-    const w = await runCheck(t, { paths: ['/snap/oracle-cloud-agent/'], files: { [path]: line } });
-    assert.notEqual(w.run.status, 0, `${path}: the bootstrap fails (cloud-init records the error)`);
-    assert.doesNotMatch(w.run.stdout, /the-next-step-ran/, `${path}: nothing after it is installed`);
-    assert.match(w.logged, /^-s -p user\.err -t keybox-bootstrap .*Run Command/m, `${path}: an error in the journal, echoed to the console`);
-    assert.deepEqual(factsOf(w).found.sudoers, [path], `${path}: the facts name the file that stopped it`);
-    assert.equal(statSync(join(w.root, FACTS_PATH)).mode & 0o7777, 0o644, `${path}: the failed box still records why`);
-    assert.deepEqual(factsOf(w).directories, [{ path: '/snap/oracle-cloud-agent', names: [] }], `${path}: and what it looked at`);
+    const w = await runCheck(t, { paths: ['/snap/oracle-cloud-agent/'], files: { [path]: line, '/etc/sudoers.d/90-cloud-init-users': 'ubuntu ALL=(ALL) NOPASSWD:ALL\n', '/etc/sudoers.d/near': 'ocarun2 ALL=(ALL) ALL\n# ocarun ALL=(ALL) ALL\n' } });
+    assert.equal(w.run.status, 0, `${path}: the grant is removed and the bootstrap goes on: ${w.run.stderr}`);
+    assert.match(w.run.stdout, /the-next-step-ran/, path);
+    assert.equal(existsSync(join(w.root, path)), false, `${path}: removed`);
+    assert.equal(existsSync(join(w.root, '/etc/sudoers.d/90-cloud-init-users')), true, `${path}: a file that does not name ocarun stays`);
+    assert.equal(existsSync(join(w.root, '/etc/sudoers.d/near')), true, `${path}: ocarun2 and a comment are not ocarun`);
+    assert.deepEqual(factsOf(w).found.removed_sudoers, [path], `${path}: the removal is recorded`);
+    assert.deepEqual(factsOf(w).found.sudoers, [], `${path}: nothing that stops it`);
   }
-  const near = await runCheck(t, { files: { '/etc/sudoers': 'ocarunner ALL=(ALL) ALL\nmyocarun ALL=(ALL) ALL\nocarun-x ALL=(ALL) ALL\n' } });
-  assert.equal(near.run.status, 0, 'control: other user names that only contain ocarun are not it');
+});
+
+test('KBOX-1 a line naming ocarun in /etc/sudoers, or in a file it includes from outside /etc/sudoers.d (@include, #include, @includedir, #includedir; relative paths against /etc), stops the bootstrap loudly: the error line and the console name the file, the facts too, a failed result, nothing after it runs', async (t) => {
+  const grants: readonly (readonly [string, string, string])[] = [
+    ['/etc/sudoers', '/etc/sudoers', 'root ALL=(ALL:ALL) ALL\nocarun ALL=(ALL) NOPASSWD:ALL\n'],
+    ['/etc/sudoers', '/opt/elsewhere/f', '@include /opt/elsewhere/f\n'],
+    ['/etc/sudoers', '/opt/hash/f', '#include /opt/hash/f\n'],
+    ['/etc/sudoers', '/etc/extra-sudoers', '@include extra-sudoers\n'],
+    ['/etc/sudoers', '/opt/dir/g', '@includedir /opt/dir\n'],
+    ['/etc/sudoers', '/opt/hashdir/g', '#includedir /opt/hashdir\n'],
+    ['/etc/sudoers', '/opt/quoted/f', '@include "/opt/quoted/f"\n'],
+  ];
+  for (const [file, hit, content] of grants) {
+    const files: Record<string, string> = { [file]: content };
+    if (file !== hit) files[hit] = 'ocarun ALL=(ALL) NOPASSWD: ALL\n';
+    const w = await runCheck(t, { paths: ['/snap/oracle-cloud-agent/'], files });
+    assert.notEqual(w.run.status, 0, `${hit}: the bootstrap fails (cloud-init records the error)`);
+    assert.doesNotMatch(w.run.stdout, /the-next-step-ran/, `${hit}: nothing after it is installed`);
+    assert.match(w.logged, /^-s -p user\.err -t keybox-bootstrap .*Run Command/m, `${hit}: an error in the journal, echoed to the console`);
+    assert.ok(w.logged.split('\n').some((l) => l.startsWith('-s -p user.err') && l.includes('Run Command') && l.includes(hit)), `${hit}: the error line itself names the file`);
+    assert.ok(w.logged.split('\n').some((l) => l.startsWith('-s -p user.err') && l.includes('{"directories":[') && l.includes(hit)), `${hit}: the facts JSON is on the console too`);
+    assert.deepEqual(factsOf(w).found.sudoers, [hit], `${hit}: the facts name the file that stopped it`);
+    assert.equal(statSync(join(w.root, FACTS_PATH)).mode & 0o7777, 0o644, `${hit}: the failed box still records why`);
+    assert.deepEqual(factsOf(w).directories, [{ path: '/snap/oracle-cloud-agent', names: [] }], `${hit}: and what it looked at`);
+  }
+  const near = await runCheck(t, { files: { '/etc/sudoers': 'ocarunner ALL=(ALL) ALL\nmyocarun ALL=(ALL) ALL\nocarun-x ALL=(ALL) ALL\n@includedir /etc/sudoers.d\n' } });
+  assert.equal(near.run.status, 0, 'control: other user names that only contain ocarun are not it, and /etc/sudoers.d itself is not outside');
+});
+
+test('KBOX-1 a sudoers.d file that cannot be removed still stops the bootstrap, naming it', async (t) => {
+  const tree = await fixtureTree(t, { files: { '/etc/sudoers.d/ocarun': 'ocarun ALL=(ALL) ALL\n' } });
+  writeFileSync(join(tree.dir, 'bin', 'rm'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const w = runItem(runcmdItem(/bootstrap-facts\.json/), tree);
+  assert.notEqual(w.run.status, 0);
+  assert.doesNotMatch(w.run.stdout, /the-next-step-ran/);
+  assert.ok(w.logged.split('\n').some((l) => l.startsWith('-s -p user.err') && l.includes('Run Command') && l.includes('/etc/sudoers.d/ocarun')));
 });
 
 test('KBOX-1 a running process whose program (the basename of the first command word, any case) is runcommand stops the bootstrap loudly and is recorded by program only', async (t) => {
@@ -156,6 +192,7 @@ test('KBOX-1 a running process whose program (the basename of the first command 
     assert.notEqual(w.run.status, 0, words.join(' '));
     assert.doesNotMatch(w.run.stdout, /the-next-step-ran/, words.join(' '));
     assert.match(w.logged, /^-s -p user\.err -t keybox-bootstrap .*Run Command/m, words.join(' '));
+    assert.ok(w.logged.split('\n').some((l) => l.startsWith('-s -p user.err') && l.includes('Run Command') && l.includes(words[0] ?? '') && !l.includes('not-recorded')), 'the error line names the program, not its arguments');
     assert.deepEqual(factsOf(w).found.processes, [words[0]], 'the program is recorded, its arguments are not');
   }
   for (const words of [['/snap/oracle-cloud-agent/current/agent', '--plugins=gomon,runcommand'], ['/usr/bin/vim', 'notes-on-RUNCOMMAND.txt'], ['/snap/oracle-cloud-agent/current/plugins/runcommand/runcommand-helper']]) {
@@ -262,6 +299,95 @@ test('KBOX-48 rules the restore tool refuses stop the bootstrap loudly and leave
   assert.doesNotMatch(refused.run.stdout, /the-next-step-ran/);
   assert.match(refused.logged, /^-s -p user\.err -t keybox-bootstrap .*KBOX-48/m);
   assert.equal(readFileSync(join(tree.root, '/etc/iptables/rules.v4'), 'utf8'), oracleRules(V4_REJECT), 'the saved rules are untouched');
+});
+
+const rulesOf = (w: CheckWorld, v: 4 | 6 = 4): string => readFileSync(join(w.root, `/etc/iptables/rules.v${v}`), 'utf8');
+const ACCEPT_443 = '-A INPUT -p tcp -m state --state NEW -m tcp --dport 443 -j ACCEPT';
+
+test('KBOX-48 CR line ends and trailing blanks are plain line ends: the file is rewritten with LF, 443 opened and 22 closed', async (t) => {
+  const crlf = oracleRules(V4_REJECT).replace(/\n/g, '\r\n');
+  const blanks = oracleRules(V4_REJECT).replace(/\n/g, '  \t\n');
+  for (const [name, content] of [['CRLF', crlf], ['trailing blanks', blanks], ['COMMIT with a trailing space', oracleRules(V4_REJECT).replace('COMMIT', 'COMMIT ')]] as const) {
+    const w = await runFirewall(t, { files: { '/etc/iptables/rules.v4': content, '/etc/iptables/rules.v6': oracleRules(V6_REJECT) } });
+    assert.equal(w.run.status, 0, `${name}: ${w.run.stderr}`);
+    assert.equal(rulesOf(w), opened(oracleRules(V4_REJECT), V4_REJECT), `${name}: LF file, 443 before the REJECT, no port 22`);
+    assert.equal(readFileSync(join(w.dir, 'applied.iptables-restore'), 'utf8'), opened(oracleRules(V4_REJECT), V4_REJECT), `${name}: the live rules are the saved ones`);
+  }
+});
+
+test('KBOX-48 443 goes before the first catch-all REJECT or DROP of INPUT, with or without trailing options, and not before a REJECT that is no catch-all or is in another chain', async (t) => {
+  const head = '*filter\n:INPUT ACCEPT [0:0]\n-A INPUT -i lo -j ACCEPT\n';
+  for (const catchAll of ['-A INPUT -j DROP', '-A INPUT -j DROP --some-option x', '-A INPUT -j REJECT', '-A INPUT -j REJECT --reject-with icmp-host-prohibited']) {
+    const w = await runFirewall(t, { files: { '/etc/iptables/rules.v4': `${head}${catchAll}\n-A FORWARD -j REJECT\nCOMMIT\n` } });
+    assert.equal(w.run.status, 0, `${catchAll}: ${w.run.stderr}`);
+    assert.equal(rulesOf(w), `${head}${ACCEPT_443}\n${catchAll}\n-A FORWARD -j REJECT\nCOMMIT\n`, catchAll);
+  }
+  const partial = `${head}-A INPUT -s 10.0.0.0/8 -j REJECT\n-A FORWARD -j REJECT\nCOMMIT \n`;
+  const w = await runFirewall(t, { files: { '/etc/iptables/rules.v4': partial } });
+  assert.equal(rulesOf(w), `${head}-A INPUT -s 10.0.0.0/8 -j REJECT\n-A FORWARD -j REJECT\n${ACCEPT_443}\nCOMMIT\n`, 'a REJECT with a source is no catch-all: the rule goes before COMMIT');
+});
+
+test('KBOX-48 every INPUT ACCEPT naming port 22 goes, single or in a --dports list; other ports, other chains and look-alike ports stay', async (t) => {
+  const rules = [
+    '*filter',
+    ':INPUT ACCEPT [0:0]',
+    '-A INPUT -p tcp -m tcp --dport 22 -j ACCEPT',
+    '-A INPUT -p tcp -m multiport --dports 80,22 -j ACCEPT',
+    '-A INPUT -p tcp -m multiport --dports 22,80 -j ACCEPT',
+    '-A INPUT -p tcp -m tcp --dport 2222 -j ACCEPT',
+    '-A INPUT -p tcp -m tcp --dport 220 -j ACCEPT',
+    '-A INPUT -p tcp -m multiport --dports 2200,8022 -j ACCEPT',
+    '-A INPUT -p tcp -m tcp --dport 22 -j DROP',
+    '-A OTHER -p tcp -m tcp --dport 22 -j ACCEPT',
+    '-A INPUT -j REJECT',
+    'COMMIT',
+    '',
+  ].join('\n');
+  const w = await runFirewall(t, { files: { '/etc/iptables/rules.v4': rules } });
+  assert.equal(w.run.status, 0, w.run.stderr);
+  assert.equal(
+    rulesOf(w),
+    ['*filter', ':INPUT ACCEPT [0:0]', '-A INPUT -p tcp -m tcp --dport 2222 -j ACCEPT', '-A INPUT -p tcp -m tcp --dport 220 -j ACCEPT', '-A INPUT -p tcp -m multiport --dports 2200,8022 -j ACCEPT', '-A INPUT -p tcp -m tcp --dport 22 -j DROP', '-A OTHER -p tcp -m tcp --dport 22 -j ACCEPT', ACCEPT_443, '-A INPUT -j REJECT', 'COMMIT', ''].join('\n'),
+  );
+});
+
+test('KBOX-48 an empty rules file, or one with no filter table, is skipped with a warning and left as it is; the bootstrap goes on', async (t) => {
+  for (const [name, content] of [['empty', ''], ['nat only', '*nat\n:PREROUTING ACCEPT [0:0]\nCOMMIT\n']] as const) {
+    const w = await runFirewall(t, { files: { '/etc/iptables/rules.v4': content, '/etc/iptables/rules.v6': oracleRules(V6_REJECT) } });
+    assert.equal(w.run.status, 0, `${name}: ${w.run.stderr}`);
+    assert.match(w.run.stdout, /the-next-step-ran/, name);
+    assert.equal(rulesOf(w), content, `${name}: left as it was`);
+    assert.equal(w.logged, '-s -p user.warning -t keybox-bootstrap KBOX-48: /etc/iptables/rules.v4 has no filter table; nothing to open there\n', name);
+    assert.equal(rulesOf(w, 6), opened(oracleRules(V6_REJECT), V6_REJECT), `${name}: the other file is still opened`);
+    assert.doesNotMatch(readFileSync(join(w.dir, 'restore.log'), 'utf8'), /^iptables-restore/m, `${name}: nothing to apply`);
+  }
+});
+
+test('KBOX-48 a filter table the rewrite cannot open 443 in (no catch-all and no COMMIT) stops the bootstrap loudly, naming the file, and leaves it as it was', async (t) => {
+  const truncated = '*filter\n:INPUT ACCEPT [0:0]\n-A INPUT -i lo -j ACCEPT\n';
+  const w = await runFirewall(t, { files: { '/etc/iptables/rules.v4': truncated, '/etc/iptables/rules.v6': oracleRules(V6_REJECT) } });
+  assert.notEqual(w.run.status, 0);
+  assert.doesNotMatch(w.run.stdout, /the-next-step-ran/);
+  assert.match(w.logged, /^-s -p user\.err -t keybox-bootstrap .*\/etc\/iptables\/rules\.v4/m);
+  assert.doesNotMatch(w.logged, /refused/, 'it stopped on the missing 443 rule, not on a later failure');
+  assert.equal(rulesOf(w), truncated);
+  assert.equal(existsSync(join(w.root, '/etc/iptables/rules.v4.new')), false, 'no half-written file is left');
+});
+
+test('KBOX-48 a restore tool that refuses only the --test run stops the bootstrap before anything is replaced or applied: saved rules untouched, the error logged, no further output, nothing after runs', async (t) => {
+  const tree = await fixtureTree(t, { files: { '/etc/iptables/rules.v4': oracleRules(V4_REJECT), '/etc/iptables/rules.v6': oracleRules(V6_REJECT) } });
+  fakeRestore(tree.dir, 'ip6tables-restore');
+  writeFileSync(join(tree.dir, 'bin', 'iptables-restore'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${join(tree.dir, 'v4.log')}"\ncase " $* " in *" --test "*) cat > /dev/null; exit 2;; *) cat > "${join(tree.dir, 'v4.applied')}";; esac\n`, { mode: 0o755 });
+  const w = runItem(runcmdItem(/etc\/iptables\/rules\.v/), tree);
+  assert.notEqual(w.run.status, 0);
+  assert.doesNotMatch(w.run.stdout, /the-next-step-ran/);
+  assert.match(w.logged, /^-s -p user\.err -t keybox-bootstrap KBOX-48 FAILED: iptables-restore refused/m);
+  assert.equal(rulesOf(w), oracleRules(V4_REJECT), 'the saved rules are untouched');
+  assert.equal(readFileSync(join(tree.dir, 'v4.log'), 'utf8'), '--test\n', 'only the check ran, nothing was applied');
+  assert.equal(existsSync(join(tree.dir, 'v4.applied')), false);
+  assert.equal(existsSync(join(w.root, '/etc/iptables/rules.v4.new')), false);
+  assert.equal(w.run.stderr, '', 'the refusal is the only thing that ended the run: no later command failed on its own');
+  assert.equal(existsSync(join(tree.dir, 'restore.log')), false, 'rules.v6 was not touched');
 });
 
 test('KBOX-48 the bootstrap text opens 443, never 80, and drops 22', () => {

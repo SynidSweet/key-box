@@ -33,7 +33,7 @@ interface World {
 interface Options {
   readonly domain?: string;
   /** Written to the state directory before core starts. */
-  readonly seed?: (state: { readonly meta: ReturnType<typeof openCore>['meta']; readonly clock: TimedClock; readonly rotation: ReturnType<typeof createRotationStore> }) => void;
+  readonly seed?: (state: { readonly meta: ReturnType<typeof openCore>['meta']; readonly db: ReturnType<typeof openCore>['db']; readonly clock: TimedClock; readonly rotation: ReturnType<typeof createRotationStore> }) => void;
   /** Core also listens on a lend socket, at `World.lendSocket`. */
   readonly lend?: boolean;
   /** The platform adapters rotation is given in place of the (empty) registry's. */
@@ -51,7 +51,7 @@ async function started(t: TestContext, options: Options = {}): Promise<World> {
   const token = newToken(random);
   const prepared = openCore({ stateDir, clock, scheduler: clock, random });
   prepared.meta.addMachine({ label: 'mc', scope: 'control', tokenSha256: hashToken(token), enrolledAt: clock.now() });
-  options.seed?.({ meta: prepared.meta, clock, rotation: createRotationStore(prepared.db, clock, prepared.hub) });
+  options.seed?.({ meta: prepared.meta, db: prepared.db, clock, rotation: createRotationStore(prepared.db, clock, prepared.hub) });
   prepared.close();
   const journal: string[] = [];
   const lendSocket = join(dir, 'lend.sock');
@@ -251,4 +251,64 @@ test('KBOX-6 a settle that throws is audited as update.settle_failed and the 5-s
   mkdirSync(staging);
   w.clock.advance(SETTLE);
   assert.equal(await failures(), 2, 'a settle that works audits no failure');
+});
+
+// --- a failing audit cannot stop the schedule ---------------------------------------------------------------------------------------
+
+const REFUSE_AUDIT = "CREATE TRIGGER refuse_audit BEFORE INSERT ON audit WHEN NEW.action IN ('approvals.sweep_failed', 'update.settle_failed') BEGIN SELECT RAISE(ABORT, 'disk full'); END";
+
+test('KBOX-28 a sweep whose audit append also throws neither escapes the timer nor stops the hourly sweep: the journal says the failure could not be audited, and the next sweep that works expires what is stale', async (t) => {
+  const HOUR = 3600_000;
+  const w = await started(t, {
+    domain: 'box.example',
+    seed: ({ meta, clock }) => meta.putApproval({ approval_id: 'ap_stale', kind: 'key_rotate', title: 'Rotate a key', slot: 'admin-1', opened_at: clock.now(), expires_at: clock.now() + HOUR / 2 }),
+  });
+  const pending = async (): Promise<number> => (JSON.parse((await w.call('/api/meta')).body) as { approvals: unknown[] }).approvals.length;
+  const db = new DatabaseSync(join(w.stateDir, 'meta.db'));
+  t.after(() => db.close());
+  db.exec("CREATE TRIGGER refuse_expiry BEFORE UPDATE ON approvals BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END");
+  db.exec(REFUSE_AUDIT);
+  w.clock.advance(HOUR);
+  w.clock.advance(HOUR);
+  assert.equal(w.journal.filter((c) => c === 'audit_failed:approvals.sweep_failed').length, 2, 'each failure reached the journal, and the second sweep ran after the first');
+  db.exec('DROP TRIGGER refuse_expiry');
+  db.exec('DROP TRIGGER refuse_audit');
+  w.clock.advance(HOUR);
+  assert.equal(await pending(), 0, 'the schedule survived both throws');
+});
+
+test('KBOX-6 a settle whose audit append also throws neither escapes the timer nor stops the settle schedule', async (t) => {
+  const SETTLE = 5_000;
+  const w = await started(t, { domain: 'box.example' });
+  const db = new DatabaseSync(join(w.stateDir, 'meta.db'));
+  t.after(() => db.close());
+  const staging = join(w.stateDir, 'staging');
+  rmSync(staging, { recursive: true });
+  writeFileSync(staging, 'not a directory');
+  db.exec(REFUSE_AUDIT);
+  w.clock.advance(SETTLE);
+  w.clock.advance(SETTLE);
+  assert.equal(w.journal.filter((c) => c === 'audit_failed:update.settle_failed').length, 2);
+  db.exec('DROP TRIGGER refuse_audit');
+  rmSync(staging);
+  mkdirSync(staging);
+  w.clock.advance(SETTLE);
+  const entries = (JSON.parse((await w.call('/api/audit?since=0&limit=500')).body) as { entries: { action: string }[] }).entries;
+  assert.equal(entries.filter((e) => e.action === 'update.settle_failed').length, 0, 'a settle that works audits nothing, and ran after the throws');
+  assert.equal(w.journal.filter((c) => c === 'audit_failed:update.settle_failed').length, 2);
+});
+
+test('KBOX-28 KBOX-6 a first sweep and settle at start that throw, with a failing audit, do not stop core from starting, and the schedule runs on', async (t) => {
+  const HOUR = 3600_000;
+  const w = await started(t, {
+    domain: 'box.example',
+    seed: ({ meta, clock, db }) => {
+      meta.putApproval({ approval_id: 'ap_stale', kind: 'key_rotate', title: 'Rotate a key', slot: 'admin-1', opened_at: clock.now() - HOUR, expires_at: clock.now() - HOUR / 2 });
+      db.exec("CREATE TRIGGER refuse_expiry BEFORE UPDATE ON approvals BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END");
+      db.exec(REFUSE_AUDIT);
+    },
+  });
+  assert.ok(w.journal.includes('audit_failed:approvals.sweep_failed'), 'the first sweep failed, could not be audited, and core still started');
+  w.clock.advance(HOUR);
+  assert.equal(w.journal.filter((c) => c === 'audit_failed:approvals.sweep_failed').length, 2, 'the schedule went on');
 });

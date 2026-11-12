@@ -3,6 +3,7 @@
 // the only file besides the private-db adapter that names private.db.
 import { mkdirSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import type { AuditEvent } from './ports/audit.ts';
 import type { Clock, Scheduler } from './ports/clock.ts';
 import type { Random } from './ports/random.ts';
 import { DOMAIN_NAME } from './pure/actions.ts';
@@ -211,26 +212,35 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   );
   if (config.lendSocket === undefined) journal('no_lend_socket');
   else await lend.listen(config.lendSocket);
+  // A timed job schedules its next run BEFORE it works, so neither the work nor the audit of its failure can stop the schedule. A throw is
+  // audited; when the audit itself throws, the journal says so (nothing is swallowed, and nothing escapes the timer: under the real timer an
+  // uncaught throw would end core and stop every later run).
+  const notifier = { notice: journal };
+  const failSafeAudit = {
+    append(event: AuditEvent): void {
+      try {
+        parts.audit.append(event);
+      } catch {
+        notifier.notice(`audit_failed:${event.action}`);
+      }
+    },
+  };
   let cancelSweep = (): void => undefined;
   const sweep = (): void => {
-    // A throw is audited and the schedule goes on: under the real timer an uncaught throw would end core and stop every later sweep.
+    cancelSweep = scheduler.after(SWEEP_EVERY_MS, sweep);
     try {
       approve?.approvals.sweep();
     } catch {
-      parts.audit.append({ action: 'approvals.sweep_failed', subject: 'approvals', at: clock.now(), detail: { code: 'sweep_failed' } });
-    } finally {
-      cancelSweep = scheduler.after(SWEEP_EVERY_MS, sweep);
+      failSafeAudit.append({ action: 'approvals.sweep_failed', subject: 'approvals', at: clock.now(), detail: { code: 'sweep_failed' } });
     }
   };
   let cancelSettle = (): void => undefined;
   const settle = (): void => {
-    // A throw is audited and the schedule goes on, as for the sweep.
+    cancelSettle = scheduler.after(SETTLE_EVERY_MS, settle);
     try {
       updater.settle();
     } catch {
-      parts.audit.append({ action: 'update.settle_failed', subject: 'updater', at: clock.now(), detail: { code: 'settle_failed' } });
-    } finally {
-      cancelSettle = scheduler.after(SETTLE_EVERY_MS, settle);
+      failSafeAudit.append({ action: 'update.settle_failed', subject: 'updater', at: clock.now(), detail: { code: 'settle_failed' } });
     }
   };
   if (approve !== undefined) settle();
