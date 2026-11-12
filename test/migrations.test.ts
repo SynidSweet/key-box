@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { META_SCHEMA_V0, openMetaDatabase } from '../src/shell/db.ts';
+import { ApiError } from '../src/pure/errors.ts';
 import { openCore } from '../src/shell/core.ts';
 import { META_MIGRATIONS, PRIVATE_MIGRATIONS, migrate } from '../src/shell/migrations.ts';
 import { PRIVATE_SCHEMA_V0, openPrivateDatabase } from '../src/shell/private-db.ts';
@@ -40,7 +41,8 @@ const META_FIXTURE = (): string => ['meta.db kernel', 'meta.db rotation', 'meta.
 const versionOf = (db: DatabaseSync): number => (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
 const tablesOf = (db: DatabaseSync): string[] => (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as { name: string }[]).map((r) => r.name);
 const columnsOf = (db: DatabaseSync, table: string): string[] => (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
-const dumpOf = (db: DatabaseSync, table: string): unknown[] => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
+const plain = (rows: readonly object[]): object[] => rows.map((r) => ({ ...r }));
+const dumpOf = (db: DatabaseSync, table: string): object[] => plain(db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
 
 /** A file as release 1 wrote it: the given statements, user_version 0. */
 function writeV0(path: string, sql: string): DatabaseSync {
@@ -74,7 +76,7 @@ test('KBOX-56 a meta.db written by release 1 migrates to the newest version with
   assert.ok(NEWEST_META >= 1);
   const after = META_TABLES.map((table) => dumpOf(db, table).map((row) => (table === 'rotation_keys' ? Object.fromEntries(Object.entries(row as object).filter(([k]) => k !== 'verify_hint')) : row)));
   assert.deepEqual(after, before);
-  assert.deepEqual(db.prepare('SELECT verify_hint FROM rotation_keys').all(), [{ verify_hint: null }]);
+  assert.deepEqual(plain(db.prepare('SELECT verify_hint FROM rotation_keys').all()), [{ verify_hint: null }]);
 });
 
 test('KBOX-56 a private.db written by release 1 migrates to the newest version with every row kept', async (t) => {
@@ -137,11 +139,13 @@ test('KBOX-56 opening a file twice runs each migration once', async (t) => {
   const migrations = [['INSERT INTO ran VALUES (1)'], ['INSERT INTO ran VALUES (2)', 'ALTER TABLE ran ADD COLUMN extra TEXT']];
   migrate(db, migrations, () => undefined);
   migrate(db, migrations, () => undefined);
-  assert.deepEqual(db.prepare('SELECT n FROM ran ORDER BY n').all(), [{ n: 1 }, { n: 2 }]);
+  assert.deepEqual(plain(db.prepare('SELECT n FROM ran ORDER BY n').all()), [{ n: 1 }, { n: 2 }]);
   assert.equal(versionOf(db), 2);
   const path = join(await tempDir(t), 'meta.db');
-  openMetaDatabase(path, seededRandom(seed), () => undefined).close();
-  openMetaDatabase(path, seededRandom(seed), () => undefined).close();
+  const journal: string[] = [];
+  openMetaDatabase(path, seededRandom(seed), (code) => void journal.push(code)).close();
+  openMetaDatabase(path, seededRandom(seed), (code) => void journal.push(code)).close();
+  assert.deepEqual(journal, [], 'a file at the newest version is neither newer nor failing');
 });
 
 test('KBOX-56 a migration that throws leaves user_version and the tables as they were, journals schema_migration_failed and throws', async (t) => {
@@ -219,4 +223,12 @@ test('KBOX-56 the rotation store keeps a key verify_hint: empty until set, kept 
   assert.equal(store.keyInfo('k1')?.verifyHint, 'list_projects', 'a re-put of the key info does not clear the hint');
   store.setVerifyHint('k1', 'list_teams');
   assert.equal(store.keyInfo('k1')?.verifyHint, 'list_teams');
+});
+
+test('KBOX-56 setVerifyHint on a key without a rotation record is refused as not_found and stores nothing', async (t) => {
+  const clock = new TimedClock(1000);
+  const parts = openCore({ stateDir: join(await tempDir(t), 'state'), clock, scheduler: clock, random: seededRandom(seed) });
+  t.after(() => parts.close());
+  const store = createRotationStore(parts.db, clock, parts.hub);
+  assert.throws(() => store.setVerifyHint('nobody', 'list_projects'), (error) => error instanceof ApiError && error.code === 'not_found');
 });

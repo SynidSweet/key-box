@@ -133,8 +133,8 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   const egress = createLazyEgress(() => registry, loadEgressHosts(runtime.egressHostsFile));
   const registry = runtime.registry ?? createRegistry({ http: createAdapterHttp({ egress, scheduler }), clock });
   assertRegistry(registry);
-  const parts = openCore({ stateDir: config.stateDir, clock, scheduler, random });
-  const privateStore = openPrivateDatabase(join(config.stateDir, 'private.db'));
+  const parts = openCore({ stateDir: config.stateDir, clock, scheduler, random, journal });
+  const privateStore = openPrivateDatabase(join(config.stateDir, 'private.db'), journal);
   let approve: ReturnType<typeof openApproveCore> | undefined;
   let idle: IdleWatch | undefined;
   let rotation: Rotation | undefined;
