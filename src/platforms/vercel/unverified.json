@@ -1,0 +1,23 @@
+[
+  "vercel.cli-project-token",
+  "vercel.env-upsert",
+  "vercel.env-update",
+  "vercel.env-delete",
+  "vercel.redeploy",
+  "vercel.verifier-user-path",
+  "vercel.verifier-project-token",
+  "vercel.mustdeny-project-env",
+  "vercel.mustdeny-shared-env",
+  "vercel.mustdeny-integrations",
+  "vercel.mustdeny-team-members",
+  "vercel.mustdeny-team-invites",
+  "vercel.mustdeny-deployments",
+  "vercel.mustdeny-protection-bypass",
+  "vercel.mustdeny-drains",
+  "vercel.mustdeny-log-drains",
+  "vercel.mustdeny-webhooks",
+  "vercel.vcp-core-length",
+  "vercel.create-project",
+  "vercel.set-domain",
+  "vercel.team-settings"
+]

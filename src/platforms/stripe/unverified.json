@@ -1,0 +1,7 @@
+[
+  "stripe.restricted-keys-dashboard-only",
+  "stripe.rk-live-format",
+  "stripe.verify-calls",
+  "stripe.invalid-key-answer",
+  "stripe.key-page"
+]
