@@ -257,7 +257,7 @@ The closed list of kinds and their `data` (names, ids and codes only, never a va
 | `machine.changed` | `label, change: enrolled\|revoked` |
 | `token.new_network` | `label, network` |
 | `update.state` | `approval_id, state: pending\|installed\|rolled_back` |
-| `box.notice` | `code, text` (fixed texts: credential withheld, idle near, orphan key found, delivery unacknowledged, rotation skipped, approval interrupted), (`KBOX-60`) |
+| `box.notice` | `code, text` (fixed texts: credential withheld, idle near, orphan key found, delivery unacknowledged, rotation skipped, approval interrupted; the last from `KBOX-60`) |
 
 Test (`test/events.test.ts`, `FakeClock`): the long poll returns on the first event, returns an empty batch at 25 s of fake time, and two concurrent pollers
 both see every event; `since` semantics (equal to head, older, greater than head, missing); a stale `epoch` gives 409 `epoch_changed` and a fresh snapshot shows the new epoch; kinds outside the table cannot be written (type and runtime
