@@ -46,7 +46,7 @@ import type { PlatformSource } from './shell/rotation-ports.ts';
 import { createGrantChecks } from './shell/grant-checks.ts';
 import type { GrantChecks } from './shell/grant-checks.ts';
 import { identityRoutes } from './shell/identity-routes.ts';
-import { ensureBoxKeys } from './shell/box-keys.ts';
+import { ensureBoxKeys, refuseBoxKeyAction } from './shell/box-keys.ts';
 
 interface Config {
   readonly stateDir: string;
@@ -216,7 +216,10 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
       refuseUnwired: true,
       executors: { install_update: updater.executor, rotate_key: viaRotation('rotate_key'), add_key: viaRotation('add_key') },
       updateChanges: (action) => updater.changes(action),
-      precheck: (action) => checks.atProposal(action),
+      precheck: async (action) => {
+        refuseBoxKeyAction(registry, action);
+        await checks.atProposal(action);
+      },
     });
     const opened = openRotation({ parts, approvals: approve.approvals, approvers: approve.approvers, push, clock, scheduler, random, audit: parts.audit, source });
     rotation = opened;

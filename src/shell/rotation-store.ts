@@ -46,7 +46,12 @@ export interface GenRow {
   readonly status: GenStatus;
   readonly platformKeyId: PlatformKeyId | null;
   readonly location: KeyLocation;
+  /** When an STS exchange signed with this generation first succeeded (KBOX-55, KBOX-56 migration 2); null until then. */
+  readonly provedAt: number | null;
 }
+
+/** A generation as written: `provedAt` is set only by `markProved` and `clearProved`, never by `putGen`. */
+export type NewGen = Omit<GenRow, 'provedAt'>;
 
 export interface KeyInfo {
   readonly scopeItems: readonly string[];
@@ -205,10 +210,11 @@ interface GenStored {
   readonly platform_key_id: string | null;
   readonly region: string | null;
   readonly project: string | null;
+  readonly proved_at: number | null;
 }
 
 const locationOf = (region: string | null, project: string | null): KeyLocation => ({ ...(region === null ? {} : { region }), ...(project === null ? {} : { project }) });
-const toGen = (g: GenStored): GenRow => ({ keyref: g.keyref, gen: g.gen, status: g.status, platformKeyId: g.platform_key_id, location: locationOf(g.region, g.project) });
+const toGen = (g: GenStored): GenRow => ({ keyref: g.keyref, gen: g.gen, status: g.status, platformKeyId: g.platform_key_id, location: locationOf(g.region, g.project), provedAt: g.proved_at });
 
 export interface RotationStore {
   /** Opens a run. A second active run for the key is `conflict` (the unique index, not a check). Writes `rotation.state`. */
@@ -238,7 +244,11 @@ export interface RotationStore {
   setStatus(keyref: string, status: MetaKey['status'], genCurrent?: number): void;
   markRotated(keyref: string, at: number): void;
 
-  putGen(gen: GenRow): void;
+  putGen(gen: NewGen): void;
+  /** Records the first successful STS exchange signed with the generation: writes only while `provedAt` is null, so a second call keeps the first time. `not_found` for no such generation. */
+  markProved(keyref: string, gen: number, at: number): void;
+  /** Sets `provedAt` back to null (a rotation that fails `jwks_not_taken` leaves the current generation unproven). `not_found` for no such generation. */
+  clearProved(keyref: string, gen: number): void;
   gen(keyref: string, gen: number): GenRow | undefined;
   gens(keyref: string): readonly GenRow[];
   setGenStatus(keyref: string, gen: number, status: GenStatus): void;
@@ -388,6 +398,17 @@ export function createRotationStore(db: DatabaseSync, clock: Clock, hub: EventSi
           `INSERT INTO rotation_gens (keyref, gen, status, platform_key_id, region, project) VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT (keyref, gen) DO UPDATE SET status = excluded.status, platform_key_id = excluded.platform_key_id, region = excluded.region, project = excluded.project`,
         ).run(gen.keyref, gen.gen, gen.status, gen.platformKeyId, gen.location.region ?? null, gen.location.project ?? null);
+      });
+    },
+    markProved(keyref, gen, at) {
+      write(() => {
+        if (db.prepare('SELECT 1 AS one FROM rotation_gens WHERE keyref = ? AND gen = ?').get(keyref, gen) === undefined) throw new ApiError('not_found');
+        db.prepare('UPDATE rotation_gens SET proved_at = ? WHERE keyref = ? AND gen = ? AND proved_at IS NULL').run(at, keyref, gen);
+      });
+    },
+    clearProved(keyref, gen) {
+      write(() => {
+        if (db.prepare('UPDATE rotation_gens SET proved_at = NULL WHERE keyref = ? AND gen = ?').run(keyref, gen).changes === 0) throw new ApiError('not_found');
       });
     },
     gen: (keyref, gen) => {

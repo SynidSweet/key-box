@@ -10,6 +10,8 @@ export type Migration = readonly string[];
 export const META_MIGRATIONS: readonly Migration[] = [
   // 1: the read call a key's verification makes (KBOX-40).
   ['ALTER TABLE rotation_keys ADD COLUMN verify_hint TEXT'],
+  // 2: when an STS exchange signed with the generation first succeeded (KBOX-55: a box key is due only once proven).
+  ['ALTER TABLE rotation_gens ADD COLUMN proved_at INTEGER'],
 ];
 
 /** The private database's. */

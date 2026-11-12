@@ -101,6 +101,8 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
       handle: async ({ body, actor }) => {
         const { action } = body;
         const keyref = keyrefOf(action.platform, action.projects, action.name);
+        // KBOX-55: the box's own key never enters through here, before it exists or after; the first thing asked, so no later check answers for it.
+        refuseBoxMade(deps.source, action.platform, keyref);
         const config = keyConfigFor(deps.source, action.platform);
         // KBOX-57, KBOX-15: the class at the request's location (never below the class without it) and the location the entry accepts for it.
         const { klass, at } = placedKey(config, action);
@@ -176,20 +178,19 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
   ];
 }
 
-/**
- * KBOX-55 fills this: the platforms whose master the box makes itself (Google's signing key). A master result there is `rejected`
- * (`box_made_master`), checked before anything else about a master, because that master is never pasted. None is registered yet.
- */
-const BOX_MADE_MASTER_PLATFORMS: ReadonlySet<string> = new Set();
+/** KBOX-55: a request naming the box-made key's reference (`POST /api/keys`, `POST /api/retired`) is `rejected` (`box_made`). */
+function refuseBoxMade(source: PlatformSource, platform: string, keyref: string): void {
+  if (kitFor(source, { platform, keyref })?.boxKey !== undefined) throw rejected('box_made');
+}
 
 /**
  * KBOX-34: the answer to a master-class result of `POST /api/keys`, on an issuer platform and a paste platform alike: no issuer can make
  * another kind's master and none is asked, no approval is opened, the owner pastes it. In this order: a platform whose master the box makes
- * (`box_made_master`, KBOX-55, none yet); a key no verifier of the platform applies to (`no_verifier`, KBOX-58); then the paste task. A location
+ * (its entry has a `boxKey`: `box_made_master`, KBOX-55); a key no verifier of the platform applies to (`no_verifier`, KBOX-58); then the paste task. A location
  * that names a host is proven first, as for any paste; a master that names none needs no master of its own, or the first one could never enter.
  */
 async function masterResult(deps: KeyRouteDeps, action: AddKey, keyref: string, at: KeyLocation, actor: string): Promise<{ readonly status: number; readonly json: unknown }> {
-  if (BOX_MADE_MASTER_PLATFORMS.has(action.platform)) throw rejected('box_made_master');
+  if (deps.source.platform(action.platform)?.boxKey !== undefined) throw rejected('box_made_master');
   refuseUnverifiable(deps.source, action, at);
   if (namesHost(deps.source.platform(action.platform)?.location, at)) await provenPlacement(deps.source, action, at, 'paste');
   const opened = deps.paste.open({ action, requester: { kind: 'token', label: actor } });
@@ -227,6 +228,7 @@ async function provenPlacement(source: PlatformSource, action: AddKey, at: KeyLo
 /** Stores a retired value as a retired generation: never lent, never pushed; fingerprinted only when it passes the shape check (KBOX-34). */
 function retire(deps: KeyRouteDeps, q: { readonly platform: string; readonly project: string; readonly name: string }, bytes: Uint8Array): { readonly status: number; readonly json: unknown } {
   const keyref = keyrefOf(q.platform, [q.project], q.name);
+  refuseBoxMade(deps.source, q.platform, keyref);
   // KBOX-55: the retired value is of this key, so its class and shape are its own kit's.
   const kit = kitFor(deps.source, { platform: q.platform, keyref });
   const classify = classifierOf(kit);

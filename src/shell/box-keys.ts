@@ -7,6 +7,9 @@ import type { MetaStore } from '../ports/meta.ts';
 import type { BoxMadeKey, PlatformEntry } from '../ports/platform.ts';
 import type { Random } from '../ports/random.ts';
 import type { Vault } from '../ports/vault.ts';
+import type { Action } from '../pure/actions.ts';
+import { keyrefOf } from '../pure/class.ts';
+import { ApiError } from '../pure/errors.ts';
 import { boxKeyrefOf } from './rotation-ports.ts';
 import type { RotationStore } from './rotation-store.ts';
 
@@ -69,4 +72,34 @@ function ensureBoxKey(deps: BoxKeyDeps, platform: string, box: BoxMadeKey): void
   deps.store.putKeyInfo(keyref, { scopeItems: [], location: {}, rotatedAt: deps.clock.now(), markAdmin: false });
   deps.store.putGen({ keyref, gen, status: 'current', platformKeyId: null, location: {} });
   deps.audit.append({ action: 'key.issued', subject: keyref, at: deps.clock.now() });
+}
+
+/** Whether this key reference is one a registered platform's box-made key is stored under (KBOX-55). */
+export const isBoxKeyref = (registry: readonly PlatformEntry[], keyref: string): boolean => registry.some((e) => e.boxKey !== undefined && boxKeyrefOf(e.id, e.boxKey) === keyref);
+
+/**
+ * KBOX-55, at proposal (the approval precheck): the box's own key is never made, granted, given a destination, demoted, deleted or given a
+ * schedule with no grace. Each is `rejected` (`box_made`) before anything is opened, so no approval that could be executed names it. A
+ * rotation, and a `set_schedule` that keeps the old generation for some grace, are the box key's own life and pass.
+ */
+export function refuseBoxKeyAction(registry: readonly PlatformEntry[], action: Action): void {
+  const refused = (): never => {
+    throw new ApiError('rejected', 'box_made');
+  };
+  switch (action.kind) {
+    case 'add_key':
+      if (isBoxKeyref(registry, keyrefOf(action.platform, action.projects, action.name))) refused();
+      return;
+    case 'grant':
+    case 'add_destination':
+    case 'demote':
+    case 'delete_key':
+      if (isBoxKeyref(registry, action.keyref)) refused();
+      return;
+    case 'set_schedule':
+      if (action.grace_hours === 0 && isBoxKeyref(registry, action.keyref)) refused();
+      return;
+    default:
+      return;
+  }
 }

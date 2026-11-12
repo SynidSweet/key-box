@@ -25,7 +25,7 @@ import { createReconciler } from './reconcile.ts';
 import type { Reconciler } from './reconcile.ts';
 import { createRotationStore } from './rotation-store.ts';
 import type { KeyHead, RotationStore } from './rotation-store.ts';
-import { createsByPaste, isPasteSource as pasteSource, overlapOf, proposalRefusal, rotatesByPaste as pasteRotation } from './rotation-ports.ts';
+import { createsByPaste, isPasteSource as pasteSource, kitFor, overlapOf, proposalRefusal, rotatesByPaste as pasteRotation } from './rotation-ports.ts';
 import type { RotationRefusal } from './rotation-ports.ts';
 import type { PlatformSource, Point } from './rotation-ports.ts';
 
@@ -174,7 +174,11 @@ export function openRotation(deps: RotationDeps): Rotation {
     if ((key.status === 'awaiting_approval' || key.status === 'awaiting_paste') && !pending && store.activeRunOf(key.keyref) === undefined) store.setStatus(key.keyref, 'works');
     const at = due.get(key.keyref);
     if (at === undefined || at > now || pending || store.activeRunOf(key.keyref) !== undefined) return;
-    if (!store.gens(key.keyref).some((g) => g.status === 'current')) return;
+    const current = store.gens(key.keyref).find((g) => g.status === 'current');
+    if (current === undefined) return;
+    // KBOX-55: a box-made key is due only once an STS exchange signed with its current generation has succeeded; until then the owner has
+    // no pool that trusts the box, so nothing is asked and nothing is noticed (a manual rotation still opens one).
+    if (kitFor(deps.source, key)?.boxKey !== undefined && current.provedAt === null) return;
     const last = store.runs().filter((r) => r.keyref === key.keyref).at(-1);
     // KBOX-52: no sooner than 24 hours after the failure itself (the schema refuses a failed run without its failure time).
     if (last?.state === 'failed' && now - (last.failedAt ?? last.openedAt) < AFTER_FAILURE_MS) return;
