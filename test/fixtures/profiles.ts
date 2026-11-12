@@ -4,7 +4,7 @@
 // mints a credential, a token or a login.
 import type { PlatformEntry } from '../../src/ports/platform.ts';
 import type { DenyRule, RelayProfile } from '../../src/ports/relay-profile.ts';
-import type { Lent } from '../../src/ports/types.ts';
+import type { KeyShape, Lent } from '../../src/ports/types.ts';
 
 const bearer = async (h: Headers, v: Lent): Promise<void> => {
   const value = await v.use((b) => Promise.resolve(Buffer.from(b).toString('utf8')));
@@ -12,6 +12,9 @@ const bearer = async (h: Headers, v: Lent): Promise<void> => {
 };
 
 export const PATH_HOST = 'api.pathplat.example';
+
+/** The one key shape the shapeless test entries state (an entry with no issuer must carry its own, KBOX-40). */
+export const NO_ISSUER_SHAPE: KeyShape = { prefix: null, alphabet: 'hex', coreLength: { min: 8, max: 8 }, random: true };
 
 /** Sample variants of one upstream request: the canonicalisation table of KBOX-13 applied to it. */
 export function variants(method: string, host: string, path: string): DenyRule['samples'] {
@@ -100,7 +103,7 @@ export const leakyProfile: RelayProfile = {
 
 /** The registry the relay tests run: both test profiles and a platform with no relay profile. */
 export const TEST_REGISTRY: readonly PlatformEntry[] = [
-  { id: 'pathplat', relay: pathProfile },
-  { id: 'hostplat', relay: hostProfile },
-  { id: 'plain' },
+  { id: 'pathplat', relay: pathProfile, shape: NO_ISSUER_SHAPE, unverified: [] },
+  { id: 'hostplat', relay: hostProfile, shape: NO_ISSUER_SHAPE, unverified: [] },
+  { id: 'plain', shape: NO_ISSUER_SHAPE, unverified: [] },
 ];

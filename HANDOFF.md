@@ -139,10 +139,14 @@ adversary: `/home/petter/.local/share/lanes/key-box/<unit>.verdict.md`.
 
 ## Recent
 
-`platforms` (unit/platforms, NOT gate-green): `unverified` is required and a shape-less entry is refused, so the older fixture entries
-(`test/fixtures/profiles.ts` TEST_REGISTRY, `registry.test.ts`, `relay-forward.test.ts`, `profile-engine.test.ts`, `platform-source.test.ts`)
-fail typecheck, and every relay-world test and `registry.test.ts` case that expects `passed` fails with `shape_missing`; they await an
-authorised additive fixture edit (`unverified: []`, a `shape`). `integrate` (on main after e1fd5e5): rotation wired into core (`startCore`, `platform-source`, executors, routes,
+`platforms` (unit/platforms, fix round): `unverified` is required and a shape-less entry is refused. The older fixture entries
+(`test/fixtures/profiles.ts` TEST_REGISTRY, `registry.test.ts`, `relay-forward.test.ts`, `profile-engine.test.ts`, `platform-source.test.ts`) now
+carry `unverified: []` and, where the entry has no issuer and is expected to pass, `shape: NO_ISSUER_SHAPE` (exported by
+`test/fixtures/profiles.ts`); no assertion changed. The orchestrator test in `test/platform-entry.test.ts` is now two cases over the
+real `createPlatformSource` path: the entry's verifier accepts the new key and the run reaches grace, or rejects it and the run fails
+with generation 1 current; the world's own verifier is asked in neither. Each new unit test was checked with a planted mutant
+(platform-source kit fields, `destination`, `vetAction`, the shape-source check, the probe comparison, `startCore`'s registry check).
+Before it: `integrate` (on main after e1fd5e5): rotation wired into core (`startCore`, `platform-source`, executors, routes,
 tick and reconcile, stop), `Orchestrator.stop`, retired generations in the share file over the real source, `key.changed` on
 every generation status change, and this file. Before it: `rotate` (two adversary fix rounds; verdict "declared not done" named
 the wiring and J1/J3), `update` (verdict UNSOUND, fixes merged incl. spec revision 4: approver_add binds the new approver's key

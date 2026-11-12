@@ -31,7 +31,7 @@ async function world(t: TestContext) {
   const parts = openCore({ stateDir: join(await tempDir(t), 'state'), clock, scheduler: clock, random });
   t.after(() => parts.close());
   const platform = new FakePlatformWorld(random);
-  const entry: PlatformEntry = { id: 'fake', issuer: platform.issuer, lister: platform.lister };
+  const entry: PlatformEntry = { id: 'fake', issuer: platform.issuer, lister: platform.lister, unverified: [] };
   return { parts, entry, source: createPlatformSource({ registry: [entry], meta: parts.meta, vault: parts.vault }) };
 }
 

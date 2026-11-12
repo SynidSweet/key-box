@@ -211,7 +211,7 @@ test('KBOX-13 Accept-Profile passes only with the word public: vault gives 403 w
 });
 
 test('KBOX-23 a relay with a profile listing Range refuses to start, naming the platform', () => {
-  const registry = [{ id: 'pathplat', relay: { ...pathProfile, requestHeaders: [...pathProfile.requestHeaders, 'range'] } }];
+  const registry = [{ id: 'pathplat', relay: { ...pathProfile, requestHeaders: [...pathProfile.requestHeaders, 'range'] }, unverified: [] }];
   assert.throws(() => createRelayServer({ registry, lend: createLendClient('/nonexistent'), egress: { open: () => Promise.reject(new Error('unused')) }, domain: 'box.example', journal: () => undefined }), (e: unknown) => e instanceof RegistryRefused && e.message === 'registry check failed: partial_content_header (pathplat)');
 });
 

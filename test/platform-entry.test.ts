@@ -2,6 +2,7 @@
 // entry (verifier, key page, shape) and the destination kit of a kind; the paste flow and the orchestrator reach them through it.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { TestContext } from 'node:test';
 import type { Verifier } from '../src/ports/issuer.ts';
 import type { KeyShape } from '../src/ports/types.ts';
 import { isPasteSource } from '../src/shell/rotation-ports.ts';
@@ -69,21 +70,47 @@ test('KBOX-12 the paste page shows the entry\'s key page, and the entry\'s verif
   assert.ok(seen.length > 0 && seen.every((v) => v === pasteValue('b'.repeat(32))), 'the entry\'s verifier saw the value');
 });
 
-test('KBOX-51 the orchestrator verifies the new key with the verifier of the entry, not with another', async (t) => {
-  const w0 = world();
-  let calls = 0;
-  const verifier: Verifier = { verify: (key, target) => (calls += 1, w0.verifier.verify(key, target)) };
+/** A rotation whose platform source is built from a registry entry (through `createPlatformSource`) carrying `verifier` and nothing of the world's own. */
+async function rotateWithEntryVerifier(t: TestContext, decide: (presented: string, newest: string) => 'ok' | 'rejected') {
+  const seen: string[] = [];
+  let newest: (() => Promise<string>) | undefined; // set once the key is seeded: the seeding run is not under test
+  const verifier: Verifier = {
+    verify: async (key) => {
+      if (newest === undefined) return 'ok';
+      const presented = Buffer.from(await bytesOf(key)).toString('utf8');
+      seen.push(presented);
+      return decide(presented, await newest());
+    },
+  };
   const w = await rotationWorld(t, {
     source: (real) => {
       const kit = real.platform('fake');
-      const entry = fakeEntry(w0, { ...(kit?.issuer === undefined ? {} : { issuer: kit.issuer }), ...(kit?.lister === undefined ? {} : { lister: kit.lister }), verifier });
+      const entry = fakeEntry(world(), { ...(kit?.issuer === undefined ? {} : { issuer: kit.issuer }), ...(kit?.lister === undefined ? {} : { lister: kit.lister }), verifier });
       return { ...real, platform: (id) => sourceOf([entry]).platform(id) };
     },
   });
   const keyref = await w.seedKey();
+  newest = () => w.valueOf(keyref, 2);
   w.trace.length = 0;
   w.orch.start({ keyref, origin: 'owner' });
   await w.orch.idle();
-  assert.ok(calls >= 1, 'the entry\'s verifier was asked');
+  return { w, keyref, seen };
+}
+
+test('KBOX-51 a rotation succeeds because the verifier of the registry entry accepts the new key: the world\'s own verifier is never asked', async (t) => {
+  const { w, keyref, seen } = await rotateWithEntryVerifier(t, (presented, current) => (presented === current ? 'ok' : 'rejected'));
+  const newValue = await w.valueOf(keyref, 2);
+  assert.ok(seen.length >= 1 && seen.every((v) => v === newValue), 'the entry\'s verifier was asked about the new key');
   assert.equal(w.trace.includes('verify'), false, 'the world\'s own verifier was not');
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'grace', 'the run passed verify and check and waits out the grace');
+  assert.equal(w.store.gens(keyref).find((g) => g.gen === 2)?.status, 'current');
+});
+
+test('KBOX-51 a rotation does not promote when the verifier of the registry entry rejects the new key, though the world\'s own verifier would accept it', async (t) => {
+  const { w, keyref, seen } = await rotateWithEntryVerifier(t, () => 'rejected');
+  assert.ok(seen.length >= 1, 'the entry\'s verifier was asked');
+  assert.equal(w.trace.includes('verify'), false, 'the world\'s own verifier was not');
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+  assert.equal(w.parts.meta.snapshot().keys.find((k) => k.keyref === keyref)?.gen_current, 1);
+  assert.notEqual(w.store.gens(keyref).find((g) => g.gen === 2)?.status ?? 'failed', 'current');
 });
