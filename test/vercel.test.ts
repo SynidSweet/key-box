@@ -480,7 +480,8 @@ test('KBOX-15 KBOX-57 at the route every Vercel token classes master, a project 
       platform: (id) => {
         if (id !== 'vercel') return real.platform(id);
         assert.ok(box.w);
-        return createPlatformSource({ registry: [world.entry], meta: box.w.parts.meta, vault: box.w.parts.vault }).platform(id);
+        const routes = box.w;
+        return createPlatformSource({ registry: [world.entry], meta: routes.parts.meta, vault: routes.parts.vault, keyInfo: (keyref) => routes.rotation.store.keyInfo(keyref) }).platform(id);
       },
     }),
   });

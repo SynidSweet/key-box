@@ -42,6 +42,9 @@ export const pasteOnlyEntry = (world: FakePlatformWorld, shape: KeyShape, patch:
 
 const noMeta = { snapshot: (): never => { throw new Error('this test reads no master key'); } };
 const noVault = { lend: (): never => { throw new Error('this test reads no master key'); } };
+const noKeyInfo = (): never => {
+  throw new Error('this test reads no master key');
+};
 
 /** The platform source of a registry, for a test that never asks for a master key. */
-export const sourceOf = (registry: readonly PlatformEntry[]): PlatformSource => createPlatformSource({ registry, meta: noMeta, vault: noVault });
+export const sourceOf = (registry: readonly PlatformEntry[]): PlatformSource => createPlatformSource({ registry, meta: noMeta, vault: noVault, keyInfo: noKeyInfo });

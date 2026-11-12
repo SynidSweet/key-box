@@ -39,6 +39,7 @@ import { createUpdater } from './shell/updater.ts';
 import type { Executor } from './shell/approvals.ts';
 import { createPlatformSource } from './shell/platform-source.ts';
 import { openRotation } from './shell/rotation.ts';
+import { readKeyInfo } from './shell/rotation-store.ts';
 import type { Rotation } from './shell/rotation.ts';
 import type { PlatformSource } from './shell/rotation-ports.ts';
 
@@ -183,7 +184,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
       executors: { install_update: updater.executor, rotate_key: viaRotation('rotate_key'), add_key: viaRotation('add_key') },
       updateChanges: (action) => updater.changes(action),
     });
-    const source = runtime.platforms ?? createPlatformSource({ registry, meta: parts.meta, vault: parts.vault });
+    const source = runtime.platforms ?? createPlatformSource({ registry, meta: parts.meta, vault: parts.vault, keyInfo: (keyref) => readKeyInfo(parts.db, keyref) });
     rotation = openRotation({ parts, approvals: approve.approvals, approvers: approve.approvers, push, clock, scheduler, random, audit: parts.audit, source });
   }
   const rotationStore = rotation?.store;

@@ -94,3 +94,11 @@ export type PasteTaskId = string;
 export interface PasteSource {
   open(req: PasteRequest): Promise<PasteTaskId>;
 }
+
+/**
+ * KBOX-57: proves a host-naming location before a key is proposed: asks the platform, with the master chosen for the key, whether it can see
+ * that place. `unseen` when it cannot; any other answer (a 401, a 5xx) or a failed call throws.
+ */
+export interface LocationProver {
+  prove(at: KeyLocation, master: Lent): Promise<'seen' | 'unseen'>;
+}

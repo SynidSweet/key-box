@@ -34,3 +34,12 @@ export function checkLocation(schema: LocationSchema | undefined, at: KeyLocatio
 
 /** The platform's answer and the stored location name the same place: equal over the fields either names (a field on one side only differs). */
 export const sameLocation = (a: KeyLocation, b: KeyLocation): boolean => FIELDS.every((f) => a[f] === b[f]);
+
+/**
+ * KBOX-57: a master's stored location covers a key's location when it names no field that the key's lacks or names differently: an empty
+ * stored location covers every place.
+ */
+export const covers = (stored: KeyLocation, key: KeyLocation): boolean => FIELDS.every((f) => stored[f] === undefined || stored[f] === key[f]);
+
+/** KBOX-57: the location names a field the entry declares as naming an upstream host (Supabase `project`): that place is proven at proposal. */
+export const namesHost = (schema: LocationSchema | undefined, at: KeyLocation): boolean => named(at).some((f) => schema?.[f]?.namesHost === true);

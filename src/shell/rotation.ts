@@ -153,12 +153,13 @@ export function openRotation(deps: RotationDeps): Rotation {
     return ended !== undefined && now - ended.at < (ended.outcome === 'denied' ? AFTER_REFUSAL_MS : AFTER_EXPIRY_MS);
   };
 
-  /** The key and code pairs this process already recorded as skipped by the schedule (KBOX-57: one record per key and code). */
+  /** The key and code pairs this process already skipped (KBOX-57: one notice and one audit row per key and code while core runs). */
   const refused = new Set<string>();
   const refusedOnce = (keyref: string, code: LocationRefusal): void => {
     const pair = `${keyref} ${code}`;
     if (refused.has(pair)) return;
     deps.audit.append({ action: 'rotation.refused', subject: keyref, at: deps.clock.now(), detail: { code } });
+    parts.events.append('box.notice', { code, text: 'rotation skipped' });
     refused.add(pair);
   };
 

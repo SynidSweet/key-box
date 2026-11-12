@@ -145,7 +145,7 @@ export function parseUpstreamJson(textOf: string): unknown {
 
 // --- events (KBOX-31): the closed list of kinds and their data --------------------------------------------------------
 
-export const BOX_NOTICE_TEXTS = ['credential withheld', 'idle near', 'orphan key found', 'delivery unacknowledged'] as const;
+export const BOX_NOTICE_TEXTS = ['credential withheld', 'idle near', 'orphan key found', 'delivery unacknowledged', 'rotation skipped'] as const;
 
 export const EVENT_SCHEMAS = {
   'approval.opened': { approval_id: text(NAME), approval_kind: text(CODE), title: text(TITLE), slot: text(NAME), revision: int() },

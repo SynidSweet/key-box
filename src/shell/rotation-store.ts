@@ -268,6 +268,17 @@ export interface RotationStore {
   markDeliveryNotified(deliveryId: string): void;
 }
 
+/**
+ * A key's stored scope, location and options (`rotation_keys`), read straight from meta.db with no store instance: what the platform source
+ * reads of a master row (KBOX-57). Undefined when the key has no such row.
+ */
+export function readKeyInfo(db: DatabaseSync, keyref: string): KeyInfo | undefined {
+  const r = db.prepare('SELECT scope_json, region, project, rotated_at, mark_admin, verify_hint FROM rotation_keys WHERE keyref = ?').get(keyref) as
+    | { scope_json: string; region: string | null; project: string | null; rotated_at: number; mark_admin: number; verify_hint: string | null }
+    | undefined;
+  return r === undefined ? undefined : { scopeItems: JSON.parse(r.scope_json) as string[], location: locationOf(r.region, r.project), rotatedAt: r.rotated_at, markAdmin: r.mark_admin === 1, ...(r.verify_hint === null ? {} : { verifyHint: r.verify_hint }) };
+}
+
 export function createRotationStore(db: DatabaseSync, clock: Clock, hub: EventSignal): RotationStore {
   const write = <T>(work: () => T): T => {
     const result = inTransaction(db, work);
@@ -348,12 +359,7 @@ export function createRotationStore(db: DatabaseSync, clock: Clock, hub: EventSi
     },
     keyExists: (keyref) =>
       db.prepare('SELECT 1 AS one FROM keys WHERE keyref = ? UNION ALL SELECT 1 FROM rotation_keys WHERE keyref = ?').get(keyref, keyref) !== undefined,
-    keyInfo(keyref) {
-      const r = db.prepare('SELECT scope_json, region, project, rotated_at, mark_admin, verify_hint FROM rotation_keys WHERE keyref = ?').get(keyref) as
-        | { scope_json: string; region: string | null; project: string | null; rotated_at: number; mark_admin: number; verify_hint: string | null }
-        | undefined;
-      return r === undefined ? undefined : { scopeItems: JSON.parse(r.scope_json) as string[], location: locationOf(r.region, r.project), rotatedAt: r.rotated_at, markAdmin: r.mark_admin === 1, ...(r.verify_hint === null ? {} : { verifyHint: r.verify_hint }) };
-    },
+    keyInfo: (keyref) => readKeyInfo(db, keyref),
     setVerifyHint(keyref, hint) {
       write(() => {
         if (db.prepare('UPDATE rotation_keys SET verify_hint = ? WHERE keyref = ?').run(hint, keyref).changes === 0) throw new ApiError('not_found');

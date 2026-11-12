@@ -171,9 +171,10 @@ async function elevenLabsRoutes(t: TestContext, region: Region): Promise<RoutesW
       platform: (id) => {
         if (id !== 'elevenlabs') return real.platform(id);
         assert.ok(box.w);
-        return createPlatformSource({ registry: [entry], meta: box.w.parts.meta, vault: box.w.parts.vault }).platform(id);
+        const routes = box.w;
+        return createPlatformSource({ registry: [entry], meta: routes.parts.meta, vault: routes.parts.vault, keyInfo: (keyref) => routes.rotation.store.keyInfo(keyref) }).platform(id);
       },
-      master: (platform, projects) => (platform === 'elevenlabs' ? world.master(region) : real.master(platform, projects)),
+      master: (platform, at, items) => (platform === 'elevenlabs' ? { ok: true, value: world.master(region) } : real.master(platform, at, items)),
     }),
   });
   box.w = w;

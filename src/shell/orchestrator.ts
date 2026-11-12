@@ -20,7 +20,7 @@ import { intentName, nextStep, retryDelayMs } from '../pure/rotation-machine.ts'
 import type { Step } from '../pure/rotation-machine.ts';
 import { revokeAndConfirm } from './revoke-confirm.ts';
 import { isPasteSource, overlapOf, setterOf, storedPlacement, tryLend } from './rotation-ports.ts';
-import type { PlatformKit, PlatformSource, Point } from './rotation-ports.ts';
+import type { MasterResult, PlatformKit, PlatformSource, Point } from './rotation-ports.ts';
 import type { DestinationRow, KeyHead, Receipt, RotationStore, RunOrigin, RunRow } from './rotation-store.ts';
 
 const HOUR_MS = 3600_000;
@@ -107,7 +107,7 @@ interface Fresh {
 /** The process stopped at a checkpoint (a test's crash): the drive ends there and recovery is the next start's. */
 class Stopped extends Error {}
 
-/** The names-only reason of a throw: an ApiError's detail code when it has one (`master_ambiguous`), else its code; anything else `internal`. */
+/** The names-only reason of a throw: an ApiError's detail code when it has one, else its code; anything else `internal`. */
 const codeOf = (error: unknown): string => {
   if (!(error instanceof ApiError)) return 'internal';
   return error.detail !== undefined && 'code' in error.detail ? error.detail.code : error.code;
@@ -290,15 +290,13 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     return lent.ok ? lent.value : undefined;
   };
 
-  /** The master for the key's platform: its own project's preferred (review N5). Throws when there is none or the source cannot choose. */
-  const masterOf = (head: KeyHead): Lent => deps.master(head.platform, head.projects);
-  /** The master as a result, before a platform call: a run that cannot have one fails naming why (`master_ambiguous`, `no_master`). */
-  const masterFor = (head: KeyHead): { readonly ok: true; readonly value: Lent } | { readonly ok: false; readonly code: string } => {
-    try {
-      return { ok: true, value: masterOf(head) };
-    } catch (error: unknown) {
-      return { ok: false, code: error instanceof ApiError ? codeOf(error) : 'no_master' };
-    }
+  /**
+   * KBOX-57: the master for the key, chosen by its platform, its stored location and its stored scope items (never its projects): a step that
+   * finds none or two fails naming why (`no_master`, `master_ambiguous`). A key with no stored record has no master to choose.
+   */
+  const masterFor = (head: KeyHead): MasterResult => {
+    const info = store.keyInfo(head.keyref);
+    return info === undefined ? { ok: false, code: 'no_master' } : deps.master(head.platform, info.location, info.scopeItems);
   };
 
   // --- steps 3 and 4: create and store ----------------------------------------------------------------------------------------
@@ -416,7 +414,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   const kitFor = (row: DestinationRow): DestinationKit | undefined => deps.destination(row.kind);
 
   async function pushAll(run: RunRow, head: KeyHead): Promise<Next> {
-    const master = masterOf(head);
+    const chosen = masterFor(head);
+    if (!chosen.ok) return fail(run, 'pushing', chosen.code);
+    const master = chosen.value;
     const value = lendOrUndefined(run.keyref, run.genNew);
     if (value === undefined) return fail(run, 'pushing', 'push_failed');
     const rows = store.destinationsOf(run.keyref);
@@ -460,7 +460,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   }
 
   async function redeployAll(run: RunRow, head: KeyHead): Promise<Next> {
-    const master = masterOf(head);
+    const chosen = masterFor(head);
+    if (!chosen.ok) return fail(run, 'redeploying', chosen.code);
+    const master = chosen.value;
     for (const row of store.destinationsOf(run.keyref)) {
       const kit = row.kind === WORKSTATION ? undefined : kitFor(row);
       if (kit?.redeployer === undefined || !kit.destination.properties().needsRedeploy) continue;
@@ -509,7 +511,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   async function revokeOld(run: RunRow, head: KeyHead, kit: PlatformKit): Promise<Next> {
     if (run.genOld > 0) {
       const old = store.gen(run.keyref, run.genOld);
-      const dead = await revokeAndConfirm({ kit, platform: head.platform, id: old?.platformKeyId ?? null, at: old?.location ?? {}, value: lendOrUndefined(run.keyref, run.genOld), master: masterOf(head) });
+      // Step 10 without a master to end the old key with: not proven dead, so the old key stays in grace and the step retries (one notice).
+      const master = masterFor(head);
+      if (!master.ok) return retryRevoke(run);
+      const dead = await revokeAndConfirm({ kit, platform: head.platform, id: old?.platformKeyId ?? null, at: old?.location ?? {}, value: lendOrUndefined(run.keyref, run.genOld), master: master.value });
       if (!dead) return retryRevoke(run);
       store.setGenStatus(run.keyref, run.genOld, 'retired');
       deps.vault.retire(run.keyref, run.genOld);
@@ -638,13 +643,23 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     return back.ok;
   }
 
-  async function rollBack(run: RunRow, head: KeyHead, kit: PlatformKit, fresh?: Fresh): Promise<Next> {
-    const master = masterOf(head);
+  /** The rollback is not done: it is tried again with backoff (S-249); the run's one notice was already sent. */
+  function rollBackLater(run: RunRow): Next {
+    const attempts = run.attempts + 1;
+    store.update(run.runId, { attempts });
+    later(run.runId, retryDelayMs(attempts - 1));
+    return 'wait';
+  }
+
+  /**
+   * Puts every destination back and ends a new key the box made, with the master: true when all is undone, false while something still holds
+   * (or may hold) the new value or the new key is not proven dead.
+   */
+  async function undoEverywhere(run: RunRow, head: KeyHead, kit: PlatformKit, master: Lent, receipts: readonly Receipt[], id: string | null, fresh: Fresh | undefined): Promise<boolean> {
     const old = run.genOld > 0 ? lendOrUndefined(run.keyref, run.genOld) : undefined;
     let held = 0;
     // Every receipt, `maybe` included: a push that threw or never answered may have changed the destination. An overlap:false platform takes
     // the old value back first: until it has, the old key works nowhere, and every card of this pass says so (review N7).
-    const receipts = store.receipts(run.runId);
     let oldKeyWorks = run.genOld > 0;
     for (const receipt of [...receipts.filter((r) => r.kind === PLATFORM_SET), ...receipts.filter((r) => r.kind !== PLATFORM_SET)]) {
       const undone = await undo(run, head, receipt, old, master);
@@ -653,23 +668,26 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       held += 1;
       if (!receipt.rollbackNotified) noticeHeld(run, head, receipt, oldKeyWorks);
     }
-    if (held > 0) {
-      const attempts = run.attempts + 1;
-      store.update(run.runId, { attempts });
-      later(run.runId, retryDelayMs(attempts - 1));
-      return 'wait';
-    }
+    if (held > 0) return false;
+    // A key the box did not make (pasted) has nothing to revoke here; one it made is revoked and confirmed before the run ends.
+    if (id === null) return true;
+    const created = store.gen(run.keyref, run.genNew);
+    return revokeAndConfirm({ kit, platform: head.platform, id, at: created?.location ?? fresh?.at ?? store.keyInfo(run.keyref)?.location ?? {}, value: fresh?.value ?? lendOrUndefined(run.keyref, run.genNew), master });
+  }
+
+  async function rollBack(run: RunRow, head: KeyHead, kit: PlatformKit, fresh?: Fresh): Promise<Next> {
+    const receipts = store.receipts(run.runId);
     const created = store.gen(run.keyref, run.genNew);
     const id = created?.platformKeyId ?? fresh?.id ?? null;
-    // A key the box did not make (pasted) has nothing to revoke here; one it made is revoked and confirmed before the run ends.
-    if (id !== null) {
-      const dead = await revokeAndConfirm({ kit, platform: head.platform, id, at: created?.location ?? fresh?.at ?? store.keyInfo(run.keyref)?.location ?? {}, value: fresh?.value ?? lendOrUndefined(run.keyref, run.genNew), master });
-      if (!dead) {
-        const attempts = run.attempts + 1;
-        store.update(run.runId, { attempts });
-        later(run.runId, retryDelayMs(attempts - 1));
-        return 'wait';
+    // KBOX-57: the master is needed only to undo something at a destination or at the platform; a run that failed before it changed anything
+    // (no master at its first step) ends at once. Without one when it is needed, the rollback waits and retries (no second notice).
+    if (receipts.some((r) => r.pushed !== 'refused') || id !== null) {
+      const chosen = masterFor(head);
+      if (!chosen.ok) {
+        auditStepFailed(run, 'rollback', chosen.code);
+        return rollBackLater(run);
       }
+      if (!(await undoEverywhere(run, head, kit, chosen.value, receipts, id, fresh))) return rollBackLater(run);
     }
     if (created !== undefined) {
       store.setGenStatus(run.keyref, run.genNew, 'failed');

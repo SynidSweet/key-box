@@ -5,6 +5,7 @@ import type { Random } from '../ports/random.ts';
 import type { Action, Destination } from '../pure/actions.ts';
 import { parseAction } from '../pure/actions.ts';
 import { classOf, keyrefOf, matchesShape } from '../pure/class.ts';
+import { namesHost } from '../pure/location.ts';
 import { ApiError } from '../pure/errors.ts';
 import { LABEL, NAME, parseQuery, text } from '../pure/schemas.ts';
 import type { Parsed } from '../pure/schemas.ts';
@@ -13,7 +14,7 @@ import { parsedRoute, route } from './http.ts';
 import type { Route } from './http.ts';
 import { classifierOf, shapeOf } from '../pure/platform-shape.ts';
 import { keyConfigFor, newKeyOf, placedKey } from './new-key.ts';
-import type { RotateKey } from './new-key.ts';
+import type { AddKey, RotateKey } from './new-key.ts';
 import type { Orchestrator } from './orchestrator.ts';
 import type { Paste } from './paste.ts';
 import { isRecord, only } from './routes-approve.ts';
@@ -23,6 +24,7 @@ import type { DestinationRow, RotationStore } from './rotation-store.ts';
 import type { Vault } from '../ports/vault.ts';
 import type { Audit } from '../ports/audit.ts';
 import type { Clock } from '../ports/clock.ts';
+import type { KeyLocation } from '../ports/types.ts';
 import type { EventLog } from '../ports/events.ts';
 
 export interface KeyRouteDeps {
@@ -101,19 +103,21 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
         const keyref = keyrefOf(action.platform, action.projects, action.name);
         const config = keyConfigFor(deps.source, action.platform);
         // KBOX-57, KBOX-15: the class at the request's location (never below the class without it) and the location the entry accepts for it.
-        const { klass } = placedKey(config, action);
+        const { klass, at } = placedKey(config, action);
         // KBOX-57: a key elsewhere is a new key; an existing reference is refused on every branch before anything is asked, opened or written.
         if (store.keyExists(keyref)) throw new ApiError('conflict', 'key_exists');
         if (klass === 'master') throw rejected('master_not_issuable');
         if (config.create === 'paste') {
           if (klass === 'ordinary') throw rejected('no_issuer');
+          await provenPlacement(deps.source, action, at, 'paste');
           const opened = deps.paste.open({ action, requester: { kind: 'token', label: actor } });
           return { status: 202, json: { keyref, class: klass, paste_task_id: opened.paste_id } };
         }
         // A key of a one-credential platform is added by paste, never by a run (nothing to set back): refused before an approval is asked for.
         if (!overlapOf(deps.source.platform(action.platform))) throw rejected('overlap_needs_paste');
+        if (klass !== 'ordinary' && (body.destinations.length > 0 || body.rotateEveryDays !== undefined)) throw rejected('use_approvals_for_options');
+        await provenPlacement(deps.source, action, at, 'run');
         if (klass !== 'ordinary') {
-          if (body.destinations.length > 0 || body.rotateEveryDays !== undefined) throw rejected('use_approvals_for_options');
           const proposed = deps.approvals.propose({ action, requester: { kind: 'token', label: actor } });
           return { status: 202, json: { keyref, class: klass, approval_id: proposed.approval_id } };
         }
@@ -166,6 +170,25 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
       },
     },
   ];
+}
+
+/**
+ * KBOX-57, at proposal: where the key needs its master (made by a run, or on an entry with a `locationProver`), the master chosen by the key's
+ * platform, location and scope items; none is `no_master` and two `master_ambiguous`, both `rejected`. A location naming a host is then proven
+ * with that master: `unseen` is `rejected` (`location_unknown`), a prover that throws is `unavailable`. Throws before anything is proposed,
+ * opened or written.
+ */
+async function provenPlacement(source: PlatformSource, action: AddKey, at: KeyLocation, made: 'run' | 'paste'): Promise<void> {
+  const kit = source.platform(action.platform);
+  const prover = kit?.locationProver;
+  if (made === 'paste' && prover === undefined) return;
+  const master = source.master(action.platform, at, action.scope.items);
+  if (!master.ok) throw rejected(master.code);
+  if (prover === undefined || !namesHost(kit?.location, at)) return;
+  const seen = await prover.prove(at, master.value).catch(() => {
+    throw new ApiError('unavailable');
+  });
+  if (seen === 'unseen') throw rejected('location_unknown');
 }
 
 /** Stores a retired value as a retired generation: never lent, never pushed; fingerprinted only when it passes the shape check (KBOX-34). */

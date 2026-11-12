@@ -184,7 +184,8 @@ test('KBOX-51 a platform call that hangs while a run resumes holds back neither 
           }
         : undefined,
     destination: () => undefined,
-    master: () => lent(Buffer.from('hang-master'), 'master:1'),
+    master: () => ({ ok: true, value: lent(Buffer.from('hang-master'), 'master:1') }),
+    masters: () => [],
   };
   const w = await started(t, {
     domain: 'box.example',

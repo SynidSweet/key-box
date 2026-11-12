@@ -1,7 +1,7 @@
 // KBOX-23: one registry line per platform. Adding a platform is one folder `src/platforms/<id>/` plus one entry here; the entry carries
 // everything the adapter registers, so no shared wiring changes with it.
 import type { DestinationKit } from './destination.ts';
-import type { Issuer, KeyLister, Verifier } from './issuer.ts';
+import type { Issuer, KeyLister, LocationProver, Verifier } from './issuer.ts';
 import type { Clock } from './clock.ts';
 import type { AdapterHttp } from './http.ts';
 import type { DenyRule, RelayProfile } from './relay-profile.ts';
@@ -34,6 +34,13 @@ export interface PlatformEntry {
    * an upstream host. An entry that declares none takes no location.
    */
   readonly location?: LocationSchema;
+  /** Proves a host-naming location before a key is proposed (KBOX-57); the registry check requires it of an entry with such a field. */
+  readonly locationProver?: LocationProver;
+  /**
+   * The scope-item prefixes that decide a master's authority (KBOX-57; Vercel `team:`): a master serves a key only when it carries the same
+   * items with each prefix as the key. Each ends in `:` (the registry check).
+   */
+  readonly masterItems?: readonly string[];
   /** The destination adapters this platform provides; the kind of each is its `destination.kind`. A kind has at most one provider. */
   readonly destinations?: readonly DestinationKit[];
   /**

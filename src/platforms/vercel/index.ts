@@ -38,6 +38,8 @@ export function createVercelEntry(deps: VercelDeps): PlatformEntry {
     destinations: [{ destination: createVercelEnvDestination(api), redeployer: createVercelRedeployer({ api, clock: deps.clock, pause: deps.pause ?? realPause }) }],
     // KBOX-57: the project a token belongs to is the key's one stored location, required of no class (a team-wide token names none).
     location: { project: { pattern: PLAIN_ID, requiredFor: [] } },
+    // KBOX-57: a Vercel master serves only keys of its own team: the `team:` item decides its authority, not its stored location alone.
+    masterItems: ['team:'],
     hosts: [VERCEL_HOST],
     unverified: UNVERIFIED,
   };

@@ -1213,8 +1213,12 @@ test('KBOX-57 KBOX-17 a run whose push step finds no master fails there with no_
   w.orch.start({ keyref, origin: 'owner' });
   await w.orch.idle();
   w.checkpoints.hook = undefined;
-  w.clock.advance(3 * HOUR);
-  await w.orch.idle();
+  // Each retry is let to finish before the next falls due (TimedClock runs timers synchronously; a lease still held would drop one).
+  for (const ms of [MINUTE, 2 * MINUTE, 4 * MINUTE]) {
+    w.clock.advance(ms);
+    await w.orch.idle();
+  }
+  assert.equal(w.parts.audit.read(0).entries.filter((e) => e.action === 'rotation.step_failed' && e.detail['code'] === 'no_master').length, 4, 'the rollback waited for a master and retried');
   const failed = w.events('rotation.failed');
   assert.deepEqual(failed.map((e) => [e.data['step'], e.data['reason_code'], e.data['old_key_works']]), [['pushing', 'no_master', true]], 'one card, retries included');
   assert.deepEqual(heldBy(w), [oldValue, oldValue], 'nothing was pushed without a master');
