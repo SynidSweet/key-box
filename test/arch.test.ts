@@ -497,6 +497,7 @@ const REPO_CHECKS: [string, string, Check][] = [
   ['KBOX-35', 'kit independence', checkKitIndependence],
   ['KBOX-42', 'probe reports', checkProbes],
   ['KBOX-27', 'tsc --noEmit', checkTypecheck],
+  ['KBOX-23', 'adapter registry imports', checkAdapterRegistryImport],
 ];
 
 for (const [rule, name, check] of REPO_CHECKS) {
@@ -631,8 +632,4 @@ test("KBOX-23 an adapter file importing src/platforms/registry.ts, as a value, a
 test('KBOX-23 an adapter importing the ports, a sibling file or another adapter passes, and so does a shell file importing the registry', async (t) => {
   await accepts(t, adapterTree('src/platforms/google/index.ts', "import type { RegistryDeps } from '../../ports/platform.ts';\nimport { a } from './api.ts';\nexport const x = a;\nexport type D = RegistryDeps;\n"), checkAdapterRegistryImport);
   await accepts(t, withChanges({ 'src/shell/x.ts': "import { registry } from '../platforms/registry.ts';\nexport const x = registry;\n", 'src/platforms/registry.ts': 'export const registry = [];\n' }), checkAdapterRegistryImport);
-});
-
-test("KBOX-23 the repo's own tree has no adapter importing the registry", async () => {
-  assert.deepEqual(await checkAdapterRegistryImport(REPO_ROOT), []);
 });

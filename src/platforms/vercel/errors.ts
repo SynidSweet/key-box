@@ -16,8 +16,6 @@ export const VERCEL_FAILURES = [
   'bad_scope',
   /** A key whose bytes cannot be an HTTP header value: refused before any call. */
   'bad_key',
-  /** `ready` asked about a deploy this redeployer did not start (or has finished with). */
-  'unknown_deploy',
   /** A redeploy of a project with no ready production deployment to start from. */
   'no_deployment',
 ] as const;

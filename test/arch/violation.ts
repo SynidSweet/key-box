@@ -41,6 +41,8 @@ export type ViolationCode =
   | 'probe-missing'
   | 'unverified-list'
   | 'probe-item-missing'
+  // KBOX-23
+  | 'adapter-imports-registry'
   // the checks could not read the tree they were given
   | 'unreadable';
 

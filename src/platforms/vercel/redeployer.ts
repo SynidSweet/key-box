@@ -1,7 +1,7 @@
 // KBOX-36: the Vercel redeployer. A redeploy starts from the project's newest ready production deployment (`POST /v13/deployments?forceNew=1`
-// with its `deploymentId`), which takes the project's current environment variables. `ready` polls that deployment until it settles.
-// `ready(ref)` has no master parameter, so the redeployer holds the master's Lent handle (never its bytes) from `redeploy` until `ready`
-// returns: a handle re-lends from the vault each time it is used.
+// with its `deploymentId`), which takes the project's current environment variables. `ready` polls that deployment until it settles. It keeps
+// nothing between calls (KBOX-4): `ready(ref, master)` works in a fresh redeployer from the ref and the master alone, and its deadline starts
+// when `ready` is called.
 import type { DeployRef, DestinationTarget, Redeployer } from '../../ports/destination.ts';
 import type { Clock } from '../../ports/clock.ts';
 import type { Lent } from '../../ports/types.ts';
@@ -24,14 +24,8 @@ export interface RedeployerDeps {
   readonly pause: (ms: number) => Promise<void>;
 }
 
-interface Started {
-  readonly master: Lent;
-  readonly startedAt: number;
-}
-
 export function createVercelRedeployer(deps: RedeployerDeps): Redeployer {
   const { api, clock, pause } = deps;
-  const started = new Map<DeployRef, Started>();
 
   async function newestReady(t: DestinationTarget, master: Lent): Promise<{ readonly id: string; readonly name: string }> {
     // UNVERIFIED (vercel.redeploy): the list query and its `uid`/`name` fields come from the OpenAPI document, not from a live call.
@@ -57,25 +51,20 @@ export function createVercelRedeployer(deps: RedeployerDeps): Redeployer {
       requireSuccess(answer.status);
       const ref = textOf(recordOf(answer.json)?.['id']);
       if (ref === undefined) throw new VercelError('malformed');
-      started.set(ref, { master, startedAt: clock.now() });
       return ref;
     },
-    async ready(ref: DeployRef): Promise<'ready' | 'failed'> {
-      const run = started.get(ref);
-      if (run === undefined) throw new VercelError('unknown_deploy');
-      try {
-        for (;;) {
-          const answer = await api.call({ method: 'GET', path: `/v13/deployments/${segment(ref)}` }, run.master);
-          if (answer.status === 404) return 'failed';
-          requireSuccess(answer.status);
-          const state = textOf(recordOf(answer.json)?.['readyState']);
-          if (state === 'READY') return 'ready';
-          if (state === undefined || !(PENDING.has(state) || FAILED.has(state))) throw new VercelError('malformed');
-          if (FAILED.has(state) || clock.now() - run.startedAt >= REDEPLOY_DEADLINE_MS) return 'failed';
-          await pause(REDEPLOY_POLL_MS);
-        }
-      } finally {
-        started.delete(ref);
+    async ready(ref: DeployRef, master: Lent): Promise<'ready' | 'failed'> {
+      // The deadline runs from this call: a resumed run (a new process) waits as long as a first one. A deploy the platform does not know is failed.
+      const startedAt = clock.now();
+      for (;;) {
+        const answer = await api.call({ method: 'GET', path: `/v13/deployments/${segment(ref)}` }, master);
+        if (answer.status === 404) return 'failed';
+        requireSuccess(answer.status);
+        const state = textOf(recordOf(answer.json)?.['readyState']);
+        if (state === 'READY') return 'ready';
+        if (state === undefined || !(PENDING.has(state) || FAILED.has(state))) throw new VercelError('malformed');
+        if (FAILED.has(state) || clock.now() - startedAt >= REDEPLOY_DEADLINE_MS) return 'failed';
+        await pause(REDEPLOY_POLL_MS);
       }
     },
   };

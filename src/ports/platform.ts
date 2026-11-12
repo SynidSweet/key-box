@@ -2,6 +2,8 @@
 // everything the adapter registers, so no shared wiring changes with it.
 import type { DestinationKit } from './destination.ts';
 import type { Issuer, KeyLister, Verifier } from './issuer.ts';
+import type { Clock } from './clock.ts';
+import type { AdapterHttp } from './http.ts';
 import type { DenyRule, RelayProfile } from './relay-profile.ts';
 import type { KeyClass, KeyShape, PlatformId, Scope } from './types.ts';
 
@@ -36,4 +38,10 @@ export interface PlatformEntry {
   readonly hosts?: readonly string[];
   /** The probe ids (KBOX-42) that `docs/probes/<id>.md` still marks STILL UNVERIFIED. */
   readonly unverified: readonly string[];
+}
+
+/** What an adapter is handed when its entry is built: the one way to reach its platform, and time. */
+export interface RegistryDeps {
+  readonly http: AdapterHttp;
+  readonly clock: Clock;
 }

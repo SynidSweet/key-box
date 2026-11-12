@@ -1,8 +1,6 @@
 // KBOX-36: the Vercel adapter. `create<Name>Entry` is what the registry line calls. Master = a classic team-scoped token pasted once
 // (`selfRotate`); project tokens are ordinary keys the box makes, rotates and delivers. No relay profile in v1: only the deny list.
-import type { PlatformEntry } from '../../ports/platform.ts';
-import type { Clock } from '../../ports/clock.ts';
-import type { AdapterHttp } from '../../ports/http.ts';
+import type { PlatformEntry, RegistryDeps } from '../../ports/platform.ts';
 import { createVercelApi, VERCEL_HOST } from './api.ts';
 import { VERCEL_MUST_DENY } from './deny.ts';
 import { createVercelEnvDestination } from './env-destination.ts';
@@ -11,10 +9,8 @@ import { createVercelLister } from './lister.ts';
 import { createVercelRedeployer } from './redeployer.ts';
 import { createVercelVerifier } from './verifier.ts';
 
-/** What the registry hands every adapter (`RegistryDeps`, same members: importing it would make a cycle), and the optional pause. */
-export interface VercelDeps {
-  readonly http: AdapterHttp;
-  readonly clock: Clock;
+/** What the registry hands every adapter (`RegistryDeps`), and the optional pause. */
+export interface VercelDeps extends RegistryDeps {
   /** Waits `ms` between two reads of a deploy; the real timer when absent. */
   readonly pause?: (ms: number) => Promise<void>;
 }

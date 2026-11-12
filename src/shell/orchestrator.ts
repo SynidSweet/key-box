@@ -426,7 +426,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const target = { kind: kit.destination.kind, id: row.target };
       // The intent first: from here the destination may hold the new value, whether the push answers, throws or the process dies.
       const alone = store.intendPush(run.runId, row.kind, row.target);
-      const result = await pushed(() => kit.destination.push(target, head.name, value, master));
+      const result = await pushed(() => kit.destination.push(target, head.name, value, head.class, master));
       if (result.outcome !== 'applied') {
         auditStepFailed(run, 'pushing', 'push_failed');
         // Only a refusal of the one push that could have applied proves the destination holds nothing; any other answer leaves the intent (`maybe`).
@@ -465,7 +465,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         async () => {
           const ref = await redeployer.redeploy(target, master);
           await point('redeployed');
-          if ((await redeployer.ready(ref)) !== 'ready') throw new RangeError('deploy failed');
+          if ((await redeployer.ready(ref, master)) !== 'ready') throw new RangeError('deploy failed');
         },
         'redeploy_failed',
       );
@@ -617,11 +617,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       'rollback',
       async () => {
         // Only an applied push puts the old value back; a refusal or a timeout leaves the destination possibly holding the new one.
-        if ((await dk.destination.push(target, head.name, old, master)).outcome !== 'applied') throw new RangeError('re-push not applied');
+        if ((await dk.destination.push(target, head.name, old, head.class, master)).outcome !== 'applied') throw new RangeError('re-push not applied');
         // Wherever a redeploy was intended, a deploy may run the new value: the old one is deployed and ready before the new key is revoked.
         if (receipt.redeployIntended && dk.redeployer !== undefined) {
           const ref = await dk.redeployer.redeploy(target, master);
-          if ((await dk.redeployer.ready(ref)) !== 'ready') throw new RangeError('deploy failed');
+          if ((await dk.redeployer.ready(ref, master)) !== 'ready') throw new RangeError('deploy failed');
         }
       },
       'repush_refused',

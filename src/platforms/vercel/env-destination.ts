@@ -1,14 +1,16 @@
-// KBOX-36, KBOX-16: the `vercel-env` destination. A value is always written as a SENSITIVE variable (production and preview, the only targets
-// Vercel allows for it): write-only once created, so no API read can return it and `readableBy` is `runtime` for every class of key. The
-// `encrypted` type, which the API reads back, is never sent. (The spec's `encrypted` for an ordinary key needs the key's class at push time,
-// which the port does not carry; see the unit report.) One variable per name: the push is an upsert.
+// KBOX-36, KBOX-16: the `vercel-env` destination. A value is written as a SENSITIVE variable for an admin or master key (production and preview, the
+// only targets Vercel allows for it): write-only once created, so no API read can return it. An ordinary key is written as an `encrypted`
+// variable. `readableBy` is `runtime` for every class. One variable per name: the push is an upsert.
 import type { Destination, DestinationTarget, PushOutcome } from '../../ports/destination.ts';
-import type { Lent } from '../../ports/types.ts';
+import type { KeyClass, Lent } from '../../ports/types.ts';
 import { encodeJson, recordOf, segment, textOf } from './api.ts';
 import type { ApiAnswer, VercelApi } from './api.ts';
 import { VercelError, isSuccess, requireSuccess } from './errors.ts';
 
 const TARGETS = ['production', 'preview'] as const;
+
+/** The variable type of a push: `sensitive` for an admin or master key, `encrypted` for an ordinary one (KBOX-36). */
+const variableType = (klass: KeyClass): 'sensitive' | 'encrypted' => (klass === 'ordinary' ? 'encrypted' : 'sensitive');
 
 /** Statuses that say the platform applied nothing: the push was understood and refused. Anything else may have been applied. */
 const REFUSED = new Set([400, 401, 403, 404, 409, 422]);
@@ -35,9 +37,9 @@ export function createVercelEnvDestination(api: VercelApi): Destination {
   return {
     kind: 'vercel-env',
     properties: () => ({ readableBy: 'runtime', needsRedeploy: true }),
-    push: (t, name, v, master) =>
+    push: (t, name, v, klass, master) =>
       v.use(async (valueBytes) => {
-        const body = encodeJson({ key: name, value: Buffer.from(valueBytes).toString('utf8'), type: 'sensitive', target: TARGETS });
+        const body = encodeJson({ key: name, value: Buffer.from(valueBytes).toString('utf8'), type: variableType(klass), target: TARGETS });
         try {
           return outcomeOf(await api.call({ method: 'POST', path: projectPath(t), query: 'upsert=true', body }, master));
         } catch (error) {
