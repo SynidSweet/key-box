@@ -31,7 +31,8 @@ const clock = { now: () => 0 };
 const L = (text: string): Lent => lent(Buffer.from(text), 'test:1');
 /** A synthetic ordinary Anthropic key; `tag` (4 characters) is the end of the value, so it is what `partial_key_hint` tells keys apart by. */
 const ordinary = (tag: string): string => `sk-ant-api03-kbox-test-${'x'.repeat(40)}${tag}`;
-const ADMIN = `sk-ant-admin01-kbox-test-${'y'.repeat(40)}`;
+const ADMIN_PREFIX = 'sk-ant-admin01-';
+const ADMIN = `${ADMIN_PREFIX}kbox-test-${'y'.repeat(40)}`;
 const restricted = (tag: string): string => `rk_live_kbox${'T'.repeat(30)}${tag}`;
 const ANTHROPIC = { platform: 'anthropic' };
 const STRIPE = { platform: 'stripe' };
@@ -459,7 +460,7 @@ test('KBOX-40 KBOX-12 an Anthropic admin key is pasted through /p/<id>: shape, t
   const w = await routesWorld(t, { source: HOST_SOURCE([entry]) });
   api.admins.add(ADMIN.replace('kbox', 'pstd'));
   const value = ADMIN.replace('kbox', 'pstd');
-  const refusedShape = await pasteThrough(w, 'anthropic', 'ANTHROPIC_ADMIN', ['read'], 'sk-ant-admin01-short-but-sixteen-bytes');
+  const refusedShape = await pasteThrough(w, 'anthropic', 'ANTHROPIC_ADMIN', ['read'], `${ADMIN_PREFIX}short-but-sixteen-bytes`);
   assert.equal(refusedShape.status, 422);
   assert.match(refusedShape.body, /bad_shape/);
   assert.deepEqual(api.log, [], 'a bad shape makes no platform call');
