@@ -80,14 +80,19 @@ export function createAdapterHttp(deps: AdapterHttpDeps): AdapterHttp {
           else resolve({ status: res.statusCode ?? 0, headers: joinedHeaders(res), body: Buffer.concat(chunks) });
         });
       };
-      let call: ClientRequest;
-      try {
-        call = httpRequest({ method: req.method, path: `${url.pathname}${url.search}`, headers, setHost: false, createConnection: () => socket, signal }, onResponse);
-      } catch {
-        // node throws at once for a header name or value or a method it cannot put on the wire; its message can echo that text, so it is dropped.
+      const built = ((): { readonly ok: true; readonly call: ClientRequest } | { readonly ok: false } => {
+        try {
+          return { ok: true, call: httpRequest({ method: req.method, path: `${url.pathname}${url.search}`, headers, setHost: false, createConnection: () => socket, signal }, onResponse) };
+        } catch {
+          // node throws at once for a header name or value or a method it cannot put on the wire; its message can echo that text, so it is dropped.
+          return { ok: false };
+        }
+      })();
+      if (!built.ok) {
         fail('invalid_request');
         return;
       }
+      const { call } = built;
       call.on('error', (error: NodeJS.ErrnoException) => fail(answered ? 'malformed' : error.code?.startsWith('HPE_') === true ? 'malformed' : 'unreachable'));
       call.end(req.body);
     });
