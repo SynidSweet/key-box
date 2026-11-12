@@ -179,9 +179,10 @@ export function openRotation(deps: RotationDeps): Rotation {
     if (key.class !== 'ordinary' && requestWaits(slot, key, now)) return;
     // KBOX-34: an ordinary key on a paste-source platform has no issuer; the box holds no such key and never runs it as an api run.
     if (key.class === 'ordinary' && isPasteSource(key.platform)) return;
-    // KBOX-57: a stored location the entry now refuses, or no master (or two) where a run makes the key, is skipped: recorded once per key and code; nothing is rewritten.
+    // KBOX-57, KBOX-58: a stored location the entry now refuses, no master (or two) where a run makes the key, or no verifier that applies to it
+    // where a paste would, is skipped: recorded once per key and code; nothing is rewritten.
     const info = store.keyInfo(key.keyref);
-    const placed = info === undefined ? 'ok' : proposalRefusal(deps.source, key, info);
+    const placed = proposalRefusal(deps.source, key, info);
     if (placed !== 'ok') {
       refusedOnce(key.keyref, placed);
       return;

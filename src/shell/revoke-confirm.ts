@@ -1,9 +1,11 @@
-// KBOX-51 step 10: end a key at its platform (revoke, retire or the owner), then CONFIRM it is dead. A 404 is not proof. The proof is the verifier rejecting the
-// value (the vault still holds it), or, where the platform has no verifier call, a complete listing of the key's recorded location showing
-// the id absent or disabled. One home for the new key's revoke on a failed run, the old key's revoke after the grace, and the orphan found by reconcile.
+// KBOX-51 step 10: end a key at its platform (revoke, retire or the owner), then CONFIRM it is dead. A 404 is not proof. The proof is the verifier that
+// applies to the key (KBOX-58) rejecting the value (the vault still holds it), or, where no verifier applies or the vault no longer holds the value, a
+// complete listing of the key's recorded location showing the id absent or disabled; never the lister because a verifier that applies is unreachable.
+// One home for the new key's revoke on a failed run, the old key's revoke after the grace, and the orphan found by reconcile.
 import type { KeyLocation, Lent, PlatformId, PlatformKeyId } from '../ports/types.ts';
 import { confirmDead } from '../pure/rotation-machine.ts';
 import type { Evidence } from '../pure/rotation-machine.ts';
+import { verifierFor } from './rotation-ports.ts';
 import type { PlatformKit } from './rotation-ports.ts';
 
 type Settled<T> = { readonly ok: true; readonly value: T } | { readonly ok: false };
@@ -24,6 +26,8 @@ export interface RevokeTarget {
   readonly id: PlatformKeyId | null;
   /** The region and project recorded with the key: only a complete listing of exactly there can confirm it gone. */
   readonly at: KeyLocation;
+  /** The key's stored scope items: with `at`, what decides whether the platform's verifier applies to it (KBOX-58). */
+  readonly scopeItems: readonly string[];
   /** The value, when the vault holds it: the verifier tests it. */
   readonly value: Lent | undefined;
   readonly master: Lent;
@@ -58,8 +62,8 @@ export async function revokeAndConfirm(target: RevokeTarget): Promise<boolean> {
 /** The evidence after a revoke: what the platform says now, not what the revoke call answered. */
 async function confirm(target: RevokeTarget): Promise<boolean> {
   const { kit, id, value } = target;
-  if (kit.verifier !== undefined && value !== undefined) {
-    const verifier = kit.verifier;
+  const verifier = verifierFor(kit, { scopeItems: target.scopeItems, at: target.at });
+  if (verifier !== undefined && value !== undefined) {
     const verdict = await settled(() => verifier.verify(value, { platform: target.platform, at: target.at, ...(target.hint === undefined ? {} : { hint: target.hint }) }));
     const evidence: Evidence = { by: 'verifier', verdict: verdict.ok ? verdict.value : 'unreachable' };
     return confirmDead(evidence);

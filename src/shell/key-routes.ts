@@ -18,7 +18,7 @@ import type { AddKey, RotateKey } from './new-key.ts';
 import type { Orchestrator } from './orchestrator.ts';
 import type { Paste } from './paste.ts';
 import { isRecord, only } from './routes-approve.ts';
-import { overlapOf, proposalRefusal, rotatesByPaste } from './rotation-ports.ts';
+import { overlapOf, proposalRefusal, rotatesByPaste, verifierFor } from './rotation-ports.ts';
 import type { PlatformSource } from './rotation-ports.ts';
 import type { DestinationRow, RotationStore } from './rotation-store.ts';
 import type { Vault } from '../ports/vault.ts';
@@ -109,6 +109,7 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
         if (klass === 'master') return masterResult(deps, action, keyref, at, actor);
         if (config.create === 'paste') {
           if (klass === 'ordinary') throw rejected('no_issuer');
+          refuseUnverifiable(deps.source, action, at);
           await provenPlacement(deps.source, action, at, 'paste');
           const opened = deps.paste.open({ action, requester: { kind: 'token', label: actor } });
           return { status: 202, json: { keyref, class: klass, paste_task_id: opened.paste_id } };
@@ -140,8 +141,9 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
         if (store.activeRunOf(body.keyref) !== undefined) throw new ApiError('conflict', 'run_exists');
         // KBOX-57: a stored location the entry now refuses is answered with its code, before any run, approval or paste task.
         const info = store.keyInfo(body.keyref);
-        // Where a run makes the key (an approval, not a paste) the platform's master is asked first: none is `no_master`, two `master_ambiguous`.
-        const placed = info === undefined ? 'ok' : proposalRefusal(deps.source, head, info);
+        // Where a run makes the key (an approval, not a paste) the platform's master is asked first: none is `no_master`, two `master_ambiguous`; where a
+        // paste would, a verifier that applies to the key (KBOX-58, `no_verifier`), before the status changes.
+        const placed = proposalRefusal(deps.source, head, info);
         if (placed !== 'ok') throw rejected(placed);
         if (head.class === 'ordinary') return { status: 201, json: { run_id: deps.orchestrator.start({ keyref: body.keyref, origin: 'agent' }).runId } };
         const action: RotateKey = { kind: 'rotate_key', keyref: body.keyref };
@@ -183,17 +185,24 @@ const BOX_MADE_MASTER_PLATFORMS: ReadonlySet<string> = new Set();
 /**
  * KBOX-34: the answer to a master-class result of `POST /api/keys`, on an issuer platform and a paste platform alike: no issuer can make
  * another kind's master and none is asked, no approval is opened, the owner pastes it. In this order: a platform whose master the box makes
- * (`box_made_master`, KBOX-55, none yet); a platform with no verifier (`no_verifier`: only a verifier can confirm a pasted generation dead,
- * KBOX-51); then the paste task. A location that names a host is proven first, as for any paste; a master that names none needs no master
- * of its own, or the first one could never enter.
+ * (`box_made_master`, KBOX-55, none yet); a key no verifier of the platform applies to (`no_verifier`, KBOX-58); then the paste task. A location
+ * that names a host is proven first, as for any paste; a master that names none needs no master of its own, or the first one could never enter.
  */
 async function masterResult(deps: KeyRouteDeps, action: AddKey, keyref: string, at: KeyLocation, actor: string): Promise<{ readonly status: number; readonly json: unknown }> {
   if (BOX_MADE_MASTER_PLATFORMS.has(action.platform)) throw rejected('box_made_master');
-  const kit = deps.source.platform(action.platform);
-  if (kit?.verifier === undefined) throw rejected('no_verifier');
-  if (namesHost(kit.location, at)) await provenPlacement(deps.source, action, at, 'paste');
+  refuseUnverifiable(deps.source, action, at);
+  if (namesHost(deps.source.platform(action.platform)?.location, at)) await provenPlacement(deps.source, action, at, 'paste');
   const opened = deps.paste.open({ action, requester: { kind: 'token', label: actor } });
   return { status: 202, json: { keyref, class: 'master', paste_task_id: opened.paste_id } };
+}
+
+/**
+ * KBOX-34, KBOX-58, at proposal: an `add_key` that would open a paste task (any class) is refused (`rejected`, `no_verifier`) when no verifier
+ * of its platform applies to the key's scope and location: a pasted value is checked by the verifier (KBOX-12), and only the verifier can confirm
+ * a pasted generation dead (KBOX-51). Throws before anything is opened, so the owner never reaches the passkey step.
+ */
+function refuseUnverifiable(source: PlatformSource, action: AddKey, at: KeyLocation): void {
+  if (verifierFor(source.platform(action.platform), { scopeItems: action.scope.items, at }) === undefined) throw rejected('no_verifier');
 }
 
 /**

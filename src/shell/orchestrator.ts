@@ -21,7 +21,7 @@ import { intentName, nextStep, retryDelayMs } from '../pure/rotation-machine.ts'
 import type { Step } from '../pure/rotation-machine.ts';
 import { enderOf, revokeAndConfirm } from './revoke-confirm.ts';
 import type { Ender } from './revoke-confirm.ts';
-import { isPasteSource, overlapOf, setterOf, storedPlacement, tryLend } from './rotation-ports.ts';
+import { isPasteSource, kindOfStored, overlapOf, setterOf, storedPlacement, tryLend, verifierFor } from './rotation-ports.ts';
 import type { MasterResult, PlatformKit, PlatformSource, Point } from './rotation-ports.ts';
 import type { DestinationRow, KeyHead, KeyInfo, Receipt, RotationStore, RunOrigin, RunRow } from './rotation-store.ts';
 
@@ -395,8 +395,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
   // --- steps 5 and 8: the verifier on the new key ---------------------------------------------------------------------------------
 
+  /** KBOX-58: the verifier that applies to the key by its stored scope and location; none applies, the step passes. */
   async function verifyNew(run: RunRow, head: KeyHead, kit: PlatformKit, stepName: 'verifying' | 'checking', word: 'verify' | 'check'): Promise<Next> {
-    const verifier = kit.verifier;
+    const verifier = verifierFor(kit, kindOfStored(store.keyInfo(run.keyref)));
     if (verifier !== undefined) {
       const value = lendOrUndefined(run.keyref, run.genNew);
       if (value === undefined) return fail(run, stepName, `${word}_failed`);
@@ -406,6 +407,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     }
     return advance(run, stepName);
   }
+
+  /** The key's stored scope items (KBOX-58: with the location, what decides whether a verifier applies); none stored is none. */
+  const scopeItemsOf = (keyref: string): readonly string[] => store.keyInfo(keyref)?.scopeItems ?? [];
 
   /** The key's stored verify hint as a `VerifyTarget`/`RevokeTarget` member (KBOX-40), or nothing. */
   function hintOf(keyref: string): { readonly hint?: string } {
@@ -527,7 +531,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       // Step 10 without a master to end the old key with: not proven dead, so the old key stays in grace and the step retries (one notice).
       const master = masterFor(head);
       if (!master.ok) return retryRevoke(run, head, enderOf(kit, id));
-      const dead = await revokeAndConfirm({ kit, platform: head.platform, id, at: old?.location ?? {}, value: lendOrUndefined(run.keyref, run.genOld), master: master.value, ...hintOf(run.keyref) });
+      const dead = await revokeAndConfirm({ kit, platform: head.platform, id, at: old?.location ?? {}, scopeItems: scopeItemsOf(run.keyref), value: lendOrUndefined(run.keyref, run.genOld), master: master.value, ...hintOf(run.keyref) });
       if (!dead) return retryRevoke(run, head, enderOf(kit, id));
       store.setGenStatus(run.keyref, run.genOld, 'retired');
       deps.vault.retire(run.keyref, run.genOld);
@@ -693,7 +697,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     // A key the box did not make (pasted) has nothing to revoke here; one it made is revoked and confirmed before the run ends.
     if (id === null) return true;
     const created = store.gen(run.keyref, run.genNew);
-    return revokeAndConfirm({ kit, platform: head.platform, id, at: created?.location ?? fresh?.at ?? store.keyInfo(run.keyref)?.location ?? {}, value: fresh?.value ?? lendOrUndefined(run.keyref, run.genNew), master, ...hintOf(run.keyref) });
+    return revokeAndConfirm({ kit, platform: head.platform, id, at: created?.location ?? fresh?.at ?? store.keyInfo(run.keyref)?.location ?? {}, scopeItems: scopeItemsOf(run.keyref), value: fresh?.value ?? lendOrUndefined(run.keyref, run.genNew), master, ...hintOf(run.keyref) });
   }
 
   async function rollBack(run: RunRow, head: KeyHead, kit: PlatformKit, fresh?: Fresh): Promise<Next> {

@@ -1,6 +1,6 @@
 // KBOX-12: the phone paste flow. A paste task is a proposal that sits in the slot of its action (`add_key` or `rotate_key`) and is
 // settled by the owner's paste: the passkey assertion and device-key signature over SHA-256("kbox-v1-paste" || pasteId || actionDigest || nonce)
-// ARE the approval of that one action. The value is checked (16-byte floor, the adapter's strict shape, the platform verifier), stored, and never
+// ARE the approval of that one action. The value is checked (16-byte floor, the key's strict shape, the verifier that applies to the key), stored, and never
 // echoed. A task is only in the app: the box sends no link to it.
 import type { DatabaseSync } from 'node:sqlite';
 import type { Audit } from '../ports/audit.ts';
@@ -12,7 +12,7 @@ import type { Random } from '../ports/random.ts';
 import { actionDigest, pasteChallenge } from '../pure/challenge.ts';
 import { keyrefOf, matchesShape } from '../pure/class.ts';
 import { ApiError } from '../pure/errors.ts';
-import { shapeOf } from '../pure/platform-shape.ts';
+import { shapeOfKey } from '../pure/platform-shape.ts';
 import { decideSlot, parseRequester, requesterText, slotOf } from '../pure/slots.ts';
 import type { Requester } from '../pure/slots.ts';
 import { FIXED, renderPage, titleOf } from '../pure/words.ts';
@@ -27,10 +27,11 @@ import type { Route } from './http.ts';
 import { inTransaction } from './db.ts';
 import { locationOf, newKeyOf } from './new-key.ts';
 import type { RotationStore } from './rotation-store.ts';
-import type { KeyLocation } from '../ports/types.ts';
+import type { KeyKind, Verifier } from '../ports/issuer.ts';
+import type { KeyLocation, KeyShape } from '../ports/types.ts';
 import type { PasteAction } from './new-key.ts';
 import type { Orchestrator } from './orchestrator.ts';
-import { storedPlacement } from './rotation-ports.ts';
+import { kindOfStored, storedPlacement, verifierFor } from './rotation-ports.ts';
 import type { PlatformSource } from './rotation-ports.ts';
 
 export const PASTE_TTL_MS = 14 * 24 * 3600_000;
@@ -151,17 +152,20 @@ export function createPaste(deps: PasteDeps): Paste {
     if (placed !== 'ok') refuse(id, rejected(placed), placed);
   };
 
-  /** The value checks of KBOX-12, in order: the floor, the strict shape, the platform verifier. Names only. */
-  async function checkValue(platform: string, at: KeyLocation, value: string, hint: string | undefined): Promise<void> {
-    const kit = deps.source.platform(platform);
-    const shape = shapeOf(kit);
-    if (kit === undefined || shape === undefined) throw rejected('unknown_platform');
+  /** The key a task is for, as KBOX-58 judges it: the action's scope and location for a new key, the stored ones for a rotation. */
+  const kindOf = (action: PasteAction): KeyKind =>
+    action.kind === 'add_key' ? { scopeItems: action.scope.items, at: locationOf(action) } : kindOfStored(deps.store.keyInfo(action.keyref));
+  /** KBOX-58: no verifier of the platform applies to the task's key, so no paste can ever settle it: the task fails `no_verifier`. */
+  const refuseUnverifiable = (id: string, verifier: Verifier | undefined): Verifier => verifier ?? refuse(id, rejected('no_verifier'), 'no_verifier');
+
+  /** The value checks of KBOX-12, in order: the floor, the key's strict shape, the verifier that applies to the key. Names only. */
+  async function checkValue(target: { readonly platform: string; readonly at: KeyLocation; readonly hint: string | undefined }, value: string, shape: KeyShape, verifier: Verifier): Promise<void> {
+    const { platform, at, hint } = target;
     if (Buffer.byteLength(value, 'utf8') < PASTE_FLOOR_BYTES) throw rejected('too_short');
     if (!matchesShape(shape, value)) throw rejected('bad_shape');
-    if (kit.verifier === undefined) return;
     const bytes = Uint8Array.from(Buffer.from(value, 'utf8'));
     const lent = makeLent('paste:1', () => Uint8Array.from(bytes));
-    const verdict = await kit.verifier.verify(lent, { platform, at, ...(hint === undefined ? {} : { hint }) }).catch((): 'unreachable' => 'unreachable');
+    const verdict = await verifier.verify(lent, { platform, at, ...(hint === undefined ? {} : { hint }) }).catch((): 'unreachable' => 'unreachable');
     bytes.fill(0);
     if (verdict !== 'ok') throw rejected(verdict === 'rejected' ? 'verifier_rejected' : 'verifier_unreachable');
   }
@@ -225,7 +229,8 @@ export function createPaste(deps: PasteDeps): Paste {
       const page = renderPage(action, { requester, ...(reason === undefined ? {} : { reason }), ...(coverage === undefined ? {} : { coverage }) });
       const kit = deps.source.platform(action.kind === 'add_key' ? action.platform : (deps.meta.snapshot().keys.find((k) => k.keyref === action.keyref)?.platform ?? ''));
       const link = kit?.keyPageUrl;
-      const hints = kit?.verifyHints ?? [];
+      // KBOX-40, KBOX-58: a hint is a choice of the verifier's calls, so it is offered only where a verifier applies to the task's key.
+      const hints = verifierFor(kit, kindOf(action)) === undefined ? [] : (kit?.verifyHints ?? []);
       const stored = action.kind === 'rotate_key' ? deps.store.keyInfo(action.keyref)?.verifyHint : undefined;
       const nonce = deps.approvers.nonce({ kind: 'decide', approvalId: id, revision: r.revision });
       return {
@@ -278,9 +283,15 @@ export function createPaste(deps: PasteDeps): Paste {
       // KBOX-57: a stored location the entry now refuses fails the task with that code, so the value never reaches the verifier.
       if (action.kind === 'rotate_key') refuseUnplaced(id, action.keyref);
       const at = action.kind === 'add_key' ? locationOf(action) : (deps.store.keyInfo(action.keyref)?.location ?? {});
+      const kit = deps.source.platform(platform);
+      const kind = kindOf(action);
+      const shape = shapeOfKey(kit, kind);
+      if (kit === undefined || shape === undefined) throw rejected('unknown_platform');
+      // KBOX-58: before the value is checked, a verifier must apply to the key; none fails the task and stores nothing.
+      const verifier = refuseUnverifiable(id, verifierFor(kit, kind));
       // The verifier is told this paste's hint, else the one stored with the key (a rotation without a new choice).
       const stored = action.kind === 'rotate_key' ? deps.store.keyInfo(action.keyref)?.verifyHint : undefined;
-      await checkValue(platform, at, value, verifyHint ?? stored);
+      await checkValue({ platform, at, hint: verifyHint ?? stored }, value, shape, verifier);
       const bytes = Uint8Array.from(Buffer.from(value, 'utf8'));
       try {
         const keyref = await execute(action, bytes, verifyHint);

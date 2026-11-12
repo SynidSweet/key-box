@@ -18,6 +18,17 @@ export interface IssuerCapabilities {
   readonly shape: KeyShape;
   /** The class of a key with this scope at this location (KBOX-57: the shell takes the higher of this and the class at `{}`). */
   classify(scope: Scope, at: KeyLocation): KeyClass;
+  /**
+   * KBOX-58: the shape of a key of another kind than `shape` (a Supabase personal access token), by its stored scope and location; undefined:
+   * `shape`. Pure; never sees a value or a class.
+   */
+  shapeFor?(scope: Scope, at: KeyLocation): KeyShape | undefined;
+}
+
+/** KBOX-58: what a verifier's reach and a key's shape are read from: the key's stored scope items and location, never its value or class. */
+export interface KeyKind {
+  readonly scopeItems: readonly string[];
+  readonly at: KeyLocation;
 }
 
 export interface IssueRequest {
@@ -84,6 +95,11 @@ export interface VerifyTarget {
 
 export interface Verifier {
   verify(key: Lent, target: VerifyTarget): Promise<'ok' | 'rejected' | 'unreachable'>;
+  /**
+   * KBOX-58: whether this call can test a key with this stored scope and location. Absent: every key of the platform. Pure; never sees a value or
+   * a class. Read only through `verifierFor` (src/shell/rotation-ports.ts).
+   */
+  appliesTo?(scope: Scope, at: KeyLocation): boolean;
 }
 
 export interface PasteRequest {

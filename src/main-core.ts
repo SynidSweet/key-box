@@ -11,7 +11,7 @@ import { DOMAIN_NAME } from './pure/actions.ts';
 import type { Action, ActionKind } from './pure/actions.ts';
 import { parseWordlist } from './pure/codes.ts';
 import { RegistryRefused, assertRegistry } from './pure/profile.ts';
-import { shapeOfPlatform } from './pure/platform-shape.ts';
+import { shapeOfRegistryKey } from './pure/platform-shape.ts';
 import { vetAction } from './pure/proposal-vet.ts';
 import { osErrorCode } from './pure/errors.ts';
 import { decodeJsonBody } from './pure/schemas.ts';
@@ -40,6 +40,7 @@ import type { Executor } from './shell/approvals.ts';
 import { createPlatformSource } from './shell/platform-source.ts';
 import { openRotation } from './shell/rotation.ts';
 import { readKeyInfo } from './shell/rotation-store.ts';
+import { kindOfStored } from './shell/rotation-ports.ts';
 import type { Rotation } from './shell/rotation.ts';
 import type { PlatformSource } from './shell/rotation-ports.ts';
 
@@ -192,7 +193,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
     dir: join(config.stateDir, 'share'),
     meta: parts.meta,
     signingKey: parts.share.signingKey,
-    source: createMetaShareSource({ meta: parts.meta, values: parts.share.values, shapeOf: (platform) => shapeOfPlatform(registry, platform), ...(rotationStore === undefined ? {} : { generations: (keyref: string) => rotationStore.gens(keyref) }) }),
+    source: createMetaShareSource({ meta: parts.meta, values: parts.share.values, shapeOf: (platform, keyref) => shapeOfRegistryKey(registry, platform, kindOfStored(readKeyInfo(parts.db, keyref))), ...(rotationStore === undefined ? {} : { generations: (keyref: string) => rotationStore.gens(keyref) }) }),
     events: parts.events,
     hub: parts.hub,
     clock,

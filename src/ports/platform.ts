@@ -15,6 +15,7 @@ export interface PlatformEntry {
   readonly relay?: RelayProfile;
   /** A platform in `relayDenyOnly` (Vercel, ElevenLabs in v1) exports its mustDeny list here and has no relay profile. */
   readonly denyOnly?: readonly DenyRule[];
+  /** Read only through `verifierFor` (KBOX-58: whether it applies to a key), never directly. */
   readonly verifier?: Verifier;
   /** The platform's own page for making a key, shown on the paste page (KBOX-12, KBOX-40's `pasteGuide`). */
   readonly keyPageUrl?: string;

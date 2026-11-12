@@ -1,7 +1,7 @@
 // What the rotation shell is given: the adapters of a platform and of a destination kind, the master key and the one seam where a
 // test stops the process. Adapters register these when they are built (the adapter units).
 import type { DestinationKit } from '../ports/destination.ts';
-import type { Issuer, KeyLister, LocationProver, Retirer, Verifier } from '../ports/issuer.ts';
+import type { Issuer, KeyKind, KeyLister, LocationProver, Retirer, Verifier } from '../ports/issuer.ts';
 import type { KeyClass, KeyLocation, KeyShape, Lent, LocationSchema, PlatformId, Scope } from '../ports/types.ts';
 import type { Vault } from '../ports/vault.ts';
 import type { Step } from '../pure/rotation-machine.ts';
@@ -10,11 +10,12 @@ import type { LocationRefusal } from '../pure/location.ts';
 
 /**
  * A platform's adapters. A paste platform has no issuer: its keys are made on the phone (KBOX-12) and retired by the owner, so
- * the box can only watch the verifier for the old value to stop working. A platform with no verifier call is confirmed by its lister.
+ * the box can only watch the verifier for the old value to stop working. A key no verifier applies to is confirmed by its lister (KBOX-58).
  */
 export interface PlatformKit {
   readonly issuer?: Issuer;
   readonly lister?: KeyLister;
+  /** Read only through `verifierFor` (KBOX-58: whether it applies to a key), never directly. */
   readonly verifier?: Verifier;
   /** The platform's own page for making a key, shown on a paste page (never taken from mission control). */
   readonly keyPageUrl?: string;
@@ -60,23 +61,56 @@ export function rotatesByPaste(source: Pick<PlatformSource, 'platform'>, head: {
   return kit !== undefined && head.class === 'master' && kit.issuer?.capabilities().selfRotate !== true;
 }
 
-/** Why a rotation cannot be proposed, opened or started now: a placement refusal (KBOX-57) or, where a run makes the key, no master or two. */
-export type RotationRefusal = LocationRefusal | Extract<MasterResult, { ok: false }>['code'];
+/** A verifier whose reach could not be judged (its `appliesTo` threw): it counts as applying and answers `unreachable` without a call. */
+const UNJUDGED: Verifier = { verify: () => Promise.resolve('unreachable') };
 
 /**
- * KBOX-57: what a proposal of a rotation of a stored key must clear before anything is proposed or opened: the stored location against the
- * entry as it is now, then, for an admin or master key a run makes (an approval, not a paste), the platform's master chosen by the key's
- * stored location and scope items. `ok` when it may go on. One function for `POST /api/rotations` and the schedule.
+ * KBOX-58: the platform's verifier when it applies to a key with this stored scope and location, else undefined ("no verifier" means none
+ * applies to this key). The one place a kit's verifier is read: every caller asks this (an arch check refuses any other read). A verifier
+ * without `appliesTo` applies to every key. A predicate that throws never counts as "none": the verifier counts as applying and answers
+ * `unreachable`, so step 10 stays in grace and a paste is refused, and a verifier never confirms dead a key it could not be asked about.
+ */
+export function verifierFor(kit: Pick<PlatformKit, 'verifier'> | undefined, key: KeyKind): Verifier | undefined {
+  const verifier = kit?.verifier;
+  if (verifier?.appliesTo === undefined) return verifier;
+  try {
+    return verifier.appliesTo({ items: key.scopeItems }, key.at) ? verifier : undefined;
+  } catch {
+    return UNJUDGED;
+  }
+}
+
+/** A key with no stored record (`keyInfo` missing): no scope items and no location (KBOX-58). */
+export const NO_KIND: KeyKind = { scopeItems: [], at: {} };
+
+/** KBOX-58: a stored key's kind, from its stored record (`keyInfo`); none is `NO_KIND`. */
+export const kindOfStored = (info: { readonly scopeItems: readonly string[]; readonly location: KeyLocation } | undefined): KeyKind =>
+  info === undefined ? NO_KIND : { scopeItems: info.scopeItems, at: info.location };
+
+/**
+ * Why a rotation cannot be proposed, opened or started now: a placement refusal (KBOX-57), where a run makes the key no master or two, and
+ * where a paste would, no verifier that applies to the key (KBOX-58).
+ */
+export type RotationRefusal = LocationRefusal | Extract<MasterResult, { ok: false }>['code'] | 'no_verifier';
+
+/**
+ * KBOX-57, KBOX-58: what a proposal of a rotation of a stored key must clear before anything is proposed or opened: the stored location against
+ * the entry as it is now; then, for an admin or master key rotated by paste, a verifier that applies to the key (no paste could settle
+ * otherwise); for one a run makes (an approval, not a paste), the platform's master chosen by the key's stored location and scope items. `ok`
+ * when it may go on. One function for `POST /api/rotations` and the schedule. A key without a stored record is judged on no scope and no place
+ * for its verifier, and asks no placement and no master.
  */
 export function proposalRefusal(
   source: Pick<PlatformSource, 'platform' | 'master'>,
   head: { readonly platform: PlatformId; readonly class: KeyClass },
-  info: { readonly location: KeyLocation; readonly scopeItems: readonly string[] },
+  info: { readonly location: KeyLocation; readonly scopeItems: readonly string[] } | undefined,
 ): 'ok' | RotationRefusal {
-  const placed = storedPlacement(source, head, info);
+  const placed = info === undefined ? 'ok' : storedPlacement(source, head, info);
   if (placed !== 'ok') return placed;
+  if (head.class === 'ordinary') return 'ok';
+  if (rotatesByPaste(source, head)) return verifierFor(source.platform(head.platform), kindOfStored(info)) === undefined ? 'no_verifier' : 'ok';
   // Only an issuer makes a key by run: a platform with none registered has no master to ask for.
-  if (head.class === 'ordinary' || rotatesByPaste(source, head) || source.platform(head.platform)?.issuer === undefined) return 'ok';
+  if (info === undefined || source.platform(head.platform)?.issuer === undefined) return 'ok';
   const master = source.master(head.platform, info.location, info.scopeItems);
   return master.ok ? 'ok' : master.code;
 }
