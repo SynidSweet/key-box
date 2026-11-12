@@ -51,8 +51,11 @@ function payloadOf(message: PushMessage): Uint8Array {
 function newKeyPair(random: Random): P256KeyPair {
   const ecdh = createECDH('prime256v1');
   // A uniformly random 32 bytes is a valid scalar except with probability about 2^-128; setPrivateKey refuses the rest.
-  ecdh.setPrivateKey(Buffer.from(random.bytes(32)));
-  return { privateKey: Uint8Array.from(ecdh.getPrivateKey()), publicKey: Uint8Array.from(ecdh.getPublicKey()) };
+  // The drawn 32 bytes ARE the private key: getPrivateKey() drops leading zero bytes, and a 31-byte scalar is refused as a JWK `d`
+  // when the VAPID JWT is signed, so about one box in 256 could never send a notification again (gate, 2026-11-12).
+  const privateKey = Uint8Array.from(random.bytes(32));
+  ecdh.setPrivateKey(Buffer.from(privateKey));
+  return { privateKey, publicKey: Uint8Array.from(ecdh.getPublicKey()) };
 }
 
 export function createPush(deps: PushDeps): Push & PushSubscriptions {

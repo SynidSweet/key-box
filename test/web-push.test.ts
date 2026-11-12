@@ -353,6 +353,29 @@ test('KBOX-22 the VAPID key pair is made once, kept only in the private store an
   assert.deepEqual(w.store.getVapidKeyPair(), pair);
 });
 
+test('KBOX-22 a VAPID private key whose first byte is zero is kept whole (32 bytes) and still signs', async (t) => {
+  const w = await world(t);
+  subscribeAll(w, [HOSTS_SUB]);
+  let first = true;
+  const leadingZero = {
+    bytes: (n: number): Uint8Array => {
+      const drawn = w.rng.bytes(n);
+      if (first && n === 32) {
+        first = false;
+        drawn[0] = 0;
+      }
+      return drawn;
+    },
+  };
+  const push = createPush({ store: w.store, transport: w.transport, scheduler: w.clock, clock: w.clock, random: leadingZero, audit: w.audit, subject: 'mailto:box@example.test' });
+  push.send({ title: 'x', kind: 'enrol' });
+  const pair = w.store.getVapidKeyPair();
+  assert.ok(pair !== undefined);
+  assert.equal(b64u(pair.privateKey).length, 32, 'the leading zero byte is stored');
+  assert.equal(b64u(pair.privateKey)[0], 0);
+  assert.equal(w.transport.sent.length, 1, 'the notification was signed and sent');
+});
+
 test('KBOX-22 a payload never contains more than title, kind and count, whatever the caller handed in', async (t) => {
   const w = await world(t);
   const [b] = subscribeAll(w, [HOSTS_SUB]);
