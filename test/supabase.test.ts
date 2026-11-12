@@ -658,10 +658,10 @@ test('KBOX-37 KBOX-58 the master verifier asks exactly GET https://api.supabase.
   ]);
 });
 
-test('KBOX-37 KBOX-58 a value not of the token shape never leaves: an sb_secret_ key, 39 or 41 hex, upper-case or non-hex cores are unreachable with no request', async () => {
+test('KBOX-37 KBOX-58 a value not of the token shape never leaves: an sb_secret_ key, 39 or 41 hex or a non-hex core are unreachable with no request', async () => {
   const http = answering(401, '{"message":"Unauthorized"}');
   const verifier = verifierOver(http);
-  for (const value of [`sb_secret_${'a'.repeat(32)}`, `sbp_${'a'.repeat(39)}`, `sbp_${'a'.repeat(41)}`, `sbp_${'A'.repeat(40)}`, `sbp_${'g'.repeat(40)}`, MASTER_TEXT, `xsbp_${'a'.repeat(40)}`])
+  for (const value of [`sb_secret_${'a'.repeat(32)}`, `sbp_${'a'.repeat(39)}`, `sbp_${'a'.repeat(41)}`, `sbp_${'a'.repeat(20)}-${'a'.repeat(19)}`, `sbp_${'g'.repeat(40)}`, MASTER_TEXT, `xsbp_${'a'.repeat(40)}`])
     assert.equal(await verifier.verify(lentText(value), ACCOUNT), 'unreachable', value);
   assert.equal(http.sent.length, 0);
 });

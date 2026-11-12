@@ -21,13 +21,18 @@ function itemsOf(scope: Scope): readonly string[] {
 const typeOfItems = (items: readonly string[]): KeyType => (items.includes('publishable') && !items.includes('secret') ? 'publishable' : 'secret');
 
 /**
+ * KBOX-37, KBOX-58: whether a key is the personal access token: its scope items include `access-token`, whatever else they say. One home for the
+ * class (`classify`), the master verifier's reach (`appliesTo`) and the token's shape (`shapeFor`).
+ */
+export const isAccessToken = (scope: Scope): boolean => itemsOf(scope).includes(ACCESS_TOKEN_ITEM);
+
+/**
  * KBOX-37: `access-token` is master whatever else is asked; otherwise `secret` is admin and the default, and a publishable key is ordinary only
  * when it says so and does not also say `secret` (a class is never lowered by a doubt, KBOX-16). The location does not take part.
  */
 export function classify(scope: Scope, _at: KeyLocation): KeyClass {
-  const items = itemsOf(scope);
-  if (items.includes(ACCESS_TOKEN_ITEM)) return 'master';
-  return typeOfItems(items) === 'secret' ? 'admin' : 'ordinary';
+  if (isAccessToken(scope)) return 'master';
+  return typeOfItems(itemsOf(scope)) === 'secret' ? 'admin' : 'ordinary';
 }
 
 /**

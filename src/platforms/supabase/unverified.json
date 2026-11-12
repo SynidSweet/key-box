@@ -18,5 +18,7 @@
   "supabase.relay-deny-rest-root",
   "supabase.relay-deny-profile-headers",
   "supabase.sb-secret-length",
-  "supabase.project-get-shape"
+  "supabase.project-get-shape",
+  "supabase.pat-verify",
+  "supabase.pat-shape"
 ]

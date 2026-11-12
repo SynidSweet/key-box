@@ -15,7 +15,13 @@ export const PASSWORD = /^[A-Za-z0-9_-]{43}$/;
  */
 export const SECRET_SHAPE: KeyShape = { prefix: 'sb_secret_', alphabet: 'base64url', coreLength: { min: 20, max: 64 }, random: true };
 
-export const keyIdOf = (ref: string, id: string): PlatformKeyId => `${ref}:${id}`;
+/**
+ * KBOX-58: a personal access token (the master). UNVERIFIED (supabase.pat-shape): `sbp_` and 40 lower-case hex characters, taken from the Supabase
+ * CLI's token format and never observed. A wrong guess refuses the owner's paste with `bad_shape`: visible and fail-closed.
+ */
+export const PAT_SHAPE: KeyShape = { prefix: 'sbp_', alphabet: 'hex', coreLength: { min: 40, max: 40 }, random: true };
+
+export const keyIdOf =(ref: string, id: string): PlatformKeyId => `${ref}:${id}`;
 
 export function splitKeyId(platformKeyId: PlatformKeyId): { readonly ref: string; readonly id: string } | undefined {
   const [ref, id, ...more] = platformKeyId.split(':');

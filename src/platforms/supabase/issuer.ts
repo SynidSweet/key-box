@@ -7,8 +7,8 @@ import { makeLent } from '../../pure/lent.ts';
 import { failureOf, SupabaseError } from './errors.ts';
 import { isRecord } from './management.ts';
 import type { Management } from './management.ts';
-import { classify, issueTypeOf, projectAt } from './scope.ts';
-import { keyIdOf, SECRET_SHAPE, splitKeyId } from './shape.ts';
+import { classify, isAccessToken, issueTypeOf, projectAt } from './scope.ts';
+import { keyIdOf, PAT_SHAPE, SECRET_SHAPE, splitKeyId } from './shape.ts';
 
 export const PLATFORM = 'supabase';
 
@@ -24,6 +24,8 @@ const CAPABILITIES: IssuerCapabilities = {
   revealOnce: true,
   scopeSchema: { fields: ['items'] },
   shape: SECRET_SHAPE,
+  // KBOX-58: the master (a personal access token) has its own shape; every project key has `SECRET_SHAPE`.
+  shapeFor: (scope) => (isAccessToken(scope) ? PAT_SHAPE : undefined),
   classify,
 };
 
