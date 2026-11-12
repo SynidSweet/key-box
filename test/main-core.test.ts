@@ -19,6 +19,7 @@ import { openCore } from '../src/shell/core.ts';
 import type { PlatformSource } from '../src/shell/rotation-ports.ts';
 import { createRotationStore } from '../src/shell/rotation-store.ts';
 import { createLendClient } from '../src/shell/lend-socket.ts';
+import { REGISTRY } from '../src/platforms/registry.ts';
 import { FakePlatformWorld } from './fakes/platform.ts';
 import { PROJECT_REGISTRY } from './fixtures/profiles.ts';
 import { issuerWith } from './fakes/platform-entry.ts';
@@ -90,7 +91,7 @@ async function started(t: TestContext, options: Options = {}): Promise<World> {
 
 const adminRow = (keyref: string): KeyRow => ({
   keyref,
-  platform: 'google',
+  platform: 'nosuch',
   name: 'GOOGLE_ADMIN_KEY',
   projects: ['shop'],
   class: 'admin',
@@ -128,7 +129,7 @@ test('KBOX-51 a rotation started on a fresh box does not stop core: no platform 
 });
 
 test('KBOX-52 the scheduler tick runs at start: an admin key that is due opens one rotate_key approval, and an adapter-less platform does not crash the tick', async (t) => {
-  const keyref = 'google/shop/GOOGLE_ADMIN_KEY';
+  const keyref = 'nosuch/shop/GOOGLE_ADMIN_KEY';
   const w = await started(t, {
     domain: 'box.example',
     seed: ({ meta, clock, rotation }) => {
@@ -413,4 +414,8 @@ test('KBOX-58 KBOX-33 core scores each key of the share file under its own shape
   assert.equal(reply.status, 200, reply.body);
   const body = JSON.parse(Buffer.from((JSON.parse(reply.body) as { body_b64: string }).body_b64, 'base64').toString('utf8')) as { coverage: { name: string; tier: string }[] };
   assert.deepEqual(body.coverage.map((c) => [c.name, c.tier]).sort(), [['ACCT_TOKEN', 'windowed'], ['ADMIN_KEY', 'windowed']]);
+});
+
+test('KBOX-23 the platform the adapter-less fixtures above use (nosuch) has no registry entry, so they keep meaning "no adapter"', () => {
+  assert.deepEqual(REGISTRY.filter((e) => e.id === 'nosuch'), []);
 });

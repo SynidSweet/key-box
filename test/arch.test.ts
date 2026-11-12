@@ -25,6 +25,7 @@ import {
 } from './arch/index.ts';
 import type { Violation, ViolationCode } from './arch/index.ts';
 import { checkAdapterRegistryImport } from './arch/adapter-registry.ts';
+import { checkKeyInfoReads } from './arch/key-info-reads.ts';
 import { checkVerifierReads } from './arch/verifier-reads.ts';
 import { GOOD_PACKAGE, GOOD_TSCONFIG, REPO_ROOT, goodTree, materialise, withChanges, withPackage, withTsconfig } from './arch/fixture.ts';
 import type { Tree } from './arch/fixture.ts';
@@ -502,6 +503,7 @@ const REPO_CHECKS: [string, string, Check][] = [
   ['KBOX-27', 'tsc --noEmit', checkTypecheck],
   ['KBOX-23', 'adapter registry imports', checkAdapterRegistryImport],
   ['KBOX-58', 'verifier reads', checkVerifierReads],
+  ['KBOX-41', 'key info reads', checkKeyInfoReads],
 ];
 
 for (const [rule, name, check] of REPO_CHECKS) {
@@ -701,5 +703,37 @@ test('KBOX-58 a read through verifierFor, a verifier member of another type, and
     t,
     withKitRead(`${KIT_IMPORTS}import { verifierFor } from './rotation-ports.ts';\nexport const f = (kit: PlatformKit) => verifierFor(kit, ['a']);\nexport const g = (o: { verifier: number }) => o.verifier + o['verifier'];\nexport const h = (e: PlatformEntry) => e.id;\nexport type K = PlatformKit;\n`),
     checkVerifierReads,
+  );
+});
+
+// ---------------------------------------------------------------- KBOX-41 (only the Google minter reads a key's stored record)
+
+/** RegistryDeps as the ports declare it, and the minter reading its `keyInfo`; a planted file reads it beside them. */
+const DEPS_TYPES: Record<string, string> = {
+  'src/ports/platform.ts': 'export interface StoredKey {\n  readonly scopeItems: readonly string[];\n}\nexport interface RegistryDeps {\n  readonly clock: number;\n  readonly keyInfo?: (keyref: string) => StoredKey | undefined;\n}\n',
+  'src/platforms/google/minter.ts': "import type { RegistryDeps } from '../../ports/platform.ts';\nexport const items = (deps: RegistryDeps, keyref: string) => deps.keyInfo?.(keyref)?.scopeItems;\n",
+};
+const withDepsRead = (file: string, code: string): Tree => withChanges({ ...DEPS_TYPES, [file]: code });
+const DEPS_IMPORT = (from: string): string => `import type { RegistryDeps } from '${from}';\n`;
+
+for (const [name, file, code] of [
+  ['a property access in another google file', 'src/platforms/google/grant-check.ts', `${DEPS_IMPORT('../../ports/platform.ts')}export const f = (deps: RegistryDeps) => deps.keyInfo;\n`],
+  ['a destructuring in the google entry', 'src/platforms/google/index.ts', `${DEPS_IMPORT('../../ports/platform.ts')}export const f = ({ keyInfo }: RegistryDeps) => keyInfo;\n`],
+  ['an element access in another adapter', 'src/platforms/other/index.ts', `${DEPS_IMPORT('../../ports/platform.ts')}export const f = (deps: RegistryDeps) => deps['keyInfo'];\n`],
+  ['an optional call on a Pick in the shell', 'src/shell/x.ts', `${DEPS_IMPORT('../ports/platform.ts')}export const f = (deps: Pick<RegistryDeps, 'keyInfo'>) => deps.keyInfo?.('k');\n`],
+] as const) {
+  test(`KBOX-41 a read of RegistryDeps' keyInfo outside src/platforms/google/minter.ts is refused: ${name}`, async (t) => {
+    await refuses(t, withDepsRead(file, code), checkKeyInfoReads, 'keyinfo-read');
+  });
+}
+
+test('KBOX-41 the minter\'s own read, a keyInfo member of another type, and passing the deps on whole pass the key-info check', async (t) => {
+  await accepts(
+    t,
+    withDepsRead(
+      'src/platforms/google/index.ts',
+      `${DEPS_IMPORT('../../ports/platform.ts')}import { items } from './minter.ts';\nexport const f = (deps: RegistryDeps) => items(deps, 'k');\nexport const g = (o: { keyInfo: (k: string) => number }) => o.keyInfo('k') + o['keyInfo']('k');\nexport const h = (deps: RegistryDeps) => ({ ...deps, clock: deps.clock });\n`,
+    ),
+    checkKeyInfoReads,
   );
 });
