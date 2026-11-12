@@ -535,7 +535,8 @@ test('KBOX-34 a master result on an issuer platform, and on a paste platform, op
   assert.equal((await w.queue()).length, 0, 'no approval');
 });
 
-test('KBOX-34 a master result on an entry with no verifier is rejected no_verifier: nothing opened, issued or written; an admin result on it is not', async (t) => {
+// As of the KBOX-58 L3 ruling an admin paste task on an entry with no verifier is refused at proposal too (no paste of it could ever settle).
+test('KBOX-34 a master result on an entry with no verifier is rejected no_verifier: nothing opened, issued or written; an admin result on it is rejected too', async (t) => {
   const w = await routesWorld(t, { source: withoutVerifier });
   const before = allRows(w);
   for (const json of [body({ scope: { items: MASTER } }), body(pasteMaster)]) {
@@ -546,7 +547,9 @@ test('KBOX-34 a master result on an entry with no verifier is rejected no_verifi
   assert.equal(opened(w), 0);
   assert.deepEqual(w.issuedAt, []);
   const admin = await w.api('/api/keys', { json: body({ platform: PASTE_PLATFORM, name: 'ANTHROPIC_KEY', scope: { items: ['admin'] } }) });
-  assert.equal(admin.status, 202, 'only a master needs the verifier');
+  // As of the KBOX-58 L3 ruling (was: 202, "only a master needs the verifier"):
+  assert.deepEqual([admin.status, errorOf(admin).code, errorOf(admin).detail?.code], [422, 'rejected', 'no_verifier'], admin.body);
+  assert.equal(opened(w), 0);
 });
 
 test('KBOX-34 a master result is a paste task even where the proposal-time master is missing: no master is needed to enter the first one', async (t) => {
