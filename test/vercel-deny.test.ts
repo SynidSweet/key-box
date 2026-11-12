@@ -124,11 +124,11 @@ function widened(profile: RelayProfile): RelayProfile {
 }
 
 /** Sends every sample through a relay running `profile`; returns each that got anything but 400 or 403, or reached upstream. */
-async function leaks(t: TestContext, profile: RelayProfile): Promise<string[]> {
+async function leaks(t: TestContext, profile: RelayProfile, rules: readonly DenyRule[] = profile.mustDeny): Promise<string[]> {
   const registry = TEST_REGISTRY.map((e) => (e.id === 'pathplat' ? { ...e, relay: profile } : e));
   const w = await relayWorld(t, { registry });
   const through: string[] = [];
-  for (const rule of profile.mustDeny) {
+  for (const rule of rules) {
     for (const sample of rule.samples) {
       const before = w.upstream.requests.length;
       const rest = sample.url.slice('https://'.length);
@@ -146,7 +146,9 @@ test('KBOX-36 KBOX-13 every sample of the list, variants included, is 400 or 403
 });
 
 test('KBOX-36 positive control: a profile that allows one of the listed routes is reported by the harness', async (t) => {
-  const leaky = relayProfileWith(denyOnly, [{ id: 'env-read', method: 'GET', host: HOST, pathTemplate: '/v10/projects/{p:[A-Za-z0-9_.-]{1,128}}/env', query: {} }]);
-  const through = await leaks(t, leaky);
+  // The relay refuses to start on a profile whose allow set matches its own mustDeny, so the leaky profile forgets that rule and the harness
+  // is handed the full list.
+  const leaky = relayProfileWith(denyOnly.filter((r) => r.id !== 'project-env'), [{ id: 'env-read', method: 'GET', host: HOST, pathTemplate: '/v10/projects/{p:[A-Za-z0-9_.-]{1,128}}/env', query: {} }]);
+  const through = await leaks(t, leaky, denyOnly);
   assert.ok(through.some((s) => s.includes('GET https://api.vercel.com/v10/projects/p/env ->') && s.endsWith('-> 200')), through.join('\n'));
 });
