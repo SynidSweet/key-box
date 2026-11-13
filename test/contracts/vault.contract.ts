@@ -46,4 +46,14 @@ export function vaultContract(name: string, make: () => Vault): void {
     bytes.fill(0);
     assert.equal(Buffer.from(await bytesOf(vault.lend('k', 1))).toString(), 'original');
   });
+
+  test(`KBOX-35 KBOX-62 vault contract (${name}): generations lists every generation put and not retired, ascending, of that ref only`, () => {
+    const vault = make();
+    assert.deepEqual(vault.generations('p/s/K'), []);
+    for (const gen of [10, 2, 1]) vault.put('p/s/K', gen, Buffer.from('v'));
+    vault.put('p/s/K2', 3, Buffer.from('v'));
+    vault.put('p/s/K/sub', 4, Buffer.from('v'));
+    vault.retire('p/s/K', 2);
+    assert.deepEqual(vault.generations('p/s/K'), [1, 10]);
+  });
 }

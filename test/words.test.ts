@@ -5,7 +5,8 @@ import { test } from 'node:test';
 import { ACTION_KINDS, parseAction } from '../src/pure/actions.ts';
 import type { Action } from '../src/pure/actions.ts';
 import { actionDigest } from '../src/pure/challenge.ts';
-import { renderPage } from '../src/pure/words.ts';
+import { deletePush, renderPage } from '../src/pure/words.ts';
+import type { DeletionFacts } from '../src/pure/words.ts';
 
 const H = (c: string): string => c.repeat(64);
 const NO_COVERAGE = 'This key has no watch coverage: a stray copy of it on your computer would not be noticed.';
@@ -149,4 +150,26 @@ test('KBOX-61 an empty set_allow_rules page says the relay passes every request 
   assert.deepEqual(empty.lines.slice(0, -1), ['Let the relay pass every request the google profile allows with the key google/shop/GOOGLE_KEY.']);
   const some = renderPage(action({ kind: 'set_allow_rules', keyref: 'google/shop/GOOGLE_KEY', rules: [{ op: 'gcs-list', params: {} }] }), BOX);
   assert.deepEqual(some.lines.slice(0, -1), ['Let the relay pass only these requests with the key google/shop/GOOGLE_KEY:', 'gcs-list']);
+});
+
+const DELETE = { kind: 'delete_key', keyref: 'openai/shop/OPENAI_KEY' } as const;
+const deletePage = (deletion: DeletionFacts): readonly string[] => renderPage(action(DELETE), { requester: { kind: 'token', label: 'ctl-1' }, deletion }).lines;
+
+test('KBOX-8 KBOX-62 the delete page says who ends the key, which apps and machines lose it, and that a key change is ended too, each only when it applies', () => {
+  const base = 'Delete the key openai/shop/OPENAI_KEY at its platform.';
+  assert.deepEqual(deletePage({ platform: 'openai', ends: 'box', targets: [], grants: false, midChange: false }), [base, 'The box ends it on openai, waits until it stops working, then erases its copy.', BY_TOKEN]);
+  assert.deepEqual(deletePage({ platform: 'openai', ends: 'owner', targets: ['prj_1', 'your computer'], grants: true, midChange: true }), [
+    base,
+    'The box cannot end it on openai itself. You end it there; the box erases its copy once it stops working.',
+    'Apps that read it from prj_1, your computer stop working.',
+    'Machines granted it lose relay use at once.',
+    'It is in the middle of a key change; the new key and the old one are both ended.',
+    BY_TOKEN,
+  ]);
+  assert.deepEqual(deletePage({ platform: 'openai', ends: 'none', targets: [], grants: false, midChange: false }), [base, 'It no longer works anywhere; the box only erases its copy.', BY_TOKEN]);
+});
+
+test('KBOX-62 KBOX-22 the deletion pushes name the key and its platform and nothing else', () => {
+  assert.deepEqual(deletePush('end', 'OPENAI_KEY', 'openai'), { kind: 'delete_waiting', title: 'End the key OPENAI_KEY on openai; the box erases its copy once it stops working.' });
+  assert.deepEqual(deletePush('unconfirmed', 'OPENAI_KEY', 'openai'), { kind: 'delete_waiting', title: 'The box could not end the key OPENAI_KEY on openai yet. End it there if you can; the box keeps checking.' });
 });

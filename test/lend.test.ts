@@ -444,3 +444,16 @@ test('KBOX-3 parseGrantsAnswer accepts a grant whose keyref holds "/" and refuse
   assert.equal(parseGrantsAnswer(answer(REAL_KEYREF)).ok, true);
   assert.equal(parseGrantsAnswer(answer('a~b')).ok, false);
 });
+
+test('KBOX-3 KBOX-62 a key with an open deletion is refused with no value sent, even with a grant row written behind the deletion; once the deletion is closed abandoned it is lent again', async (t) => {
+  const { w, pass } = await granted(t);
+  const ledger = (outcome: string | null): void => {
+    w.core.db.prepare('DELETE FROM key_deletions').run();
+    w.core.db.prepare("INSERT INTO key_deletions (approval_id, keyref, platform, run_id, opened_at, outcome) VALUES ('apr_x', 'adminkey1', 'openai', 'run_x', 1, ?)").run(outcome);
+  };
+  ledger(null);
+  w.core.meta.putGrant('adminkey1', 'laptop');
+  assert.deepEqual(await lendOf(w, pass, 'adminkey1'), { ok: false, code: 'forbidden' });
+  ledger('abandoned');
+  assert.equal((await lendOf(w, pass, 'adminkey1')).ok, true, 'control: a closed deletion lends again');
+});

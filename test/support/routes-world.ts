@@ -155,6 +155,7 @@ export async function routesWorld(t: TestContext, options: RoutesWorldOptions = 
   const rotation = openRotation({
     parts: w.parts,
     approvals: options.approvals?.(w.core.approvals) ?? w.core.approvals,
+    approvalRecords: w.core.approvals,
     approvers: w.core.approvers,
     push: w.push,
     clock: w.clock,

@@ -232,3 +232,37 @@ test('KBOX-56 setVerifyHint on a key without a rotation record is refused as not
   const store = createRotationStore(parts.db, clock, parts.hub);
   assert.throws(() => store.setVerifyHint('nobody', 'list_projects'), (error) => error instanceof ApiError && error.code === 'not_found');
 });
+
+test('KBOX-56 KBOX-62 a meta.db at version 2 reaches version 3 with every row kept and an empty key_deletions; a new file has the table too', async (t) => {
+  const dir = await tempDir(t);
+  const path = join(dir, 'meta.db');
+  const old = writeV0(path, `${META_FIXTURE()} ${META_ROWS}`);
+  old.exec('ALTER TABLE rotation_keys ADD COLUMN verify_hint TEXT; ALTER TABLE rotation_gens ADD COLUMN proved_at INTEGER; PRAGMA user_version = 2');
+  const before = META_TABLES.map((table) => dumpOf(old, table));
+  assert.ok(!tablesOf(old).includes('key_deletions'));
+  old.close();
+  const db = openMetaDatabase(path, seededRandom(seed), () => undefined);
+  t.after(() => db.close());
+  assert.equal(versionOf(db), 3);
+  assert.equal(NEWEST_META, 3);
+  assert.deepEqual(META_TABLES.map((table) => dumpOf(db, table)), before);
+  assert.deepEqual(dumpOf(db, 'key_deletions'), []);
+  assert.deepEqual(columnsOf(db, 'key_deletions'), ['approval_id', 'keyref', 'platform', 'run_id', 'opened_at', 'notified', 'dead_seen_at', 'confirmed_at', 'outcome', 'ended_at']);
+  assert.deepEqual(plain(db.prepare('PRAGMA foreign_key_list(key_deletions)').all()), [], 'the ledger outlives the erase: no REFERENCES');
+  const fresh = openMetaDatabase(join(dir, 'fresh.db'), seededRandom(seed), () => undefined);
+  t.after(() => fresh.close());
+  assert.ok(tablesOf(fresh).includes('key_deletions'));
+});
+
+test('KBOX-62 the ledger refuses an outcome outside erased and abandoned, a notified flag outside 0 and 1, and a second ledger for one run', async (t) => {
+  const db = openMetaDatabase(join(await tempDir(t), 'meta.db'), seededRandom(seed), () => undefined);
+  t.after(() => db.close());
+  const insert = (id: string, run: string, notified: number, outcome: string | null): void => {
+    db.prepare("INSERT INTO key_deletions (approval_id, keyref, platform, run_id, opened_at, notified, outcome) VALUES (?, 'k', 'p', ?, 1, ?, ?)").run(id, run, notified, outcome);
+  };
+  insert('a1', 'r1', 1, 'erased');
+  assert.throws(() => insert('a2', 'r2', 0, 'gone'), /CHECK/);
+  assert.throws(() => insert('a3', 'r3', 2, null), /CHECK/);
+  assert.throws(() => insert('a4', 'r1', 0, null), /UNIQUE/);
+  insert('a5', 'r5', 0, 'abandoned');
+});

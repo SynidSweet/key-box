@@ -224,7 +224,7 @@ export async function startDemo(options: DemoOptions = {}): Promise<Demo> {
       executors: { install_update: updater.executor, rotate_key: viaRotation('rotate_key'), add_key: viaRotation('add_key') },
       updateChanges: (action) => updater.changes(action),
     });
-    rotation = openRotation({ parts, approvals: approve.approvals, approvers: approve.approvers, push, clock, scheduler: systemScheduler, random, audit: parts.audit, source: pasteSource() });
+    rotation = openRotation({ parts, approvals: approve.approvals, approvalRecords: approve.approvals, approvers: approve.approvers, push, clock, scheduler: systemScheduler, random, audit: parts.audit, source: pasteSource() });
     const rotationOpen = rotation;
     // As the service does, once the server listens: resume, reconcile and the schedule; the stop cancels the timers, then idle waits for work in flight.
     closers.push(() => rotationOpen.idle());

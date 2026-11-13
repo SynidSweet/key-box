@@ -4,6 +4,7 @@
 // `node --test` does to every file under test/) it does nothing.
 import { systemClock, systemScheduler } from '../../src/shell/clock.ts';
 import { openCore } from '../../src/shell/core.ts';
+import { isDeleting } from '../../src/shell/deletion-store.ts';
 import { createEgress } from '../../src/shell/egress.ts';
 import { createLendHandler, loadCredentialShapes } from '../../src/shell/lend-core.ts';
 import { createMintedValues } from '../../src/shell/minted-values.ts';
@@ -26,7 +27,7 @@ const serveUntilTerm = (stop: () => Promise<void>): void => {
 if (role === 'core' && first !== undefined && lendSocket !== undefined) {
   process.umask(0o007);
   const core = openCore({ stateDir: first, clock: systemClock, scheduler: systemScheduler, random: systemRandom });
-  const handler = createLendHandler({ meta: core.meta, tokens: core.meta, vault: core.vault, audit: core.audit, events: core.events, registry: TEST_REGISTRY, shapes: loadCredentialShapes(), clock: systemClock, minted: createMintedValues(systemClock), journal, locationOf: (keyref) => readKeyInfo(core.db, keyref)?.location });
+  const handler = createLendHandler({ meta: core.meta, tokens: core.meta, vault: core.vault, audit: core.audit, events: core.events, registry: TEST_REGISTRY, shapes: loadCredentialShapes(), clock: systemClock, minted: createMintedValues(systemClock), journal, locationOf: (keyref) => readKeyInfo(core.db, keyref)?.location, deleting: (keyref) => isDeleting(core.db, keyref) });
   const server = createLendServer(handler, journal);
   await server.listen(lendSocket);
   serveUntilTerm(async () => {

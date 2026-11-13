@@ -8,6 +8,7 @@ import type { KeyClass, KeyLocation } from '../../src/ports/types.ts';
 import { hashToken, newToken } from '../../src/pure/tokens.ts';
 import { openCore } from '../../src/shell/core.ts';
 import type { CoreParts } from '../../src/shell/core.ts';
+import { isDeleting } from '../../src/shell/deletion-store.ts';
 import { createLendHandler, loadCredentialShapes } from '../../src/shell/lend-core.ts';
 import { createMintedValues } from '../../src/shell/minted-values.ts';
 import { createRotationStore, readKeyInfo } from '../../src/shell/rotation-store.ts';
@@ -67,6 +68,7 @@ export async function lendWorld(t: TestContext, registry: readonly PlatformEntry
     minted,
     journal: (code) => void journal.push(code),
     locationOf: (keyref) => readKeyInfo(core.db, keyref)?.location,
+    deleting: (keyref) => isDeleting(core.db, keyref),
   });
   const server = createLendServer(handler);
   const socket = join(dir, 'lend.sock');

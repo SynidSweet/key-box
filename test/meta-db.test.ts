@@ -121,3 +121,13 @@ test('KBOX-5 two first opens of a new meta.db at once end with one box_info row 
   assert.equal(rows(one).length, 1);
   assert.deepEqual(rows(two), rows(one));
 });
+
+test('KBOX-5 KBOX-62 meta.db is in WAL mode with foreign keys on, and every table of the spec is there, the deletion ledger included', async (t) => {
+  const dir = await tempDir(t);
+  const db = openMetaDatabase(join(dir, 'meta.db'), seededRandom(seed));
+  t.after(() => db.close());
+  assert.equal((db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode, 'wal');
+  assert.equal((db.prepare('PRAGMA foreign_keys').get() as { foreign_keys: number }).foreign_keys, 1);
+  const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[]).map((r) => r.name).sort();
+  assert.deepEqual(tables, ['allow_rules', 'approvals', 'audit', 'box_info', 'deliveries', 'destinations', 'events', 'grants', 'key_deletions', 'keys', 'machines', 'orphan_notices', 'paste_tasks', 'rotation_gens', 'rotation_keys', 'rotation_receipts', 'rotation_runs']);
+});

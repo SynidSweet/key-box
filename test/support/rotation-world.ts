@@ -221,6 +221,7 @@ export async function rotationWorld(t: TestContext, options: WorldOptions = {}):
     },
     lend: (ref, gen) => parts.vault.lend(ref, gen),
     retire: (ref, gen) => parts.vault.retire(ref, gen),
+    generations: (ref) => parts.vault.generations(ref),
   };
   const events: EventLog = {
     head: () => parts.events.head(),

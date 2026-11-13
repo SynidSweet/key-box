@@ -22,4 +22,11 @@ export class FakeVault implements Vault {
     const entry = this.#entries.get(`${ref}:${gen}`);
     if (entry !== undefined) entry.retired = true;
   }
+
+  generations(ref: KeyRef): readonly number[] {
+    return [...this.#entries]
+      .filter(([id, entry]) => !entry.retired && id.slice(0, id.lastIndexOf(':')) === ref)
+      .map(([id]) => Number(id.slice(id.lastIndexOf(':') + 1)))
+      .sort((a, b) => a - b);
+  }
 }
