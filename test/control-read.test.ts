@@ -48,7 +48,7 @@ test('KBOX-30 GET /api/meta has exactly the members of the spec at every level',
   exactKeys(body['box'], ['release', 'share_version', 'share_public_key_ed25519_b64', 'oidc_issuer', 'epoch'], 'box');
   const keys = body['keys'] as Record<string, unknown>[];
   assert.equal(keys.length, 1);
-  exactKeys(keys[0], ['keyref', 'platform', 'name', 'projects', 'class', 'status', 'gen_current', 'destinations', 'schedule', 'grants', 'allow_rules', 'coverage', 'last_use_at'], 'key');
+  exactKeys(keys[0], ['keyref', 'platform', 'name', 'projects', 'class', 'status', 'gen_current', 'old_unproven', 'destinations', 'schedule', 'grants', 'allow_rules', 'coverage', 'last_use_at'], 'key');
   exactKeys((keys[0]?.['destinations'] as unknown[])[0], ['kind', 'target', 'readable_by'], 'destination');
   exactKeys(keys[0]?.['schedule'], ['rotate_every_days', 'grace_hours', 'next_due_at', 'expires_at'], 'schedule');
   exactKeys((keys[0]?.['grants'] as unknown[])[0], ['machine'], 'grant');
