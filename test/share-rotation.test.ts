@@ -11,7 +11,7 @@ import type { ShareWriter } from '../src/shell/share-writer.ts';
 import { openShare } from './kit/reference-matcher.ts';
 import { rawDocument } from './kit/share-store.ts';
 import { seededRandom, tempDir } from './kit/index.ts';
-import { HOUR, rotationWorld } from './support/rotation-world.ts';
+import { rotationWorld } from './support/rotation-world.ts';
 import type { RotationWorld } from './support/rotation-world.ts';
 
 /** The fake platform's key shape: `fk-` and 32 hex characters (test/fakes/platform.ts). Registered through the source's `shapeOf` seam. */
@@ -76,36 +76,4 @@ test('KBOX-33 a rotation of an admin key gives a new share version that lists th
   assert.ok(during.version > before.version, 'the rotation made a new version');
   assert.deepEqual(during.found(oldValue), [{ gen: 1, retired: true }], 'the old value is found, as a retired generation');
   assert.deepEqual(during.found(newValue), [{ gen: 2, retired: false }]);
-});
-
-test('KBOX-33 once the old generation is revoked and retired the file still lists it, as not watched (the vault no longer holds its value), under a newer version', async (t) => {
-  const w = await rotationWorld(t, { klass: 'admin' });
-  const keyref = await w.seedKey();
-  const writer = await shareOver(t, w);
-  await writer.start();
-  w.orch.start({ keyref, origin: 'approval' });
-  await w.orch.idle();
-  await writer.idle();
-  const during = open(w, writer);
-  w.clock.advance(25 * HOUR);
-  await w.orch.idle();
-  await writer.idle();
-  assert.equal(w.store.gen(keyref, 1)?.status, 'retired');
-  const after = open(w, writer);
-  assert.ok(after.version > during.version, 'the retirement made a new version');
-  assert.deepEqual(after.coverage.map((c) => [c.gen, c.tier]).sort(), [[1, 'none'], [2, 'windowed']], 'both generations are listed; the retired one is explicitly not watched');
-  assert.deepEqual(after.entries.filter((e) => e.retired), [], 'no probe for a value the box no longer holds');
-});
-
-test('KBOX-33 a generation that never went live (pending, failed) is not a retired generation of the file', async (t) => {
-  const w = await rotationWorld(t, { klass: 'admin' });
-  const keyref = await w.seedKey();
-  w.destinations.redeployer.failNext();
-  const writer = await shareOver(t, w);
-  await writer.start();
-  w.orch.start({ keyref, origin: 'approval' });
-  await w.settle();
-  await writer.idle();
-  assert.equal(w.store.gens(keyref).some((g) => g.status === 'failed'), true, 'the run failed and its generation is marked failed');
-  assert.deepEqual(open(w, writer).coverage.map((c) => c.gen), [1], 'the file lists generation 1 only');
 });

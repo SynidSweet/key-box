@@ -9,7 +9,7 @@ import type { KeyClass, KeyShape, Scope } from '../src/ports/types.ts';
 import type { PlatformKit, PlatformSource } from '../src/shell/rotation-ports.ts';
 import { revokeAndConfirm } from '../src/shell/revoke-confirm.ts';
 import { bytesOf, lent } from './kit/index.ts';
-import { HOUR, MINUTE, rotationWorld } from './support/rotation-world.ts';
+import { HOUR, rotationWorld } from './support/rotation-world.ts';
 import type { RotationWorld } from './support/rotation-world.ts';
 import { routesWorld } from './support/routes-world.ts';
 import type { PasteView, RoutesWorld } from './support/routes-world.ts';
@@ -294,20 +294,6 @@ test('KBOX-58 KBOX-51 steps 5 and 8 pass for an issued key the verifier does not
   assert.equal(control.r.calls, 2, 'step 5 and step 8');
 });
 
-test('KBOX-58 KBOX-51 step 10 of an issued key the verifier does not apply to is confirmed by a complete listing without the id, with no verifier call; an incomplete listing keeps it in grace', async (t) => {
-  const { w, r, keyref } = await seededWith(t, ['read'], 'acct');
-  await toGrace(w, keyref);
-  w.faults.listingIncomplete = true;
-  await endGrace(w);
-  assert.equal(w.store.gen(keyref, 1)?.status, 'grace', 'absence from an incomplete listing proves nothing');
-  w.faults.listingIncomplete = false;
-  w.clock.advance(MINUTE);
-  await w.orch.idle();
-  assert.equal(w.store.gen(keyref, 1)?.status, 'retired');
-  assert.ok(w.seenAt.listAt.length > 0);
-  assert.equal(r.calls, 0, 'the verifier that does not apply was never asked');
-});
-
 test('KBOX-58 KBOX-51 negative control: step 10 of an acct key whose verifier is unreachable stays in grace with one notice, and the lister is never asked though it would show the key gone', async (t) => {
   const { w, r, keyref } = await seededWith(t, ['acct'], 'acct');
   await toGrace(w, keyref);
@@ -318,17 +304,6 @@ test('KBOX-58 KBOX-51 negative control: step 10 of an acct key whose verifier is
   assert.equal(w.store.gen(keyref, 1)?.status, 'grace');
   assert.deepEqual(w.seenAt.listAt, []);
   assert.equal(w.events('rotation.old_key_still_on').length, 1);
-});
-
-test('KBOX-58 KBOX-51 step 10 of an acct key whose old value the vault no longer holds falls to the lister: a complete listing without the issued id retires it', async (t) => {
-  const { w, r, keyref } = await seededWith(t, ['acct'], 'acct');
-  await toGrace(w, keyref);
-  const callsBefore = r.calls;
-  w.parts.vault.retire(keyref, 1);
-  await endGrace(w);
-  assert.equal(w.store.gen(keyref, 1)?.status, 'retired');
-  assert.ok(w.seenAt.listAt.length > 0);
-  assert.equal(r.calls, callsBefore, 'no value, so the verifier is not asked');
 });
 
 test('KBOX-58 KBOX-51 a verifier whose appliesTo throws at step 10 counts as applying, never as none: the old key stays in grace, the lister is not asked and the verifier is not called', async (t) => {

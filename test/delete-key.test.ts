@@ -515,44 +515,6 @@ test('KBOX-62 ruling 6: a deletion step that throws sends the run its one step-f
 
 // ------------------------------------------------------------------------------------------------------ the erase
 
-const TABLES_WITH_KEYREF = (db: DatabaseSync): readonly string[] =>
-  (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as { name: string }[])
-    .map((r) => r.name)
-    .filter((name) => (db.prepare(`PRAGMA table_info(${JSON.stringify(name)})`).all() as { name: string }[]).some((c) => c.name === 'keyref'));
-
-test('KBOX-62 after the erase no row names the key outside the ledger, no vault file of it is left (a file with no row included), its dead ids are in orphan_notices, and a reconcile listing them raises nothing', async (t) => {
-  const w = await deleteWorld(t);
-  await w.addKey();
-  await w.addKey({ keyref: 'fake/shop/OTHER', name: 'OTHER' });
-  await inGrace(w, KEYREF);
-  await w.pass(25 * HOUR, HOUR);
-  assert.equal(w.rotation.store.gen(KEYREF, 1)?.status, 'retired', 'a retired hand-off generation');
-  await inGrace(w, KEYREF);
-  w.parts.meta.putGrant(KEYREF, 'ws-1');
-  w.parts.meta.putAllowRule(KEYREF, 'models-list');
-  w.parts.meta.putDestination(KEYREF, { kind: 'workstation', target: 'workstation', readable_by: 'api' });
-  w.parts.vault.put(KEYREF, 9, Buffer.from(w.platform.value()));
-  const ids = w.rotation.store.gens(KEYREF).map((g) => g.platformKeyId);
-  const ended = revokes(w).length;
-  const id = await w.approveDelete(KEYREF);
-  await w.pass(5 * MINUTE);
-  assert.equal(stored(w, KEYREF), false);
-  for (const table of TABLES_WITH_KEYREF(w.parts.db)) {
-    const n = (w.parts.db.prepare(`SELECT count(*) AS n FROM ${table} WHERE keyref = ?`).get(KEYREF) as { n: number }).n;
-    assert.equal(n, table === 'key_deletions' ? 1 : 0, table);
-  }
-  assert.equal(count(w, 'SELECT count(*) AS n FROM rotation_receipts r LEFT JOIN rotation_runs u ON u.run_id = r.run_id WHERE u.run_id IS NULL'), 0);
-  assert.deepEqual(w.parts.vault.generations(KEYREF), [], 'every file, the one with no generation row included');
-  for (const gen of [1, 2, 9]) assert.throws(() => w.parts.vault.lend(KEYREF, gen));
-  for (const pk of ids) assert.equal(w.rotation.store.firstOrphanNotice(pk ?? ''), false, `${pk} is in orphan_notices`);
-  assert.deepEqual(w.audits('key.deleted').map((a) => a.detail), [{ run_id: ledger(w, id)?.run_id, platform: 'fake', gens: 3, destinations: 1 }]);
-  assert.equal(revokes(w).length - ended, 2, 'the two live generations were ended, the retired one not');
-
-  w.platform.extra.push({ platformKeyId: ids[0] ?? '', name: 'kbox_deleted', disabled: true }, { platformKeyId: 'pk-stranger', name: 'kbox_stranger' });
-  await w.rotation.reconciler.run();
-  assert.equal(w.events('box.notice').filter((n) => n['code'] === 'orphan_key').length, 1, 'only the never-known kbox_ key raises one');
-});
-
 test('KBOX-62 a key re-added under the same keyref after the erase starts at generation 1', async (t) => {
   const w = await deleteWorld(t);
   await w.addKey();

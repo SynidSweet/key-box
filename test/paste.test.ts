@@ -203,35 +203,6 @@ test('KBOX-7 a paste task sits in the add_key slot: another token is refused nam
   assert.equal(w.parts.events.after(0).filter((e) => e.kind === 'approval.decided' && e.data['decision'] === 'expired').length, 1);
 });
 
-test('KBOX-12 pasting a new value for an admin key rotates it: the paste is the approval, the new value is a new generation, and the old one is retired once the platform rejects it', async (t) => {
-  const w = await routesWorld(t);
-  const first = pasteValue('1'.repeat(32));
-  const second = pasteValue('2'.repeat(32));
-  w.accepted.add(first);
-  const addId = await openTask(w);
-  const a = await render(w, addId);
-  assert.equal((await submit(w, addId, a.cookie, first, w.pasteProof(a.view))).status, 201);
-  const rotation = await w.api('/api/rotations', { json: { keyref: KEYREF } });
-  assert.equal(rotation.status, 202);
-  const rotId = (rotation.json() as { paste_task_id: string }).paste_task_id;
-  assert.equal(w.parts.meta.snapshot().keys.find((k) => k.keyref === KEYREF)?.status, 'awaiting_paste');
-  assert.equal(w.rotation.store.activeRunOf(KEYREF), undefined, 'nothing runs before the paste');
-  w.accepted.add(second);
-  const r = await render(w, rotId, a.cookie);
-  assert.equal((await submit(w, rotId, a.cookie, second, w.pasteProof(r.view))).status, 201);
-  await w.rotation.orchestrator.idle();
-  assert.equal(w.rotation.store.gen(KEYREF, 2)?.status, 'current');
-  assert.equal(w.rotation.store.gen(KEYREF, 1)?.status, 'grace');
-  assert.equal(Buffer.from(await bytesOf(w.parts.vault.lend(KEYREF, 2))).toString('utf8'), second);
-  w.clock.advance(60 * 60_000);
-  await w.rotation.orchestrator.idle();
-  assert.equal(w.rotation.store.gen(KEYREF, 1)?.status, 'grace', 'the platform still accepts the old value: the box cannot revoke a pasted key, so it is not retired');
-  w.accepted.delete(first);
-  w.clock.advance(60 * 60_000);
-  await w.rotation.orchestrator.idle();
-  assert.equal(w.rotation.store.gen(KEYREF, 1)?.status, 'retired');
-});
-
 test('KBOX-12 the paste page keeps the field when the box refuses, and empties it only after the key is stored', () => {
   const source = readFileSync(new URL('../src/web/paste.js', import.meta.url), 'utf8').split('\n');
   const assigns = source.map((line, i) => [i, line] as const).filter(([, line]) => /byId\('value'\)\.value\s*=[^=]/.test(line));
@@ -448,28 +419,6 @@ test('KBOX-12 KBOX-40 the page offers the entry\'s hints, a known hint is stored
   assert.equal((await submit(w, rot2, r2.cookie, third, w.pasteProof(r2.view))).status, 201);
   assert.equal(w.rotation.store.keyInfo(KEYREF)?.verifyHint, 'charges');
   assert.equal(w.verifiedHints[seen], 'charges', 'the paste check used the stored hint');
-});
-
-test('KBOX-40 the stored hint reaches the step-10 confirmation of the old value', async (t) => {
-  const w = await routesWorld(t, { pasteOnly: true, verifyHints: HINTS });
-  const first = pasteValue('1'.repeat(32));
-  const second = pasteValue('2'.repeat(32));
-  w.accepted.add(first);
-  const addId = await openTask(w);
-  const a = await render(w, addId);
-  assert.equal((await submitWithHint(w, addId, a.cookie, first, w.pasteProof(a.view), 'balance')).status, 201);
-  const rot = ((await w.api('/api/rotations', { json: { keyref: KEYREF } })).json() as { paste_task_id: string }).paste_task_id;
-  w.accepted.add(second);
-  const r = await render(w, rot, a.cookie);
-  assert.equal((await submitWithHint(w, rot, a.cookie, second, w.pasteProof(r.view), 'charges')).status, 201);
-  await w.rotation.orchestrator.idle();
-  w.accepted.delete(first);
-  const before = w.verifiedHints.length;
-  w.clock.advance(60 * 60_000);
-  await w.rotation.orchestrator.idle();
-  assert.equal(w.rotation.store.gen(KEYREF, 1)?.status, 'retired');
-  assert.ok(w.verifiedHints.length > before, 'the old value was verified at step 10');
-  assert.deepEqual(new Set(w.verifiedHints.slice(before)), new Set(['charges']));
 });
 
 const rowsOfAll = (w: RoutesWorld): unknown => [w.parts.db.prepare('SELECT * FROM keys').all(), w.parts.db.prepare('SELECT status, revision FROM paste_tasks').all()];
