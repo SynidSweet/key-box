@@ -34,18 +34,21 @@ async function world(t: TestContext, options: DeleteWorldOptions = {}): Promise<
   return w;
 }
 
-/** One sweep, its first half run: the end calls and first verdicts made, and the sweep waiting on its gap (or finished). */
-async function firstHalf(w: DeleteWorld): Promise<Promise<void>> {
+/**
+ * One sweep, its first half run: the end calls and first verdicts made, and the sweep waiting on its gap (or finished). The sweep comes back
+ * wrapped: an async function returning the bare promise would adopt it and wait out the gap that only the test's clock can pass.
+ */
+async function firstHalf(w: DeleteWorld): Promise<{ readonly sweep: Promise<void> }> {
   const sweep = w.rotation.watch.run();
   await w.rotation.watch.idle();
-  return sweep;
+  return { sweep };
 }
 
 test('KBOX-51 the proof watch retires a lingering generation after two proven verdicts 60 s apart, the second with no end call: retired, its value file deleted, one key.revoked', async (t) => {
   const w = await world(t);
   const value = await text(w, KEYREF, 1);
   const from = w.platform.calls.length;
-  const sweep = await firstHalf(w);
+  const { sweep } = await firstHalf(w);
   assert.equal(status(w, KEYREF, 1), 'grace', 'one verdict retires nothing');
   w.clock.advance(PROOF_GAP_MS - 1);
   await settle();
@@ -60,7 +63,7 @@ test('KBOX-51 the proof watch retires a lingering generation after two proven ve
 
 test('KBOX-51 a verdict proven once and then refused (401 then 200) leaves the generation grace with its value; the next sweep starts again from the end call', async (t) => {
   const w = await world(t);
-  const sweep = await firstHalf(w);
+  const { sweep } = await firstHalf(w);
   w.platform.answer = 200;
   w.clock.advance(PROOF_GAP_MS);
   await sweep;
@@ -110,7 +113,7 @@ test('KBOX-51 a generation the owner ends gets no end call, and with no platform
     if (valueGone) w.parts.vault.retire(keyref, 1);
     const ended = revokes(w).length;
     const from = asked(w);
-    const sweep = await firstHalf(w);
+    const { sweep } = await firstHalf(w);
     w.clock.advance(PROOF_GAP_MS);
     await sweep;
     assert.equal(revokes(w).length, ended, 'the owner ends it: no call');
@@ -137,7 +140,7 @@ test('KBOX-51 the watch skips the old and the new generation of an active run, i
 
 test('KBOX-62 the watch skips a key with an open deletion, and a deletion opened during the 60 s wait leaves the generation unretired by the watch', async (t) => {
   const w = await world(t);
-  const sweep = await firstHalf(w);
+  const { sweep } = await firstHalf(w);
   w.clock.advance(PROOF_GAP_MS / 2);
   await w.approveDelete(KEYREF);
   const revokedBefore = w.audits('key.revoked').length;
@@ -175,7 +178,7 @@ test('KBOX-57 a key with no master gets no call that sweep and stays grace; with
   assert.deepEqual(w.platform.calls.slice(from), []);
   assert.equal(status(w, KEYREF, 1), 'grace');
   w.parts.vault.put(w.masters.fake, 1, Buffer.from(master));
-  const sweep = await firstHalf(w);
+  const { sweep } = await firstHalf(w);
   w.clock.advance(PROOF_GAP_MS);
   await sweep;
   assert.equal(status(w, KEYREF, 1), 'retired');
@@ -183,7 +186,7 @@ test('KBOX-57 a key with no master gets no call that sweep and stays grace; with
 
 test('KBOX-51 a stop during the 60 s wait retires nothing and does not throw; after a restart the watch starts again from the end call and the first verdict', async (t) => {
   const w = await world(t);
-  const sweep = await firstHalf(w);
+  const { sweep } = await firstHalf(w);
   w.rotation.watch.stop();
   await sweep;
   w.clock.advance(PROOF_GAP_MS);
@@ -194,7 +197,7 @@ test('KBOX-51 a stop during the 60 s wait retires nothing and does not throw; af
   const again = await firstHalf(w);
   assert.equal(revokes(w).length, ended + 1);
   w.clock.advance(PROOF_GAP_MS);
-  await again;
+  await again.sweep;
   assert.equal(status(w, KEYREF, 1), 'retired');
 });
 
@@ -203,7 +206,7 @@ test('KBOX-51 a generation whose retire throws audits one rotation.drive_failed 
   const other = 'fake/shop/OTHER_KEY';
   await lingering(w, other);
   w.parts.db.exec(`CREATE TRIGGER refuse_retire BEFORE UPDATE ON rotation_gens WHEN NEW.keyref = '${KEYREF}' AND NEW.status = 'retired' BEGIN SELECT RAISE(ABORT, 'refused'); END`);
-  const sweep = await firstHalf(w);
+  const { sweep } = await firstHalf(w);
   w.clock.advance(PROOF_GAP_MS);
   await sweep;
   assert.deepEqual(w.audits('rotation.drive_failed').map((a) => [a.ref, a.detail]), [[KEYREF, { run_id: 'watch', code: 'watch_failed' }]]);
@@ -222,7 +225,7 @@ test('KBOX-51 KBOX-62 a master key\'s two lingering generations are ended and pr
   assert.deepEqual(w.rotation.store.gens(master).map((g) => g.status), ['grace', 'grace', 'current']);
   const current = await text(w, master, 3);
   const from = revokes(w).length;
-  const sweep = await firstHalf(w);
+  const { sweep } = await firstHalf(w);
   w.clock.advance(PROOF_GAP_MS);
   await sweep;
   assert.deepEqual(revokes(w).slice(from).map((c) => c.split(' with ')[1]), [current, current]);
