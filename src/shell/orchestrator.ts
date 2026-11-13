@@ -753,9 +753,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       }
       if (!(await undoEverywhere(run, head, kit, chosen.value, receipts, id, fresh))) return rollBackLater(run);
     }
-    // KBOX-17 as amended: a new key the platform issued may still work there, so it stays grace (watched) until the proof watch proves it
-    // revoked; one it never issued (a pasted value, an overlap:false set) is failed and its value deleted.
-    if (created !== undefined && id !== null) store.setGenStatus(run.keyref, run.genNew, 'grace');
+    // KBOX-17 as amended: a new key the platform issued, or the owner pasted, may still work there, so it stays grace (watched) until the
+    // proof watch proves it revoked; only an overlap:false set's value (set back by the rollback itself) is failed and its value deleted.
+    if (created !== undefined && (id !== null || overlapOf(kit))) store.setGenStatus(run.keyref, run.genNew, 'grace');
     else if (created !== undefined) {
       store.setGenStatus(run.keyref, run.genNew, 'failed');
       deps.vault.retire(run.keyref, run.genNew);
