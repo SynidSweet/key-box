@@ -508,7 +508,8 @@ test('KBOX-33 v4: the golden file opens with the stored public key and finds eac
   const expected = JSON.parse(fixture('planted/expected.json').toString('utf8')) as Record<string, string[]>;
   const watched = new Map(goldenKeys().filter((k) => k.shape.random).map((k) => [`${k.name}.${k.gen}`.toLowerCase(), `${k.project}/${k.name}/${k.gen}`]));
   for (const [file, keys] of Object.entries(expected)) {
-    const found = [...new Set(result.share.scan(fixture(`planted/${file}`)).map((f) => `${f.project}/${f.name}/${f.gen}`))];
+    const hits: Finding[] = result.share.scan(fixture(`planted/${file}`));
+    const found: string[] = [...new Set(hits.map((f) =>`${f.project}/${f.name}/${f.gen}`))];
     assert.deepEqual(found, keys, file);
     const owner = watched.get(file.split('.').slice(0, 2).join('.'));
     const isCopy = !file.includes('.decoy.') && owner !== undefined;
