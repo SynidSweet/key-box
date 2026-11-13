@@ -1,2 +1,0 @@
-token=sb_secret_i5qpDWNhq10YOYEPr6w5cSpv5vfYvBd8Xr5mPBm8
-next line

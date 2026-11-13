@@ -1,2 +1,0 @@
-token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.MrUAhfNQe_NMUteEoGKVGmDkfgfgiryKbMww4PNdY5-
-next line

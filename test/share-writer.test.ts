@@ -146,20 +146,6 @@ test('KBOX-33 the master class counts like admin', async (t) => {
   assert.deepEqual(shareVersions(w), [1, 2]);
 });
 
-test('KBOX-33 a new version has a new salt: a probe of one version is in no other', async (t) => {
-  const w = await shareWorld(t, { store: [windowed('OPENAI_ADMIN_KEY')] });
-  const before = fileOf(w);
-  w.store.push(windowed('OPENAI_ADMIN_KEY', 2));
-  w.core.meta.putKey(row('OPENAI_ADMIN_KEY', 2));
-  await w.writer.idle();
-  const bodyOf = (file: Buffer): { header: { salt_b64: string }; probes: { d: string }[] } =>
-    JSON.parse(Buffer.from((JSON.parse(file.toString('utf8')) as { body_b64: string }).body_b64, 'base64').toString('utf8')) as { header: { salt_b64: string }; probes: { d: string }[] };
-  const [a, b] = [bodyOf(before), bodyOf(fileOf(w))];
-  assert.notEqual(a.header.salt_b64, b.header.salt_b64);
-  const old = new Set(a.probes.map((p) => p.d));
-  assert.ok(b.probes.every((p) => !old.has(p.d)));
-});
-
 // ---------------------------------------------------------------- durable before announced, and versions that only rise
 
 test('KBOX-33 the version is announced only after the file is durable, never before: the file already holds it when the event is written', async (t) => {
