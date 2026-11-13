@@ -753,9 +753,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       }
       if (!(await undoEverywhere(run, head, kit, chosen.value, receipts, id, fresh))) return rollBackLater(run);
     }
-    // KBOX-17 as amended: a new key the platform issued, or the owner pasted, may still work there, so it stays grace (watched) until the
-    // proof watch proves it revoked; only an overlap:false set's value (set back by the rollback itself) is failed and its value deleted.
-    if (created !== undefined && (id !== null || overlapOf(kit))) store.setGenStatus(run.keyref, run.genNew, 'grace');
+    // KBOX-17 as amended: a new generation stays grace (watched) until the proof watch proves it revoked, unless the box itself set it on an
+    // overlap:false platform (a platform_set receipt) and undoEverywhere has set the old value back: only then is it failed and its value deleted.
+    const boxSetIt = !overlapOf(kit) && receipts.some((r) => r.kind === PLATFORM_SET);
+    if (created !== undefined && !boxSetIt) store.setGenStatus(run.keyref, run.genNew, 'grace');
     else if (created !== undefined) {
       store.setGenStatus(run.keyref, run.genNew, 'failed');
       deps.vault.retire(run.keyref, run.genNew);

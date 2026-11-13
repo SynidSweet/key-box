@@ -187,6 +187,20 @@ test('KBOX-17 a paste run that fails after its value is stored leaves it grace w
   assert.equal(w.events('rotation.failed').length, 1);
 });
 
+test('KBOX-17 a pasted value on an overlap:false platform (the box set nothing, so nothing was set back) stays grace with its value lent, not deleted', async (t) => {
+  const w = await rotationWorld(t, { overlap: false });
+  const keyref = await w.seedKey();
+  const pasted = `fk-${'cd'.repeat(16)}`;
+  await w.platform.set(lent(Buffer.from(pasted), 'paste:2'), w.platform.master());
+  w.destinations.redeployer.failNext();
+  w.orch.start({ keyref, origin: 'owner', value: Buffer.from(pasted) });
+  await w.settle();
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+  assert.equal(w.store.gen(keyref, 2)?.status, 'grace', 'the owner set it there: it may be the only value the platform takes');
+  assert.equal(await w.valueOf(keyref, 2), pasted);
+  assert.equal(oldUnproven(w, keyref), 1);
+});
+
 test('KBOX-33 KBOX-17 an admin key\'s failed paste run: the share file lists the pasted generation as watched and finds its value', async (t) => {
   const { w, keyref, pasted } = await failedPaste(t, { klass: 'admin' });
   const writer = await shareOver(t, w);
