@@ -1,5 +1,5 @@
 // The golden share file (KBOX-33): a synthetic store of fake values, the file the box writes over it, and documents with planted
-// copies. The files under test/fixtures/share-v3/ are what this builds; devbox's admin-match v3 backend runs them too. Run with
+// copies. The files under test/fixtures/share-v4/ are what this builds; devbox's v4 reader (admin-match) runs them too. Run with
 // `write <dir>` it (re)writes them; run with no arguments (as `node --test` does to every file under test/) it does nothing.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
