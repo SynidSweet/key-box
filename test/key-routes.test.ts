@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { bytesOf, listAll } from './kit/index.ts';
 import { ApiError } from '../src/pure/errors.ts';
-import { PASTE_PLATFORM, routesWorld } from './support/routes-world.ts';
+import { PASTE_PLATFORM, routesWorld, seedRetiredKey } from './support/routes-world.ts';
 import type { RoutesWorld } from './support/routes-world.ts';
 import type { LocationProver } from '../src/ports/issuer.ts';
 import type { KeyLocation } from '../src/ports/types.ts';
@@ -211,6 +211,32 @@ test('KBOX-34 a delivery nobody acknowledged past the key grace raises one notic
   assert.deepEqual([notices[0]?.data['code'], notices[0]?.data['text']], ['delivery_unacked', 'delivery unacknowledged']);
 });
 
+// --- no intake of retired values -----------------------------------------------------------------------------------------------
+
+test('KBOX-34 POST /api/retired with a control token answers exactly as an unknown route does and stores nothing, for a body of any size, a JSON body, a paste-only platform and the box key', async (t) => {
+  const w = await routesWorld(t, { pasteOnly: true, source: boxMade() });
+  const unknown = await w.api('/api/nonesuch?platform=fake&project=shop&name=OLD_KEY', { bytes: Buffer.from('x') });
+  assert.equal(unknown.status, 404, 'control: an unknown route is 404');
+  const before = allRows(w);
+  const asks: Array<[string, Uint8Array, string | undefined]> = [
+    [`/api/retired?platform=fake&project=shop&name=OLD_KEY`, Buffer.from(`fk-${'ab'.repeat(16)}`), undefined],
+    [`/api/retired?platform=fake&project=shop&name=OLD_KEY`, Buffer.alloc(64 * 1024 + 1, 0x61), undefined],
+    [`/api/retired?platform=fake&project=shop&name=OLD_KEY`, Buffer.from('x'), 'application/json'],
+    [`/api/retired?platform=pasteco&project=shop&name=OLD_KEY`, Buffer.from(`pk-${'ab'.repeat(16)}`), undefined],
+    [`/api/retired?platform=fake&project=p&name=${BOX_NAME}`, Buffer.from('B'.repeat(43)), undefined],
+    [`/api/retired`, Buffer.from('x'), undefined],
+  ];
+  for (const [path, bytes, contentType] of asks) {
+    const reply = await w.api(path, { bytes, ...(contentType === undefined ? {} : { contentType }) });
+    assert.deepEqual([reply.status, reply.body], [unknown.status, unknown.body], path);
+  }
+  assert.equal((await w.api('/api/retired?platform=fake&project=shop&name=OLD_KEY', { method: 'GET' })).status, unknown.status, 'a GET too');
+  assert.equal(allRows(w), before, 'no row appears');
+  assert.deepEqual(w.rotation.store.gens('fake/shop/OLD_KEY'), [], 'no generation appears');
+  assert.deepEqual(w.rotation.store.gens('pasteco/shop/OLD_KEY'), []);
+  assert.equal(w.rotation.store.key(BOX_REF), undefined);
+});
+
 for (const items of [['read'], ['admin']]) {
   test(`KBOX-51 POST /api/keys for a ${items.join('')} key on an overlap:false platform is refused with overlap_needs_paste: no key row, no approval`, async (t) => {
     const w = await routesWorld(t, { overlap: false });
@@ -325,6 +351,47 @@ test('KBOX-57 POST /api/keys for a keyref that exists, at another location and a
   assert.deepEqual([rowsOf(w, KEYREF), rowsOf(w, `${PASTE_PLATFORM}/shop/ANTHROPIC_KEY`)], before);
   assert.equal(opened(w), 0);
   assert.deepEqual(w.issuedAt, []);
+});
+
+const OLD = { platform: 'fake', project: 'shop', name: 'OLD_KEY' } as const;
+const OLD_REF = 'fake/shop/OLD_KEY';
+
+test('KBOX-57 a key record with an empty stored location and a retired generation, on a location-requiring entry, is refused rotation (location_missing): no run, no approval', async (t) => {
+  const w = await routesWorld(t, { location: PROJECT_ENTRY });
+  seedRetiredKey(w, OLD, `fk-${'ab'.repeat(16)}`);
+  const reply = await w.api('/api/rotations', { json: { keyref: OLD_REF } });
+  assert.deepEqual([reply.status, errorOf(reply).code, errorOf(reply).detail?.code], [422, 'rejected', 'location_missing']);
+  assert.equal(w.rotation.store.activeRunOf(OLD_REF), undefined);
+  assert.equal(opened(w), 0);
+  assert.throws(() => w.rotation.orchestrator.start({ keyref: OLD_REF, origin: 'owner' }), (e: unknown) => e instanceof ApiError && JSON.stringify(e.detail) === JSON.stringify({ code: 'location_missing' }));
+  assert.equal(w.rotation.store.runs().length, 0);
+});
+
+test('KBOX-57 the schedule skips a due key whose stored location the entry refuses: no run and no request, on this tick or the next', async (t) => {
+  const w = await routesWorld(t, { location: PROJECT_ENTRY });
+  seedRetiredKey(w, OLD, `fk-${'ab'.repeat(16)}`);
+  // A current generation that falls due: the record above holds only a retired one.
+  w.rotation.store.putGen({ keyref: OLD_REF, gen: 2, status: 'current', platformKeyId: null, location: {} });
+  w.clock.advance(91 * 24 * HOUR);
+  w.rotation.tick();
+  w.rotation.tick();
+  assert.equal(w.rotation.store.runs().length, 0);
+  assert.equal(opened(w), 0);
+  const refused = w.parts.audit.read(0).entries.filter((e) => e.action === 'rotation.refused');
+  assert.deepEqual(refused.map((e) => [e.ref, e.detail['code']]), [[OLD_REF, 'location_missing']], 'one record per key and code');
+});
+
+test('KBOX-57 the schedule\'s skip of a due key whose stored location the entry refuses sends exactly one box.notice "rotation skipped" naming the code across ticks, and starts no run', async (t) => {
+  const w = await routesWorld(t, { location: PROJECT_ENTRY });
+  seedRetiredKey(w, OLD, `fk-${'ab'.repeat(16)}`);
+  w.rotation.store.putGen({ keyref: OLD_REF, gen: 2, status: 'current', platformKeyId: null, location: {} });
+  w.clock.advance(91 * 24 * HOUR);
+  w.rotation.tick();
+  w.rotation.tick();
+  w.rotation.tick();
+  const notices = w.parts.events.after(0).filter((e) => e.kind === 'box.notice' && e.data['text'] === 'rotation skipped');
+  assert.deepEqual(notices.map((e) => e.data['code']), ['location_missing'], 'one notice per key and code');
+  assert.equal(w.rotation.store.runs().length, 0);
 });
 
 test('KBOX-57 an admin key whose stored location the entry now refuses is refused rotation at the route: no approval, its status unchanged', async (t) => {
@@ -640,6 +707,19 @@ test('KBOX-55 negative control: a platform without a box key still opens a paste
   assert.deepEqual([master.status, members(master)], [202, ['class', 'keyref', 'paste_task_id']]);
   const w = await routesWorld(t, { source: boxMade() });
   assert.equal((await w.api('/api/keys', { json: body() })).status, 201);
+});
+
+test('KBOX-34 KBOX-55 POST /api/keys naming the box key by platform and name is rejected box_made under any project: nothing written, nothing opened; another name is not box_made', async (t) => {
+  const w = await routesWorld(t, { source: boxMade() });
+  const before = allRows(w);
+  const created = await w.api('/api/keys', { json: body({ name: BOX_NAME, projects: ['shop'] }) });
+  assert.deepEqual([created.status, ...code(created)], [422, 'rejected', 'box_made'], created.body);
+  assert.equal(allRows(w), before);
+  assert.equal(opened(w), 0);
+  assert.equal(w.rotation.store.key(`fake/shop/${BOX_NAME}`), undefined);
+  // Negative control: another name on the same platform is an ordinary key.
+  const other = await w.api('/api/keys', { json: body({ name: 'MAPS_KEY', projects: ['shop'] }) });
+  assert.doesNotMatch(other.body, /box_made/);
 });
 
 test('KBOX-55 a due box key whose current generation is unproven opens nothing and writes no notice; after markProved the next tick opens exactly one rotate_key approval', async (t) => {

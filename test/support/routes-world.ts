@@ -201,3 +201,28 @@ export async function routesWorld(t: TestContext, options: RoutesWorldOptions = 
     },
   });
 }
+
+/**
+ * A key record holding one retired generation and an empty stored location, put straight into the stores: what a retired generation made by a
+ * box rotation looks like, with no route involved (`POST /api/retired` is removed). The key is an `ordinary` one on `platform`.
+ */
+export function seedRetiredKey(w: RoutesWorld, at: { readonly platform: string; readonly project: string; readonly name: string }, value: string): string {
+  const keyref = `${at.platform}/${at.project}/${at.name}`;
+  w.parts.meta.putKey({
+    keyref,
+    platform: at.platform,
+    name: at.name,
+    projects: [at.project],
+    class: 'ordinary',
+    status: 'works',
+    gen_current: 1,
+    schedule: { rotate_every_days: 90, grace_hours: 1, next_due_at: null, expires_at: null },
+    coverage: null,
+    last_use_at: null,
+  });
+  w.rotation.store.putKeyInfo(keyref, { scopeItems: [], location: {}, rotatedAt: w.clock.now(), markAdmin: false });
+  w.parts.vault.put(keyref, 1, Buffer.from(value));
+  w.rotation.store.putGen({ keyref, gen: 1, status: 'retired', platformKeyId: null, location: {} });
+  w.parts.vault.retire(keyref, 1);
+  return keyref;
+}
