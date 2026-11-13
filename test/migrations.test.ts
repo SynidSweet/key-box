@@ -79,6 +79,29 @@ test('KBOX-56 a meta.db written by release 1 migrates to the newest version with
   assert.deepEqual(plain(db.prepare('SELECT verify_hint FROM rotation_keys').all()), [{ verify_hint: null }]);
 });
 
+test('KBOX-56 KBOX-55 a meta.db at version 1 reaches the newest version with every row kept and proved_at null on each generation; a new file has the column too', async (t) => {
+  const dir = await tempDir(t);
+  const path = join(dir, 'meta.db');
+  const gens = `
+    INSERT INTO rotation_gens (keyref, gen, status, platform_key_id, region, project) VALUES ('k1', 1, 'retired', 'id-1', 'us', 'p1');
+    INSERT INTO rotation_gens (keyref, gen, status, platform_key_id, region, project) VALUES ('k1', 2, 'current', NULL, NULL, NULL);
+  `;
+  const old = writeV0(path, `${META_FIXTURE()} ${META_ROWS} ${gens}`);
+  old.exec('ALTER TABLE rotation_keys ADD COLUMN verify_hint TEXT; PRAGMA user_version = 1');
+  const before = [...META_TABLES, 'rotation_gens'].map((table) => dumpOf(old, table));
+  assert.ok(!columnsOf(old, 'rotation_gens').includes('proved_at'));
+  old.close();
+  const db = openMetaDatabase(path, seededRandom(seed), () => undefined);
+  t.after(() => db.close());
+  assert.equal(versionOf(db), NEWEST_META);
+  const kept = [...META_TABLES, 'rotation_gens'].map((table) => dumpOf(db, table).map((row) => (table === 'rotation_gens' ? Object.fromEntries(Object.entries(row as object).filter(([k]) => k !== 'proved_at')) : row)));
+  assert.deepEqual(kept, before);
+  assert.deepEqual(plain(db.prepare('SELECT gen, proved_at FROM rotation_gens ORDER BY gen').all()), [{ gen: 1, proved_at: null }, { gen: 2, proved_at: null }]);
+  const fresh = openMetaDatabase(join(dir, 'fresh.db'), seededRandom(seed), () => undefined);
+  t.after(() => fresh.close());
+  assert.ok(columnsOf(fresh, 'rotation_gens').includes('proved_at'));
+});
+
 test('KBOX-56 a private.db written by release 1 migrates to the newest version with every row kept', async (t) => {
   const path = join(await tempDir(t), 'private.db');
   const old = writeV0(path, section('private.db') + PRIVATE_ROWS);

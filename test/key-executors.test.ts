@@ -7,6 +7,7 @@ import type { TestContext } from 'node:test';
 import type { KeyRow } from '../src/ports/meta.ts';
 import type { BoxMadeKey } from '../src/ports/platform.ts';
 import type { KeyClass, KeyShape, Scope } from '../src/ports/types.ts';
+import { ACTION_KINDS } from '../src/pure/actions.ts';
 import type { Action, ActionKind } from '../src/pure/actions.ts';
 import { ApiError } from '../src/pure/errors.ts';
 import { openApproveCore } from '../src/shell/approve-core.ts';
@@ -373,6 +374,37 @@ test('KBOX-60 F3 a crash after the approval committed (the executor died): at th
   reopened(w, { set_schedule: again });
   assert.equal(notices(w).length, 1, 'a second start records and notices nothing more');
   assert.equal(calls, 1);
+});
+
+/** The kinds that resume on their own: the updater, the run of a rotation or an add, and a deletion (settled by its ledger, KBOX-62). */
+const RESUME_THEMSELVES: readonly ActionKind[] = ['install_update', 'rotate_key', 'add_key', 'delete_key'];
+
+test('KBOX-60 F3 KBOX-62 every kind except install_update, rotate_key, add_key and delete_key is interrupted; those four are left waiting for their own settle; no executor runs', async (t) => {
+  assert.deepEqual(Object.keys(FIXTURES).sort(), [...ACTION_KINDS].sort(), 'the table covers every kind');
+  const w = await approveWorld(t);
+  const second = await w.addApprover();
+  const fixtures: Readonly<Record<ActionKind, Action>> = { ...FIXTURES, approver_remove: { kind: 'approver_remove', approver_id: second.approverId } };
+  const ids = new Map<ActionKind, string>();
+  for (const kind of ACTION_KINDS) {
+    const proposed = w.propose(fixtures[kind], kind === 'enrol' ? 'enrol:198.51.100.7' : 'ctl-1');
+    ids.set(kind, proposed.approval_id);
+    // The state a crash leaves: decided, executor entered, no result recorded.
+    w.parts.db.prepare("UPDATE approvals SET status = 'approved', decided_at = ? WHERE approval_id = ?").run(w.clock.now(), proposed.approval_id);
+  }
+  const ran: string[] = [];
+  const spy = (kind: ActionKind): [ActionKind, Executor] => [kind, () => (ran.push(kind), Promise.resolve({ result: 'done' }))];
+  const restarted = reopened(w, Object.fromEntries(ACTION_KINDS.map(spy)));
+  assert.deepEqual(ran, []);
+  const interrupted = new Set(w.parts.events.after(0).filter((e) => e.kind === 'approval.executed' && e.data['reason_code'] === 'interrupted').map((e) => e.data['approval_id']));
+  for (const kind of ACTION_KINDS) {
+    assert.equal(interrupted.has(ids.get(kind)), !RESUME_THEMSELVES.includes(kind), kind);
+  }
+  assert.deepEqual(
+    RESUME_THEMSELVES.flatMap((kind) => restarted.approvals.waiting(kind).map((a) => a.approvalId)).sort(),
+    RESUME_THEMSELVES.map((kind) => ids.get(kind)).sort(),
+    'the four that resume themselves still wait',
+  );
+  assert.equal(notices(w).length, ACTION_KINDS.length - RESUME_THEMSELVES.length, 'one notice per interrupted row');
 });
 
 test('KBOX-60 F3 a row decided but never executed is not touched while it is pending or already has a result', async (t) => {

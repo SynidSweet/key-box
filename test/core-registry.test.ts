@@ -11,7 +11,7 @@ import type { PlatformEntry } from '../src/ports/platform.ts';
 import type { KeyShape } from '../src/ports/types.ts';
 import type { Action } from '../src/pure/actions.ts';
 import { RegistryRefused } from '../src/pure/profile.ts';
-import { vetAction } from '../src/pure/proposal-vet.ts';
+import { vetAction, vetWired } from '../src/pure/proposal-vet.ts';
 import { startCore } from '../src/main-core.ts';
 import { openCore } from '../src/shell/core.ts';
 import type { CoreParts } from '../src/shell/core.ts';
@@ -116,6 +116,21 @@ test('KBOX-23 the kinds whose executors do not exist yet stay refused, whatever 
   ];
   for (const action of refused) assert.equal(vet(action), 'rejected', action.kind);
   assert.equal(vet({ kind: 'rotate_key', keyref: 'k/k/K' }), 'ok');
+});
+
+test('KBOX-23 KBOX-62 the wiring decides at proposal: a kind the supplied wired set lacks is rejected, one it has is passed on to the vet', () => {
+  const wired = new Set<Action['kind']>(['delete_key', 'set_schedule']);
+  const vet = vetWired(wired, () => 'ok');
+  assert.equal(vet({ kind: 'delete_key', keyref: 'k/k/K' }), 'ok');
+  assert.equal(vet({ kind: 'demote', keyref: 'k/k/K' }), 'rejected', 'unwired: refused before any approval');
+  assert.equal(vetWired(wired, () => 'rejected')({ kind: 'delete_key', keyref: 'k/k/K' }), 'rejected', 'wired: the inner vet still decides');
+});
+
+test('KBOX-23 KBOX-62 over the real route, delete_key is wired in core and a proposal of it is not refused as not_allowed', async (t) => {
+  const w = await started(t, [fakeEntry(platform)]);
+  assert.ok(w.core.executorKinds.has('delete_key'));
+  const reply = await w.call('/api/proposals', { action: { kind: 'delete_key', keyref: 'fake/shop/FAKE_KEY' } });
+  assert.doesNotMatch(reply.body, /not_allowed/, `${reply.status} ${reply.body}`);
 });
 
 test('KBOX-34 over the real route, add_key of an admin key on a registered platform opens an approval', async (t) => {
