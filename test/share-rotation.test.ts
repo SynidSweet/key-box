@@ -14,7 +14,8 @@ import { createShareWriter } from '../src/shell/share-writer.ts';
 import type { ShareWriter } from '../src/shell/share-writer.ts';
 import { openShare } from './kit/reference-matcher.ts';
 import { rawDocument } from './kit/share-store.ts';
-import { seededRandom, tempDir } from './kit/index.ts';
+import type { Retirer } from '../src/ports/issuer.ts';
+import { bytesOf, lent, seededRandom, tempDir } from './kit/index.ts';
 import { HOUR, rotationWorld } from './support/rotation-world.ts';
 import type { RotationWorld } from './support/rotation-world.ts';
 
@@ -88,9 +89,10 @@ test('KBOX-33 a rotation of an admin key gives a new share version that lists th
  * A proof watch over the rotation world's platform, whose entry here declares proven revoked evidence: the verifier answers 200 for a key it
  * takes and 401 for one it refuses (KBOX-62), the only evidence that may retire a generation (KBOX-51 step 10 as amended).
  */
-function provenWatch(w: RotationWorld): ProofWatch {
+function provenWatch(w: RotationWorld, retirer?: Retirer): ProofWatch {
   const source: PlatformSource = {
     platform: () => ({
+      ...(retirer === undefined ? {} : { retirer }),
       issuer: w.platform.issuer,
       lister: w.platform.lister,
       verifier: { verify: (key, target) => w.platform.verifier.verify(key, target), answerStatus: async (key, target) => ((await w.platform.verifier.verify(key, target)) === 'ok' ? 200 : 401) },
@@ -154,4 +156,80 @@ test('KBOX-33 KBOX-17 a generation the platform never issued (an overlap:false r
   await writer.idle();
   assert.equal(issued.store.gen(keyref, 2)?.status, 'grace', 'issued, ended, not proven dead');
   assert.deepEqual(open(issued, writer).found(await issued.valueOf(keyref, 2)), [{ gen: 2, retired: true }]);
+});
+
+// --- KBOX-17 as amended (paste-rollback): a failed run's pasted new key stays watched until proven ended --------------------------------
+
+const TYPO = `fk-${'0'.repeat(32)}`;
+
+/** A key with a pasted new value whose run fails after the value is stored (a redeploy refuses): the value the platform takes, and the failed run. */
+async function failedPaste(t: TestContext, options: { klass?: 'admin' } = {}): Promise<{ readonly w: RotationWorld; readonly keyref: string; readonly pasted: string }> {
+  const w = await rotationWorld(t, options);
+  const keyref = await w.seedKey();
+  const pasted = `fk-${'ab'.repeat(16)}`;
+  await w.platform.set(lent(Buffer.from(pasted), 'paste:2'), w.platform.master());
+  w.destinations.redeployer.failNext();
+  w.orch.start({ keyref, origin: 'owner', value: Buffer.from(pasted) });
+  await w.settle();
+  return { w, keyref, pasted };
+}
+
+const oldUnproven = (w: RotationWorld, keyref: string): number | undefined => w.parts.meta.controlSnapshot().keys.find((k) => k.keyref === keyref)?.old_unproven;
+
+test('KBOX-17 a paste run that fails after its value is stored leaves it grace with its value lent, gen_current unchanged, one notice, and old_unproven 1 in GET /api/meta', async (t) => {
+  const { w, keyref, pasted } = await failedPaste(t);
+  assert.equal(w.store.runs().at(-1)?.state, 'failed');
+  assert.equal(w.store.gen(keyref, 2)?.status, 'grace', 'the owner made it at the platform: it may still work');
+  assert.equal(w.store.gen(keyref, 1)?.status, 'current');
+  assert.equal(w.parts.meta.controlSnapshot().keys.find((k) => k.keyref === keyref)?.gen_current, 1);
+  assert.equal(await w.valueOf(keyref, 2), pasted, 'the vault still lends it, so the scanner (which reads grace generations by status) and the share file look for it');
+  assert.equal(oldUnproven(w, keyref), 1);
+  assert.equal(w.events('rotation.failed').length, 1);
+});
+
+test('KBOX-33 KBOX-17 an admin key\'s failed paste run: the share file lists the pasted generation as watched and finds its value', async (t) => {
+  const { w, keyref, pasted } = await failedPaste(t, { klass: 'admin' });
+  const writer = await shareOver(t, w);
+  await writer.start();
+  const file = open(w, writer);
+  assert.ok(file.coverage.some((c) => c.gen === 2 && c.tier !== 'none'), 'gen 2 is watched');
+  assert.deepEqual(file.found(pasted), [{ gen: 2, retired: true }]);
+});
+
+test('KBOX-51 KBOX-17 the proof watch hands the retirer a failed paste run\'s value and retires the generation only on proven evidence twice 60 s apart; one verdict retires nothing', async (t) => {
+  const { w, keyref, pasted } = await failedPaste(t);
+  const handed: string[] = [];
+  const watch = provenWatch(w, {
+    retire: async (old) => {
+      handed.push(Buffer.from(await bytesOf(old)).toString('utf8'));
+      await w.platform.set(lent(Buffer.from(TYPO), 'ended'), w.platform.master());
+      return 'retired';
+    },
+  });
+  const sweep = watch.run();
+  await watch.idle();
+  assert.deepEqual(handed, [pasted]);
+  assert.equal(w.store.gen(keyref, 2)?.status, 'grace', 'one proven verdict retires nothing');
+  w.clock.advance(PROOF_GAP_MS - 1);
+  assert.equal(w.store.gen(keyref, 2)?.status, 'grace', 'nor 1 ms before the gap ends');
+  w.clock.advance(1);
+  await sweep;
+  assert.equal(w.store.gen(keyref, 2)?.status, 'retired');
+  assert.throws(() => w.parts.vault.lend(keyref, 2), 'its value is gone');
+  assert.equal(oldUnproven(w, keyref), 0);
+  assert.deepEqual(handed, [pasted], 'the second verdict made no end call');
+});
+
+test('KBOX-51 KBOX-17 a failed paste run on an entry with no retirer stays grace across sweeps while the platform takes the value: no push and no notice beyond the run\'s one', async (t) => {
+  const { w, keyref } = await failedPaste(t);
+  const before = { events: w.parts.events.head(), pushes: w.push.sent.length };
+  const watch = provenWatch(w);
+  for (let sweeps = 0; sweeps < 3; sweeps += 1) {
+    await watch.run();
+    w.clock.advance(24 * HOUR);
+  }
+  assert.equal(w.store.gen(keyref, 2)?.status, 'grace');
+  assert.equal(oldUnproven(w, keyref), 1);
+  assert.equal(w.parts.events.head(), before.events, 'no event');
+  assert.equal(w.push.sent.length, before.pushes, 'no push');
 });
