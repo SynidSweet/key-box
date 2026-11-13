@@ -1382,3 +1382,314 @@ test('KBOX-51 a step-10 stall of a key the box ends itself writes one rotation.r
   assert.equal(w.parts.audit.read(0).entries.filter((e) => e.action === 'rotation.revoke_unconfirmed').length, 1);
   assert.equal(w.events('rotation.old_key_still_on').length, 1);
 });
+
+// --- re-pins of the retired "verifier rejects, so retired" tests (revoke-proof, S-795 unit retire-revoke) ---------------------------
+// KBOX-51 step 10 as amended: the platform's word ends the run and marks nothing dead; gen 1 stays grace with its value kept until the proof
+// watch proves it revoked. Every other behaviour the retired tests pinned is pinned again here unchanged.
+
+const stillOnCount = (w: RotationWorld): number => w.events('rotation.old_key_still_on').length;
+const OWNER_ENDS_WORDS = 'End the old key on fake; the box watches for it to stop working.';
+/** The key's last run is done (none active) and gen 1 is still grace, its value still in the vault. */
+async function endedUnproven(w: RotationWorld, keyref: string): Promise<void> {
+  assert.equal(w.store.activeRunOf(keyref), undefined, 'no active run');
+  assert.equal(w.store.runs().filter((r) => r.keyref === keyref).at(-1)?.state, 'done', 'the run is done');
+  assert.equal(genOf(w, keyref, 1)?.status, 'grace', 'the platform\'s word marks nothing dead');
+  assert.ok((await w.valueOf(keyref, 1)).length > 0, 'its value is kept');
+}
+
+test('KBOX-51 a rotation runs create, store, verify, push, redeploy, check, waits out the grace, then ends the old key: the run is done and gen 1 stays grace with its value', async (t) => {
+  const { w, keyref, oldId } = await seeded(t);
+  w.trace.length = 0;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  assert.deepEqual(w.trace, ['issue', 'verify', 'push:app-a', 'push:app-b', 'redeploy:app-a', 'redeploy:app-b', 'verify'], 'nothing is revoked while the grace runs');
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'grace');
+  assert.equal(genOf(w, keyref, 2)?.status, 'current');
+  assert.equal(genOf(w, keyref, 1)?.status, 'grace');
+  const newValue = await w.valueOf(keyref, 2);
+  assert.deepEqual(heldBy(w), [newValue, newValue]);
+  assert.ok((await w.live()).includes(oldId), 'the old key still works during the grace');
+  w.clock.advance(24 * HOUR - 1);
+  await w.orch.idle();
+  assert.ok((await w.live()).includes(oldId), 'one millisecond before revokeAt nothing is ended');
+  w.clock.advance(1);
+  await w.orch.idle();
+  assert.deepEqual(await w.live(), [genOf(w, keyref, 2)?.platformKeyId], 'the old key is ended at the platform');
+  await endedUnproven(w, keyref);
+});
+
+for (const point of ['issued', 'issuing', 'verifying', 'pushing', 'redeploying', 'checking', 'promoting', 'grace', 'revoking'] as const) {
+  test(`KBOX-51 a crash after "${point}" resumes and finishes: the new key current everywhere, the old one ended and kept grace, nothing stray on the platform`, async (t) => {
+    const { w, keyref } = await seeded(t);
+    w.checkpoints.arm(point);
+    w.orch.start({ keyref, origin: 'owner' });
+    await w.orch.idle();
+    if (point === 'grace' || point === 'revoking') {
+      w.clock.advance(24 * HOUR);
+      await w.orch.idle();
+    }
+    assert.equal(w.checkpoints.seen.at(-1), point, 'the process died at the armed point');
+    w.checkpoints.crashAt = undefined;
+    w.build();
+    await w.orch.resume();
+    await w.reconciler.run();
+    await w.settle();
+    assert.equal(w.store.activeRuns().length, 0);
+    assert.equal(w.store.gens(keyref).find((g) => g.status === 'current')?.gen, 2);
+    assert.equal(genOf(w, keyref, 1)?.status, 'grace');
+    const value = await w.valueOf(keyref, 2);
+    assert.deepEqual(heldBy(w), [value, value]);
+    assert.deepEqual(await w.live(), [genOf(w, keyref, 2)?.platformKeyId], 'exactly the new key is live: no orphan, the old one ended');
+    assert.equal(w.events('rotation.failed').length, 0);
+    assert.equal(w.parts.meta.snapshot().keys.find((k) => k.keyref === keyref)?.status, 'works');
+  });
+}
+
+test('KBOX-51 a revoke that answers 404 while the verifier still accepts the old value keeps the run at step 10, retried, one notice; then the verifier rejecting ends the run with gen 1 grace', async (t) => {
+  const { w, keyref, oldId } = await seeded(t);
+  w.faults.revoke404 = true;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  assert.equal(genOf(w, keyref, 1)?.status, 'grace');
+  assert.equal(w.store.activeRunOf(keyref)?.attempts, 1);
+  assert.equal(stillOnCount(w), 1);
+  w.clock.advance(MINUTE);
+  await w.orch.idle();
+  assert.equal(w.store.activeRunOf(keyref)?.attempts, 2, 'retried');
+  assert.equal(stillOnCount(w), 1, 'still one notice');
+  w.faults.revoke404 = false;
+  w.clock.advance(2 * MINUTE);
+  await w.orch.idle();
+  assert.ok(!(await w.live()).includes(oldId));
+  await endedUnproven(w, keyref);
+  assert.equal(stillOnCount(w), 1);
+});
+
+test('KBOX-51 with no verifier call, a lister that still shows the id keeps the run at step 10; a lister that shows it absent ends the run with gen 1 grace', async (t) => {
+  const { w, keyref, oldId } = await seeded(t, { verifier: false });
+  assert.equal(w.store.keyInfo(keyref)?.location.region, 'eu');
+  w.faults.revoke404 = true;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'revoking');
+  assert.ok((await w.live()).includes(oldId));
+  w.faults.revoke404 = false;
+  w.clock.advance(MINUTE);
+  await w.orch.idle();
+  assert.ok(!(await w.live()).includes(oldId));
+  await endedUnproven(w, keyref);
+});
+
+test('KBOX-51 overlap:false follows its order: set the new value, push, redeploy at once, check, end with no grace wait; gen 1 stays grace', async (t) => {
+  const { w, keyref } = await seeded(t, { overlap: false });
+  w.trace.length = 0;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  assert.deepEqual(w.trace, ['set', 'verify', 'push:app-a', 'push:app-b', 'redeploy:app-a', 'redeploy:app-b', 'verify', 'verify']);
+  assert.equal(w.store.activeRuns().length, 0, 'done at once: no clock was advanced');
+  await endedUnproven(w, keyref);
+});
+
+test('KBOX-17 a store write refused at promote keeps the old key on, sends one old_key_still_on notice and retries until it goes through; the run then ends with gen 1 grace', async (t) => {
+  const { w, keyref } = await seeded(t);
+  const restore = refuseWrite(w, 'rotation_gens', "NEW.status = 'grace'");
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'promoting');
+  assert.equal(stillOnCount(w), 1);
+  assert.equal(failedCards(w), 0, 'nothing is rolled back after the check passed');
+  w.clock.advance(MINUTE);
+  await w.orch.idle();
+  assert.equal(stillOnCount(w), 1, 'one notice, however many retries');
+  restore();
+  await w.settle(2 * MINUTE + 24 * HOUR);
+  assert.equal(w.store.activeRuns().length, 0);
+  assert.equal(genOf(w, keyref, 2)?.status, 'current');
+  await endedUnproven(w, keyref);
+});
+
+test('KBOX-17 a master key that cannot be lent at revoke keeps the old key in grace with one old_key_still_on notice and retries; with the master back the run ends, the old key ended and gen 1 grace', async (t) => {
+  const { w, keyref, oldId } = await seeded(t);
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.faults.master = true;
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'revoking');
+  assert.equal(stillOnCount(w), 1);
+  w.clock.advance(MINUTE);
+  await w.orch.idle();
+  assert.equal(stillOnCount(w), 1);
+  w.faults.master = false;
+  await w.settle(2 * MINUTE);
+  assert.ok(!(await w.live()).includes(oldId));
+  await endedUnproven(w, keyref);
+});
+
+test('KBOX-51 with no verifier call, a lister answering for another region, or an incomplete listing, does not end step 10 even with the key gone; a complete listing of the right region ends the run with gen 1 grace', async (t) => {
+  const { w, keyref, oldId } = await seeded(t, { verifier: false });
+  w.faults.listerAt = { region: 'us' };
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  assert.ok(!(await w.live()).includes(oldId), 'the platform did revoke it');
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'revoking', 'but a listing of another region proves nothing');
+  w.faults.listerAt = undefined;
+  w.faults.listingIncomplete = true;
+  w.clock.advance(MINUTE);
+  await w.orch.idle();
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'revoking', 'nor does an incomplete listing of the right region');
+  w.faults.listingIncomplete = false;
+  w.clock.advance(2 * MINUTE);
+  await w.orch.idle();
+  await endedUnproven(w, keyref);
+});
+
+test('KBOX-51 overlap:false sets a value the box chose at the platform, which stops taking the old one, then pushes and redeploys at once and needs no revoke; gen 1 stays grace', async (t) => {
+  const { w, keyref, oldValue } = await seeded(t, { overlap: false });
+  w.trace.length = 0;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  assert.deepEqual(w.trace, ['set', 'verify', 'push:app-a', 'push:app-b', 'redeploy:app-a', 'redeploy:app-b', 'verify', 'verify']);
+  assert.equal(w.store.activeRuns().length, 0, 'done at once: no clock was advanced');
+  const newValue = await w.valueOf(keyref, 2);
+  assert.deepEqual([await platformTakes(w, newValue), await platformTakes(w, oldValue)], ['ok', 'rejected']);
+  assert.deepEqual(heldBy(w), [newValue, newValue]);
+  await endedUnproven(w, keyref);
+});
+
+test('KBOX-57 every master a run asks for, step 10 included, is chosen by the key\'s platform, stored location and stored scope items, never by its projects', async (t) => {
+  const { w, keyref } = await seeded(t);
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.settle();
+  await endedUnproven(w, keyref);
+  assert.ok(w.masterAsked.length > 0);
+  assert.deepEqual(new Set(w.masterAsked.map((a) => JSON.stringify(a))), new Set([JSON.stringify({ platform: 'fake', at: { region: 'eu' }, items: ['read'] })]));
+});
+
+test('KBOX-57 KBOX-51 a master missing at step 10 keeps the old key in grace with one old_key_still_on notice and retries; with a master back the run ends, the old key ended and gen 1 grace', async (t) => {
+  const { w, keyref, oldId } = await seeded(t);
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.faults.noMaster = true;
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  w.clock.advance(MINUTE);
+  await w.orch.idle();
+  assert.equal(genOf(w, keyref, 1)?.status, 'grace');
+  assert.equal(stillOnCount(w), 1);
+  assert.ok((await w.live()).includes(oldId));
+  w.faults.noMaster = false;
+  await w.settle(2 * MINUTE);
+  assert.ok(!(await w.live()).includes(oldId));
+  await endedUnproven(w, keyref);
+  assert.equal(stillOnCount(w), 1);
+});
+
+test('KBOX-51 step 10: a pasted old generation on an entry with a retirer is ended by it, with the old value and the master; the run ends once the verifier rejects it, gen 1 grace with its value', async (t) => {
+  const asks: RetireAsk[] = [];
+  const box: { w?: RotationWorld } = {};
+  const { w, keyref } = await pastedThenRotated(t, { source: withRetirer(recordingRetirer(box, asks, 'ends')) }, box);
+  assert.deepEqual(asks, [], 'nothing is ended while the grace runs');
+  w.trace.length = 0;
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  assert.deepEqual(asks, [{ old: OLD_VALUE, master: Buffer.from(w.platform.masterBytes).toString('utf8'), at: { region: 'eu' } }], 'the retirer is handed the old value, the key\'s location and the master');
+  assert.deepEqual(w.trace, ['retire', 'verify'], 'the verifier checks after the retirer, and Issuer.revoke is never used for a key with no id');
+  assert.ok(!(await w.live()).includes('pk-set'));
+  await endedUnproven(w, keyref);
+  assert.equal(stillOnCount(w), 0);
+});
+
+test('KBOX-51 KBOX-17 step 10: a retirer answering absent while the verifier still accepts the old value keeps the run at step 10 with one notice, retried until the old value is rejected; then done with gen 1 grace', async (t) => {
+  const asks: RetireAsk[] = [];
+  const box: { w?: RotationWorld } = {};
+  const { w, keyref } = await pastedThenRotated(t, { source: withRetirer(recordingRetirer(box, asks, 'absent')) }, box);
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  for (const minutes of [1, 2, 4]) {
+    w.clock.advance(minutes * MINUTE);
+    await w.orch.idle();
+  }
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'revoking', 'absent is not the platform\'s word');
+  assert.ok(asks.length >= 4, 'the retirer is asked again at each retry');
+  assert.equal(stillOnCount(w), 1, 'one notice across the retries');
+  assert.ok((await w.live()).includes('pk-set'));
+  await w.platform.issuer.revoke('pk-set', w.platform.master());
+  await w.settle(HOUR);
+  await endedUnproven(w, keyref);
+  assert.equal(stillOnCount(w), 1);
+});
+
+test('KBOX-51 KBOX-17 step 10: with neither a platform key id nor a retirer the owner ends it: one owner_ends notice in the box\'s words, and the run ends once the verifier rejects, gen 1 grace', async (t) => {
+  const { w, keyref } = await pastedThenRotated(t, { klass: 'admin' });
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  for (const minutes of [1, 2]) {
+    w.clock.advance(minutes * MINUTE);
+    await w.orch.idle();
+  }
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'revoking');
+  assert.equal(stillOnCount(w), 1, 'one notice');
+  assert.deepEqual(w.push.sent.filter((p) => p.title === OWNER_ENDS_WORDS).map((p) => p.kind), ['rotation_owner_ends'], 'the words go to the phone once');
+  const audited = w.parts.audit.read(0).entries.filter((e) => e.action === 'rotation.revoke_unconfirmed');
+  assert.ok(audited.length >= 3 && audited.every((e) => e.detail['reason'] === 'owner_ends'), 'every unconfirmed attempt names the reason');
+  assert.ok(!w.trace.includes('revoke'), 'the box ends nothing');
+  await w.platform.issuer.revoke('pk-set', w.platform.master());
+  await w.settle(HOUR);
+  await endedUnproven(w, keyref);
+  assert.equal(stillOnCount(w), 1, 'still one notice');
+});
+
+test('KBOX-51 step 10: an old pasted key the owner already ended ends the run at the first attempt with no notice and no push; gen 1 stays grace', async (t) => {
+  const { w, keyref } = await pastedThenRotated(t, { klass: 'admin' });
+  await w.platform.issuer.revoke('pk-set', w.platform.master());
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  await endedUnproven(w, keyref);
+  assert.equal(stillOnCount(w), 0);
+  assert.deepEqual(w.push.sent.filter((p) => p.title === OWNER_ENDS_WORDS), []);
+});
+
+test('KBOX-51 step 10: a generation the box made is ended by Issuer.revoke and the retirer is never asked; the run ends with gen 1 grace', async (t) => {
+  const asks: RetireAsk[] = [];
+  const box: { w?: RotationWorld } = {};
+  const { w, keyref } = await seeded(t, { source: withRetirer(recordingRetirer(box, asks, 'ends')) });
+  box.w = w;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.trace.length = 0;
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  assert.ok(w.trace.includes('revoke'));
+  assert.deepEqual(asks, []);
+  await endedUnproven(w, keyref);
+});
+
+test('KBOX-58 a verifier without needsMaster is never handed a master, at steps 5, 8 and 10 or in a rollback, and needs none at steps 5 and 8; step 10 ends the run through it, gen 1 grace', async (t) => {
+  const targets: VerifyTarget[] = [];
+  const { w, keyref } = await seeded(t, { source: recordingVerifierSource(targets, false) });
+  w.checkpoints.hook = async (point) => {
+    if (point === 'redeployed') w.faults.noMaster = true;
+  };
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  w.checkpoints.hook = undefined;
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'grace', 'step 8 passed with no master row: this verifier needs none');
+  w.faults.noMaster = false;
+  w.clock.advance(24 * HOUR);
+  await w.orch.idle();
+  await endedUnproven(w, keyref);
+  w.faults.verifyAt = 1;
+  w.orch.start({ keyref, origin: 'owner' });
+  await w.orch.idle();
+  await w.settle();
+  assert.ok(w.events('rotation.failed').length >= 1, 'the rollback ran');
+  assert.ok(targets.length >= 6, `${targets.length} verifications`);
+  for (const target of targets) assert.equal(Object.hasOwn(target, 'master'), false, 'no master member');
+});

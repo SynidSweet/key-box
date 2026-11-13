@@ -9,7 +9,7 @@ import type { KeyClass, KeyShape, Scope } from '../src/ports/types.ts';
 import type { PlatformKit, PlatformSource } from '../src/shell/rotation-ports.ts';
 import { revokeAndConfirm } from '../src/shell/revoke-confirm.ts';
 import { bytesOf, lent } from './kit/index.ts';
-import { HOUR, rotationWorld } from './support/rotation-world.ts';
+import { HOUR, MINUTE, rotationWorld } from './support/rotation-world.ts';
 import type { RotationWorld } from './support/rotation-world.ts';
 import { routesWorld } from './support/routes-world.ts';
 import type { PasteView, RoutesWorld } from './support/routes-world.ts';
@@ -351,4 +351,33 @@ test('KBOX-58 KBOX-51 revokeAndConfirm of a pasted generation (no id) the verifi
   assert.equal(dead, false);
   assert.deepEqual([verifies, listings], [0, 0]);
   assert.equal(await revokeAndConfirm({ kit: { verifier, lister }, platform: TWOKIND, id: null, at: {}, value, master, scopeItems: ['acct'] }), true, 'positive control: the verifier that applies decides');
+});
+
+// --- re-pins of the retired step-10 listing tests (revoke-proof, S-795 unit retire-revoke): the listing ends the run, gen 1 stays grace --
+
+test('KBOX-58 KBOX-51 step 10 of an issued key the verifier does not apply to ends on a complete listing without the id, with no verifier call; an incomplete listing keeps the run at step 10; gen 1 stays grace', async (t) => {
+  const { w, r, keyref } = await seededWith(t, ['read'], 'acct');
+  await toGrace(w, keyref);
+  w.faults.listingIncomplete = true;
+  await endGrace(w);
+  assert.equal(w.store.activeRunOf(keyref)?.state, 'revoking', 'absence from an incomplete listing proves nothing');
+  w.faults.listingIncomplete = false;
+  w.clock.advance(MINUTE);
+  await w.orch.idle();
+  assert.equal(w.store.activeRunOf(keyref), undefined, 'the run is done');
+  assert.equal(w.store.gen(keyref, 1)?.status, 'grace');
+  assert.ok(w.seenAt.listAt.length > 0);
+  assert.equal(r.calls, 0, 'the verifier that does not apply was never asked');
+});
+
+test('KBOX-58 KBOX-51 step 10 of an acct key whose old value the vault no longer holds falls to the lister: a complete listing without the issued id ends the run, gen 1 grace', async (t) => {
+  const { w, r, keyref } = await seededWith(t, ['acct'], 'acct');
+  await toGrace(w, keyref);
+  const callsBefore = r.calls;
+  w.parts.vault.retire(keyref, 1);
+  await endGrace(w);
+  assert.equal(w.store.activeRunOf(keyref), undefined, 'the run is done');
+  assert.equal(w.store.gen(keyref, 1)?.status, 'grace');
+  assert.ok(w.seenAt.listAt.length > 0);
+  assert.equal(r.calls, callsBefore, 'no value, so the verifier is not asked');
 });

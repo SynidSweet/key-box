@@ -48,6 +48,8 @@ export type ViolationCode =
   // KBOX-41: RegistryDeps' keyInfo is read only by the Google minter
   | 'keyinfo-read'
 | 'verifier-read'
+  // KBOX-51, KBOX-62, KBOX-55: only the proof watch, a deletion and a box-made revoke retire a generation
+  | 'retire-writer'
   // KBOX-23
   | 'adapter-imports-registry'
   // the checks could not read the tree they were given

@@ -10,6 +10,7 @@ import { openCore } from '../../src/shell/core.ts';
 import type { CoreParts } from '../../src/shell/core.ts';
 import { isDeleting } from '../../src/shell/deletion-store.ts';
 import { createLendHandler, loadCredentialShapes } from '../../src/shell/lend-core.ts';
+import type { LendCoreDeps } from '../../src/shell/lend-core.ts';
 import { createMintedValues } from '../../src/shell/minted-values.ts';
 import { createRotationStore, readKeyInfo } from '../../src/shell/rotation-store.ts';
 import type { MintedValues } from '../../src/shell/minted-values.ts';
@@ -49,7 +50,12 @@ export interface LendWorld {
   readdAt(keyref: string, at: KeyLocation): void;
 }
 
-export async function lendWorld(t: TestContext, registry: readonly PlatformEntry[] = TEST_REGISTRY): Promise<LendWorld> {
+/** `generations`: the rotation store's view the scanner chooses generations by (KBOX-14); absent, as where nothing rotates. */
+export interface LendWorldOptions {
+  readonly generations?: LendCoreDeps['generations'];
+}
+
+export async function lendWorld(t: TestContext, registry: readonly PlatformEntry[] = TEST_REGISTRY, options: LendWorldOptions = {}): Promise<LendWorld> {
   const dir = await tempDir(t);
   const clock = new TimedClock(1_000_000);
   const random = seededRandom(11);
@@ -69,6 +75,7 @@ export async function lendWorld(t: TestContext, registry: readonly PlatformEntry
     journal: (code) => void journal.push(code),
     locationOf: (keyref) => readKeyInfo(core.db, keyref)?.location,
     deleting: (keyref) => isDeleting(core.db, keyref),
+    ...(options.generations === undefined ? {} : { generations: options.generations }),
   });
   const server = createLendServer(handler);
   const socket = join(dir, 'lend.sock');

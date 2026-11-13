@@ -737,3 +737,23 @@ test('KBOX-37 KBOX-58 a master access-token result opens a paste task; a pasted 
   assert.ok(http.sent.some((r) => r.target === '/v1/projects' && r.headers['authorization'] === `Bearer ${token}`), 'the token was verified at the platform');
   c.assertAbsent({ proposal: reply.body, page: page.body, stored: stored.body, events: JSON.stringify(w.parts.events.after(0)), audit: JSON.stringify(w.parts.audit.read(0)) });
 });
+
+// --- re-pin of the retired retire-by-lister test (revoke-proof, S-795 unit retire-revoke) ---------------------------------------------
+
+test('KBOX-37 KBOX-58 a secret key\'s run never sends a project key to /v1/projects and its run is ended by the lister (old key grace); negative control: no request carries an sb_secret_ value as bearer', async (t) => {
+  const { w, http } = await supabaseRoutes(t);
+  const execute = w.rotation.executors.add_key;
+  assert.ok(execute);
+  const action = { kind: 'add_key', platform: 'supabase', name: 'SUPABASE_SECRET', projects: ['shop'], scope: SECRET, location: AT } as const;
+  assert.deepEqual(await execute({ approvalId: 'apr_x', revision: 1, action, requester: { kind: 'box' }, proof: undefined }), { result: 'done' });
+  const keyref = 'supabase/shop/SUPABASE_SECRET';
+  w.rotation.orchestrator.start({ keyref, origin: 'owner' });
+  await w.rotation.orchestrator.idle();
+  w.clock.advance(2 * 3600_000);
+  await w.rotation.orchestrator.idle();
+  assert.equal(w.rotation.store.activeRunOf(keyref), undefined, 'the run is done');
+  assert.equal(w.rotation.store.gen(keyref, 1)?.status, 'grace', 'ended, not proven dead (KBOX-51 step 10 as amended)');
+  assert.ok(http.sent.some((r) => r.method === 'GET' && r.target === `/v1/projects/${REF}/api-keys`), 'the lister confirmed it');
+  assert.deepEqual(http.sent.filter((r) => r.target === '/v1/projects'), [], 'no verifier call');
+  assert.deepEqual(http.sent.filter((r) => (r.headers['authorization'] ?? '').startsWith('Bearer sb_secret_')), [], 'no project key as a bearer');
+});
