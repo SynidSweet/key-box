@@ -23,6 +23,10 @@ import { createPaste, pasteRoutes } from './paste.ts';
 import type { Paste } from './paste.ts';
 import { createReconciler } from './reconcile.ts';
 import type { Reconciler } from './reconcile.ts';
+import { createDeletionDriver } from './delete-run.ts';
+import { createDeletionStore } from './deletion-store.ts';
+import { createKeyDelete } from './key-delete.ts';
+import type { KeyDelete } from './key-delete.ts';
 import { createRotationStore } from './rotation-store.ts';
 import type { KeyHead, RotationStore } from './rotation-store.ts';
 import { createsByPaste, isPasteSource as pasteSource, kitFor, overlapOf, proposalRefusal, rotatesByPaste as pasteRotation } from './rotation-ports.ts';
@@ -46,6 +50,8 @@ const PART_OF: Readonly<Record<ScheduleFault, string>> = { tick_failed: 'tick', 
 export interface RotationDeps {
   readonly parts: CoreParts;
   readonly approvals: Pick<Approvals, 'propose' | 'sweep'>;
+  /** KBOX-62: what a deletion records on approvals: expiring those naming its key, its result, and start-up's repair. */
+  readonly approvalRecords: Pick<Approvals, 'expireNaming' | 'executed' | 'interruptOne' | 'waiting'>;
   readonly approvers: Approvers;
   readonly push: Push;
   readonly clock: Clock;
@@ -63,6 +69,8 @@ export interface Rotation {
   readonly orchestrator: Orchestrator;
   readonly reconciler: Reconciler;
   readonly paste: Paste;
+  /** KBOX-62: the deletion's check, executor, page facts and start-up settle (its executor is also in `executors`). */
+  readonly deletion: KeyDelete;
   readonly routes: readonly Route[];
   /** Executors for `openApproveCore`: an approved `rotate_key` or `add_key`. */
   readonly executors: Partial<Readonly<Record<ActionKind, Executor>>>;
@@ -81,9 +89,17 @@ export interface Rotation {
 export function openRotation(deps: RotationDeps): Rotation {
   const { parts } = deps;
   const store = createRotationStore(parts.db, deps.clock, parts.hub);
-  const orchestrator = createOrchestrator({ ...deps.source, store, meta: parts.meta, vault: parts.vault, clock: deps.clock, scheduler: deps.scheduler, random: deps.random, audit: deps.audit, events: parts.events, push: deps.push, ...(deps.checkpoint === undefined ? {} : { checkpoint: deps.checkpoint }), ...(deps.federation === undefined ? {} : { federation: deps.federation }) });
+  const ledgers = createDeletionStore(parts.db, deps.clock, parts.hub);
+  /** KBOX-62: a key being deleted takes no other action: every pending approval and paste task naming it expires. */
+  const expireNaming = (keyref: string): void => {
+    deps.approvalRecords.expireNaming(keyref);
+    paste.expireNaming(keyref);
+  };
+  const deletionDriver = createDeletionDriver({ store, ledgers, source: deps.source, vault: parts.vault, audit: deps.audit, events: parts.events, push: deps.push, clock: deps.clock, approvals: deps.approvalRecords, expireNaming });
+  const orchestrator = createOrchestrator({ ...deps.source, store, meta: parts.meta, vault: parts.vault, clock: deps.clock, scheduler: deps.scheduler, random: deps.random, audit: deps.audit, events: parts.events, push: deps.push, deletion: deletionDriver, ...(deps.checkpoint === undefined ? {} : { checkpoint: deps.checkpoint }), ...(deps.federation === undefined ? {} : { federation: deps.federation }) });
   const reconciler = createReconciler({ ...deps.source, store, audit: deps.audit, events: parts.events, clock: deps.clock, orchestrator });
   const paste = createPaste({ db: parts.db, approvers: deps.approvers, clock: deps.clock, random: deps.random, audit: deps.audit, events: parts.events, push: deps.push, meta: parts.meta, source: deps.source, orchestrator, store });
+  const deletion = createKeyDelete({ store, ledgers, source: deps.source, vault: parts.vault, meta: parts.meta, approvals: deps.approvalRecords, expireNaming, orchestrator, audit: deps.audit, clock: deps.clock, random: deps.random, ...(deps.checkpoint === undefined ? {} : { checkpoint: deps.checkpoint }) });
   const delivery = { store, vault: parts.vault, audit: deps.audit, events: parts.events, clock: deps.clock };
   const routes = [
     ...keyRoutes({ store, meta: parts.meta, orchestrator, approvals: deps.approvals, paste, source: deps.source, random: deps.random }),
@@ -96,6 +112,7 @@ export function openRotation(deps: RotationDeps): Rotation {
   const rotatesByPaste = (key: Pick<KeyHead, 'platform' | 'keyref' | 'class'>): boolean => pasteRotation(deps.source, key);
 
   const executors: Rotation['executors'] = {
+    delete_key: deletion.executor,
     add_key: async (a) => {
       const action = a.action;
       if (action.kind !== 'add_key') return { result: 'failed', reason: 'wrong_kind' };
@@ -170,6 +187,9 @@ export function openRotation(deps: RotationDeps): Rotation {
     refused.add(pair);
   };
 
+  /** KBOX-62, KBOX-52: a key being deleted, or with a delete waiting for the owner, is skipped by the tick and takes no staggering day. */
+  const heldForDeletion = (keyref: string, waiting: ReadonlySet<string>): boolean => ledgers.isOpen(keyref) || waiting.has(slotOf({ kind: 'delete_key', keyref }));
+
   const tickKey = (key: KeyHead, now: number, due: ReadonlyMap<string, number>, waiting: ReadonlySet<string>): void => {
     const slot = slotOf({ kind: 'rotate_key', keyref: key.keyref });
     const pending = waiting.has(slot) || paste.hasPending(slot);
@@ -203,9 +223,9 @@ export function openRotation(deps: RotationDeps): Rotation {
     scheduled('tick', 'tick_failed', () => deps.approvals.sweep());
     scheduled('tick', 'tick_failed', () => {
       const now = deps.clock.now();
-      const keys = store.keys();
-      const due = dueDates(keys.map((k) => ({ keyref: k.keyref, class: k.class, rotateEveryDays: k.rotateEveryDays, graceHours: k.graceHours, lastRotatedAt: k.rotatedAt, expiresAt: k.expiresAt, manual: false })));
       const waiting = new Set(parts.meta.snapshot().approvals.map((a) => a.slot));
+      const keys = store.keys().filter((k) => !heldForDeletion(k.keyref, waiting));
+      const due = dueDates(keys.map((k) => ({ keyref: k.keyref, class: k.class, rotateEveryDays: k.rotateEveryDays, graceHours: k.graceHours, lastRotatedAt: k.rotatedAt, expiresAt: k.expiresAt, manual: false })));
       for (const key of keys) scheduled(key.keyref, 'tick_failed', () => tickKey(key, now, due, waiting));
     });
     scheduled('tick', 'tick_failed', () => noticeStaleDeliveries(delivery));
@@ -232,6 +252,7 @@ export function openRotation(deps: RotationDeps): Rotation {
     orchestrator,
     reconciler,
     paste,
+    deletion,
     routes,
     executors,
     tick,

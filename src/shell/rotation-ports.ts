@@ -38,6 +38,17 @@ export interface PlatformKit {
    * (`kitFor`) holds only it, its shape and its class; every other key's kit leaves it out.
    */
   readonly boxKey?: BoxMadeKey;
+  /**
+   * KBOX-62: the revoked evidence that counts (the entry's `revokedEvidence` whose probe is proven and whose call exists): the verifier's
+   * statuses that mean revoked, and whether a complete listing proves it. None: a deletion cannot be confirmed on this platform.
+   */
+  readonly revoked?: RevokedProof;
+}
+
+/** KBOX-62: what proves a generation revoked on a platform. */
+export interface RevokedProof {
+  readonly statuses?: readonly number[];
+  readonly lister?: true;
 }
 
 /** A stored or requested key as the per-key kit is chosen for it (KBOX-55): its platform and its reference. */
@@ -188,7 +199,10 @@ export function tryLend(vault: Pick<Vault, 'lend'>, keyref: string, gen: number)
  * new value and before its receipt (`taken`), after a redeploy started and before it is ready (`redeployed`), after a rollback removed the
  * new value from a destination (`removed`), after each step is persisted.
  */
-export type Point = 'issued' | 'stored' | 'pushed' | 'receipt' | 'taken' | 'redeployed' | 'removed' | Step;
+export type Point = 'issued' | 'stored' | 'pushed' | 'receipt' | 'taken' | 'redeployed' | 'removed' | Step | DeletePoint;
+
+/** KBOX-62: where a deletion may be stopped: after its open, its end calls, its first verdict, its confirmation, its vault loop and its erase. */
+export type DeletePoint = 'delete_opened' | 'delete_end_called' | 'delete_dead_seen' | 'delete_confirmed' | 'delete_vault_retired' | 'delete_erased';
 
 export interface PlatformSource {
   /** The adapters of a platform id, or undefined when none is registered: what a request for a new key (`add_key`, `POST /api/keys`) asks. */
@@ -206,6 +220,11 @@ export interface PlatformSource {
    * stored location (not only by the KBOX-15 floor), its current generation lendable. Reconcile lists the platform once per row.
    */
   masters(platform: PlatformId): readonly MasterRow[];
+  /**
+   * KBOX-62: the keyref of the one master `master` would choose for a key here, else undefined. Absent on a source that cannot tell: a deletion
+   * then refuses any master-class key as `master_in_use` (fail closed).
+   */
+  masterKeyrefOf?(platform: PlatformId, at: KeyLocation, items: readonly string[]): string | undefined;
 }
 
 /** The master chosen for a key, or why there is none to choose (KBOX-57). */

@@ -9,7 +9,7 @@ import { adapterKindOf } from '../pure/destination-kind.ts';
 import { covers } from '../pure/location.ts';
 import { classifierOf } from '../pure/platform-shape.ts';
 import { kitFor, tryLend } from './rotation-ports.ts';
-import type { MasterResult, MasterRow, PlatformKit, PlatformSource } from './rotation-ports.ts';
+import type { MasterResult, MasterRow, PlatformKit, PlatformSource, RevokedProof } from './rotation-ports.ts';
 import type { KeyInfo } from './rotation-store.ts';
 
 export interface PlatformSourceDeps {
@@ -18,6 +18,22 @@ export interface PlatformSourceDeps {
   readonly vault: Pick<Vault, 'lend'>;
   /** A key row's stored scope items and location (`readKeyInfo` over meta.db): what decides whether a master row serves a key. */
   readonly keyInfo: (keyref: string) => Pick<KeyInfo, 'scopeItems' | 'location'> | undefined;
+  /** KBOX-62: the keyrefs with an open deletion; none is a master candidate. Absent: no key is being deleted. */
+  readonly deleting?: () => ReadonlySet<string>;
+}
+
+/**
+ * KBOX-62: the entry's revoked evidence that counts: a part whose probe the entry no longer lists as unverified, and whose call the entry has
+ * (`answerStatus` for the statuses, a lister for the listing). None counts: undefined.
+ */
+function revokedOf(entry: PlatformEntry): RevokedProof | undefined {
+  const declared = entry.revokedEvidence;
+  if (declared === undefined) return undefined;
+  const proven = (probe: string): boolean => !entry.unverified.includes(probe);
+  const statuses = declared.verifier !== undefined && entry.verifier?.answerStatus !== undefined && proven(declared.verifier.probe) ? declared.verifier.statuses : undefined;
+  const lister = declared.lister !== undefined && entry.lister !== undefined && proven(declared.lister.probe);
+  if (statuses === undefined && !lister) return undefined;
+  return { ...(statuses === undefined ? {} : { statuses }), ...(lister ? { lister: true as const } : {}) };
 }
 
 const kitOf = (entry: PlatformEntry): PlatformKit => ({
@@ -32,11 +48,19 @@ const kitOf = (entry: PlatformEntry): PlatformKit => ({
   ...(entry.retirer === undefined ? {} : { retirer: entry.retirer }),
   ...(entry.verifyHints === undefined ? {} : { verifyHints: entry.verifyHints }),
   ...(entry.boxKey === undefined ? {} : { boxKey: entry.boxKey }),
+  ...revokedPart(entry),
 });
+
+/** The kit's `revoked` member, present only when some evidence counts. */
+const revokedPart = (entry: PlatformEntry): Pick<PlatformKit, 'revoked'> => {
+  const revoked = revokedOf(entry);
+  return revoked === undefined ? {} : { revoked };
+};
 
 /** A candidate master row with the scope items its authority is read from. */
 interface Candidate extends MasterRow {
   readonly items: readonly string[];
+  readonly keyref: string;
 }
 
 /** The distinct items with this prefix, in one order: what a master and a key must share for each `masterItems` prefix. */
@@ -57,17 +81,25 @@ export function createPlatformSource(deps: PlatformSourceDeps): PlatformSource {
    * Vercel project token, is none); a current generation the vault lends (a failed create leaves its row). A row without a stored record, or
    * whose kit has no registered classification, has none.
    */
-  const candidates = (platform: PlatformId): readonly Candidate[] =>
-    deps.meta
+  const candidates = (platform: PlatformId): readonly Candidate[] => {
+    const deleting = deps.deleting?.() ?? new Set<string>();
+    return deps.meta
       .snapshot()
-      .keys.filter((k) => k.class === 'master' && k.platform === platform)
+      .keys.filter((k) => k.class === 'master' && k.platform === platform && !deleting.has(k.keyref))
       .flatMap((row) => {
         const classify = classifierOf(kitFor({ platform: platformKit }, { platform, keyref: row.keyref }));
         const info = deps.keyInfo(row.keyref);
         if (classify === undefined || info === undefined || classify({ items: info.scopeItems }, info.location) !== 'master') return [];
         const lent = tryLend(deps.vault, row.keyref, row.gen_current);
-        return lent.ok ? [{ at: info.location, items: info.scopeItems, value: lent.value }] : [];
+        return lent.ok ? [{ at: info.location, items: info.scopeItems, value: lent.value, keyref: row.keyref }] : [];
       });
+  };
+
+  /** KBOX-57: the candidates that serve a key here: covering its location and sharing each `masterItems` prefix's items. */
+  const serving = (platform: PlatformId, at: KeyLocation, items: readonly string[]): readonly Candidate[] => {
+    const prefixes = entryOf(platform)?.masterItems ?? [];
+    return candidates(platform).filter((c) => covers(c.at, at) && prefixes.every((p) => sameItems(itemsWith(c.items, p), itemsWith(items, p))));
+  };
 
   return {
     platform: platformKit,
@@ -78,13 +110,15 @@ export function createPlatformSource(deps: PlatformSourceDeps): PlatformSource {
     },
     // KBOX-57: by platform and stored location (plus the entry's masterItems), never by `projects` or row order; two are refused, never guessed.
     master: (platform: PlatformId, at: KeyLocation, items: readonly string[]): MasterResult => {
-      const prefixes = entryOf(platform)?.masterItems ?? [];
-      const serving = candidates(platform).filter((c) => covers(c.at, at) && prefixes.every((p) => sameItems(itemsWith(c.items, p), itemsWith(items, p))));
-      const [only, second] = serving;
+      const [only, second] = serving(platform, at, items);
       if (only === undefined) return { ok: false, code: 'no_master' };
       if (second !== undefined) return { ok: false, code: 'master_ambiguous' };
       return { ok: true, value: only.value };
     },
     masters: (platform) => candidates(platform).map(({ at, items, value }) => ({ at, items, value })),
+    masterKeyrefOf: (platform, at, items) => {
+      const [only, second] = serving(platform, at, items);
+      return second === undefined ? only?.keyref : undefined;
+    },
   };
 }

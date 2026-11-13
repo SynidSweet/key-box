@@ -38,6 +38,7 @@ import { createTrustInstaller } from './shell/trust-installer.ts';
 import { createUpdater } from './shell/updater.ts';
 import type { Executor } from './shell/approvals.ts';
 import { createPlatformSource } from './shell/platform-source.ts';
+import { deletingKeyrefs, isDeleting } from './shell/deletion-store.ts';
 import { openRotation } from './shell/rotation.ts';
 import { createRotationStore, readKeyInfo } from './shell/rotation-store.ts';
 import { createAllowRuleActions, createKeyActions } from './shell/key-executors.ts';
@@ -181,7 +182,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   const privateStore = openPrivateDatabase(join(config.stateDir, 'private.db'), journal);
   // The registry's view for each stored key (KBOX-55: the box-made key's kit is its own): the share file reads it; rotation is handed the
   // runtime's source when a test passes one.
-  const registrySource = createPlatformSource({ registry, meta: parts.meta, vault: parts.vault, keyInfo: storedRecord });
+  const registrySource = createPlatformSource({ registry, meta: parts.meta, vault: parts.vault, keyInfo: storedRecord, deleting: () => deletingKeyrefs(parts.db) });
   let approve: ReturnType<typeof openApproveCore> | undefined;
   let idle: IdleWatch | undefined;
   let rotation: Rotation | undefined;
@@ -214,7 +215,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
     const wordlist = parseWordlist(readFileSync(new URL('./data/wordlist.txt', import.meta.url), 'utf8'));
     if (runtime.proc !== undefined) idle = createIdleWatch({ files: runtime.proc, clock, push, linkMbps: linkMbps(), notifier: { notice: journal } });
     // Rotation needs the approvals and approvers that need its executors: the executors reach it once it is open (an approval is decided long after start).
-    const viaRotation = (kind: 'rotate_key' | 'add_key'): Executor => (approval) => {
+    const viaRotation = (kind: 'rotate_key' | 'add_key' | 'delete_key'): Executor => (approval) => {
       const executor = rotation?.executors[kind];
       if (executor === undefined) throw new RangeError('rotation is not open');
       return executor(approval);
@@ -232,6 +233,9 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
       keyActions.precheck(action);
       allowRules.precheck(action);
       vercelOps.precheck(action);
+      // KBOX-62: a delete's one check, and every other kind naming a key being deleted; rotation is open before anything is served.
+      if (rotation === undefined) throw new RangeError('rotation is not open');
+      rotation.deletion.precheck(action);
       await checks.atProposal(action);
     };
     approve = openApproveCore({
@@ -245,14 +249,16 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
       wordlist,
       vet: vetAction(registry),
       refuseUnwired: true,
-      executors: { install_update: updater.executor, rotate_key: viaRotation('rotate_key'), add_key: viaRotation('add_key'), ...keyActions.executors, set_allow_rules: allowRules.executor, ...vercelOps.executors },
+      executors: { install_update: updater.executor, rotate_key: viaRotation('rotate_key'), add_key: viaRotation('add_key'), delete_key: viaRotation('delete_key'), ...keyActions.executors, set_allow_rules: allowRules.executor, ...vercelOps.executors },
       updateChanges: (action) => updater.changes(action),
-      pageFacts: keyActions.pageFacts,
+      pageFacts: (action) => ({ ...keyActions.pageFacts(action), ...(rotation?.deletion.pageFacts(action) ?? {}) }),
       precheck,
     });
     vercelPages = vercelRoutes({ ops: vercelOps, approvals: approve.approvals, precheck });
-    const opened = openRotation({ parts, approvals: approve.approvals, approvers: approve.approvers, push, clock, scheduler, random, audit: parts.audit, source, ...(identity === undefined ? {} : { federation: { identity, minted } }) });
+    const opened = openRotation({ parts, approvals: approve.approvals, approvalRecords: approve.approvals, approvers: approve.approvers, push, clock, scheduler, random, audit: parts.audit, source, ...(identity === undefined ? {} : { federation: { identity, minted } }) });
     rotation = opened;
+    // KBOX-62: what a crash or the release before left of a deletion is recorded before rotation runs and before anything is served.
+    opened.deletion.settle();
     provedNow = (keyref) => {
       const current = opened.store.key(keyref)?.genCurrent;
       if (current !== undefined && opened.store.gen(keyref, current) !== undefined) opened.store.markProved(keyref, current, clock.now());
@@ -296,7 +302,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   });
   await server.listen(config.socket);
   const lend = createLendServer(
-    createLendHandler({ meta: parts.meta, tokens: approve?.tokens.tokenStore ?? parts.meta, vault: parts.vault, audit: parts.audit, events: parts.events, registry, shapes: loadCredentialShapes(), clock, minted, journal, locationOf: (keyref) => readKeyInfo(parts.db, keyref)?.location }),
+    createLendHandler({ meta: parts.meta, tokens: approve?.tokens.tokenStore ?? parts.meta, vault: parts.vault, audit: parts.audit, events: parts.events, registry, shapes: loadCredentialShapes(), clock, minted, journal, locationOf: (keyref) => readKeyInfo(parts.db, keyref)?.location, deleting: (keyref) => isDeleting(parts.db, keyref) }),
     journal,
   );
   if (config.lendSocket === undefined) journal('no_lend_socket');

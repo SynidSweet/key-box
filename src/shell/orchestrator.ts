@@ -23,6 +23,7 @@ import { sameLocation } from '../pure/location.ts';
 import { ownerEndsLine } from '../pure/words.ts';
 import { afterProof, intentName, nextStep, retryDelayMs } from '../pure/rotation-machine.ts';
 import type { KeyMachine, ProofVerdict, Step } from '../pure/rotation-machine.ts';
+import type { DeletionDriver } from './delete-run.ts';
 import { enderOf, revokeAndConfirm } from './revoke-confirm.ts';
 import type { Ender } from './revoke-confirm.ts';
 import { isPasteSource, kindOfStored, kitFor, overlapOf, setterOf, storedPlacement, tryLend, verifierFor, verifyTargetOf } from './rotation-ports.ts';
@@ -80,6 +81,8 @@ export interface OrchestratorDeps extends PlatformSource {
   readonly federation?: Federation;
   /** Where a test stops the process; production passes none. */
   readonly checkpoint?: (point: Point) => void | Promise<void>;
+  /** KBOX-62: what a step of a deletion's run (origin `delete`) does; none: such a run throws (`internal`) and is retried. */
+  readonly deletion?: DeletionDriver;
 }
 
 export interface Orchestrator {
@@ -104,6 +107,8 @@ export interface Orchestrator {
   retake(runId: string): RunRow;
   /** True while this process works on a run of the key: reconcile leaves it alone. */
   isLeased(keyref: string): boolean;
+  /** KBOX-62: works on a run opened elsewhere (a deletion's) in the background, as `start` does its own. */
+  launch(runId: string): void;
   /** Resolves when every run this process works on has finished or is waiting for a clock. */
   idle(): Promise<void>;
   /**
@@ -252,6 +257,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   const machineOf = (kit: PlatformKit | undefined): KeyMachine => ({ overlap: overlapOf(kit), boxMade: kit?.boxKey !== undefined });
 
   async function step(run: RunRow): Promise<Next> {
+    if (run.origin === 'delete') {
+      if (deps.deletion === undefined) throw new ApiError('internal');
+      return deps.deletion.step(run, { later: (ms) => later(run.runId, ms), point });
+    }
     const head = store.key(run.keyref);
     const info = store.keyInfo(run.keyref);
     const kit = head === undefined ? undefined : kitFor(deps, head);
@@ -578,13 +587,15 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   }
 
   /**
-   * The run's one `rotation.old_key_still_on` notice, recorded before it goes out. A create run has no old key to keep on, so it sends none.
+   * The run's one `rotation.old_key_still_on` notice, recorded before it goes out. A create run has no old key to keep on, so it sends none; a
+   * deletion's run (KBOX-62) sends it for the key's current generation, which it was ending when its step threw.
    * `ownerEnds` is the key's head when the owner must end the old key: an admin or master key then also sends the phone the words (KBOX-17).
    */
   function noticeStillOn(run: RunRow, ownerEnds?: KeyHead): void {
-    if (run.stillOnNotified || run.genOld === 0) return;
+    const deleting = run.origin === 'delete';
+    if (run.stillOnNotified || (run.genOld === 0 && !deleting)) return;
     store.update(run.runId, { stillOnNotified: true });
-    deps.events.append('rotation.old_key_still_on', { run_id: run.runId, keyref: run.keyref, gen: run.genOld });
+    deps.events.append('rotation.old_key_still_on', { run_id: run.runId, keyref: run.keyref, gen: deleting ? run.genNew : run.genOld });
     if (ownerEnds !== undefined && ownerEnds.class !== 'ordinary') deps.push.send({ title: ownerEndsLine(ownerEnds.platform), kind: 'rotation_owner_ends' });
   }
 
@@ -984,6 +995,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       return next;
     },
     isLeased: (keyref) => leased.has(keyref),
+    launch,
     idle,
     stop() {
       stopped = true;

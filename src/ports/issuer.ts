@@ -113,6 +113,11 @@ export interface Verifier {
    * a class. Read only through `verifierFor` (src/shell/rotation-ports.ts).
    */
   appliesTo?(scope: Scope, at: KeyLocation): boolean;
+  /**
+   * KBOX-62: the HTTP status the platform answered the same read call with; throws when no answer came. Only an entry's `revokedEvidence`
+   * gives a status meaning ("revoked"); `verify`'s own mapping is not that evidence. Read only through `verifierFor`.
+   */
+  answerStatus?(key: Lent, target: VerifyTarget): Promise<number>;
 }
 
 export interface PasteRequest {

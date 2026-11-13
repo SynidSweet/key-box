@@ -95,6 +95,8 @@ export interface Paste {
   view(id: string, cookie: string | undefined): PasteView;
   /** Whether a task waits in this slot (the scheduler opens none beside it). */
   hasPending(slot: string): boolean;
+  /** KBOX-62: expires every pending task naming the key (a rotation by paste of a key being deleted), each as its own expiry writes it. */
+  expireNaming(keyref: string): void;
   /**
    * When the box's latest task in this slot expired unanswered (KBOX-52): its own expiry time, the only time a task records for it. undefined
    * when that task is pending or was settled, or there is none; a token's task (a manual "replace now") never counts. A paste has no refusal.
@@ -115,12 +117,14 @@ export function createPaste(deps: PasteDeps): Paste {
   const row = (id: string): TaskRow | undefined => db.prepare("SELECT * FROM paste_tasks WHERE paste_id = ? AND status = 'pending'").get(id) as TaskRow | undefined;
   const actionOf = (r: TaskRow): PasteAction => JSON.parse(r.action_json) as PasteAction;
 
-  const sweep = (): void => {
-    const stale = db.prepare("SELECT paste_id FROM paste_tasks WHERE status = 'pending' AND expires_at <= ?").all(now()) as unknown as { paste_id: string }[];
+  const expire = (stale: readonly { readonly paste_id: string }[]): void => {
     for (const { paste_id } of stale) {
       inTransaction(db, () => void db.prepare("UPDATE paste_tasks SET status = 'expired' WHERE paste_id = ?").run(paste_id));
       deps.events.append('approval.decided', { approval_id: paste_id, decision: 'expired' });
     }
+  };
+  const sweep = (): void => {
+    expire(db.prepare("SELECT paste_id FROM paste_tasks WHERE status = 'pending' AND expires_at <= ?").all(now()) as unknown as { paste_id: string }[]);
   };
   const viewer = (cookie: string | undefined): string => {
     const id = deps.approvers.viewer(cookie);
@@ -255,6 +259,11 @@ export function createPaste(deps: PasteDeps): Paste {
         nonce_b64: b64u(nonce),
         expires_at: r.expires_at,
       };
+    },
+
+    expireNaming(keyref) {
+      const pending = db.prepare("SELECT * FROM paste_tasks WHERE status = 'pending'").all() as unknown as TaskRow[];
+      expire(pending.filter((r) => { const action = actionOf(r); return action.kind === 'rotate_key' && action.keyref === keyref; }));
     },
 
     hasPending(slot) {

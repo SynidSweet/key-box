@@ -73,6 +73,11 @@ export interface MetaSnapshot {
   readonly approvals: readonly MetaApproval[];
 }
 
+/** KBOX-30, KBOX-62: what `GET /api/meta` shows: the snapshot, with `deleting` as the status of a key with an open deletion (computed, never stored). */
+export interface ControlSnapshot extends Omit<MetaSnapshot, 'keys'> {
+  readonly keys: readonly (Omit<MetaKey, 'status'> & { readonly status: KeyStatus | 'deleting' })[];
+}
+
 export interface NewMachine {
   readonly label: string;
   readonly scope: TokenScope;
@@ -101,6 +106,8 @@ export interface MetaStore {
   announceShare(version: number): void;
   /** Everything GET /api/meta shows, read in one transaction, with the event cursor of that same moment. */
   snapshot(): MetaSnapshot;
+  /** The snapshot as `GET /api/meta` shows it, read in the same one transaction (KBOX-62: `deleting`). */
+  controlSnapshot(): ControlSnapshot;
   putKey(key: KeyRow): void;
   putDestination(keyref: string, destination: MetaDestination): void;
   putGrant(keyref: string, machine: string): void;

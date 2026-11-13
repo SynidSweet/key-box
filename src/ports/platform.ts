@@ -131,8 +131,20 @@ export interface PlatformEntry {
   readonly operations?: VercelOperations;
   /** KBOX-26: whether a team setting and its value pass the closed list and the setting's value parser; the proposal asks it before an approval opens. */
   readonly vetSetting?: (setting: string, value: string) => 'ok' | SettingRefusal;
+  /**
+   * KBOX-62: what a probe proved means "revoked" at this platform, the only evidence a deletion erases on. `verifier.statuses`: the answer
+   * statuses of `Verifier.answerStatus` that mean revoked; `lister`: a complete listing at the key's location that shows its id absent or
+   * disabled. Each part counts only while `unverified` does not name its probe. None: no deletion can be confirmed (`cannot_confirm`).
+   */
+  readonly revokedEvidence?: RevokedEvidence;
   /** The probe ids (KBOX-42) that `docs/probes/<id>.md` still marks STILL UNVERIFIED. */
   readonly unverified: readonly string[];
+}
+
+/** KBOX-62: an entry's declared revoked evidence, each part with the probe (KBOX-42) that proved it. */
+export interface RevokedEvidence {
+  readonly verifier?: { readonly statuses: readonly number[]; readonly probe: string };
+  readonly lister?: { readonly probe: string };
 }
 
 /** KBOX-26: why a Vercel operation did not happen. The four names are the outcome of `setDomain` and `setTeamSetting`; names only, nothing of Vercel's answer. */

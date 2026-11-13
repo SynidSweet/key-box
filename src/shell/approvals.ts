@@ -54,7 +54,7 @@ export interface ApprovalsDeps {
   /** What an install_update changes against the running release, for its page (KBOX-6); the update unit counts it. */
   readonly updateChanges?: (action: Extract<Action, { readonly kind: 'install_update' }>) => UpdateChanges | undefined;
   /** What a page needs of the box's state that the action does not say (KBOX-60: where a demote lands, whether apps hold a key). */
-  readonly pageFacts?: (action: Action) => Pick<PageContext, 'fallsTo' | 'runtimeDestination'>;
+  readonly pageFacts?: (action: Action) => Pick<PageContext, 'fallsTo' | 'runtimeDestination' | 'deletion'>;
 }
 
 export interface Proposed {
@@ -100,8 +100,12 @@ export interface Approvals {
    * `failed` with reason `interrupted` and raises one `box.notice` (the approval list shows which one). It runs no executor: the state the approval saw may be gone.
    */
   interruptStranded(except: readonly ActionKind[]): void;
+  /** KBOX-60 F3 for one approval: recorded `failed`/`interrupted` with its one notice, only while it is approved with no result; whether it was. */
+  interruptOne(approvalId: string): boolean;
   /** Expires every pending proposal older than 14 days. */
   sweep(): void;
+  /** KBOX-62: expires every pending proposal naming the key, each as an expiry writes it (a key being deleted takes no other action). */
+  expireNaming(keyref: string): void;
 }
 
 interface Row {
@@ -163,10 +167,9 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
   const audit = (action: Parameters<Audit['append']>[0]['action'], subject: string, detail: Readonly<Record<string, string | number | boolean>>, actor?: string): void =>
     deps.audit.append({ action, subject, at: deps.clock.now(), detail, ...(actor === undefined ? {} : { actor }) });
 
-  const sweep = (): void => {
-    deps.approvers.expire();
+  /** Expires these pending approvals: each row, its `approval.decided` event and its audit row, as an expiry at its time writes them. */
+  const expire = (stale: readonly { readonly approval_id: string }[]): void => {
     const now = deps.clock.now();
-    const stale = db.prepare("SELECT approval_id FROM approvals WHERE status = 'pending' AND expires_at <= ?").all(now) as unknown as { approval_id: string }[];
     if (stale.length === 0) return;
     write(() => {
       for (const { approval_id } of stale) {
@@ -175,6 +178,16 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
       }
     });
     for (const { approval_id } of stale) audit('approval.decided', approval_id, { decision: 'expired' });
+  };
+  const sweep = (): void => {
+    deps.approvers.expire();
+    expire(db.prepare("SELECT approval_id FROM approvals WHERE status = 'pending' AND expires_at <= ?").all(deps.clock.now()) as unknown as { approval_id: string }[]);
+  };
+  const expireNaming = (keyref: string): void => {
+    expire(pendingRows().filter((r) => {
+      const action = actionOf(r);
+      return 'keyref' in action && action.keyref === keyref;
+    }));
   };
 
   const coverage = (action: Action): 'windowed' | 'anchored' | 'none' | null | undefined => ('keyref' in action ? deps.meta.coverageOf(action.keyref) : undefined);
@@ -242,7 +255,7 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
   };
 
   /** The facts a page shows beside the stored action: the new phone's fingerprint, an update's changes. */
-  const pageFacts = (action: Action): Pick<PageContext, 'fingerprint' | 'update' | 'fallsTo' | 'runtimeDestination'> => {
+  const pageFacts = (action: Action): Pick<PageContext, 'fingerprint' | 'update' | 'fallsTo' | 'runtimeDestination' | 'deletion'> => {
     if (action.kind === 'approver_add') return { fingerprint: deps.approvers.fingerprint(action) };
     const update = action.kind === 'install_update' ? deps.updateChanges?.(action) : undefined;
     return update === undefined ? (deps.pageFacts?.(action) ?? {}) : { update };
@@ -292,13 +305,18 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
     const stranded = db
       .prepare(`SELECT approval_id FROM approvals WHERE status = 'approved' AND result IS NULL ${except.length === 0 ? '' : `AND kind NOT IN (${marks})`} ORDER BY decided_at, approval_id`)
       .all(...except) as unknown as { approval_id: string }[];
-    for (const { approval_id } of stranded) {
-      write(() => {
-        recordResult(approval_id, 'failed', 'interrupted');
-        insertEvent(db, deps.clock.now(), 'box.notice', { code: 'approval_interrupted', text: 'approval interrupted' });
-      });
-      audit('approval.executed', approval_id, { result: 'failed', reason_code: 'interrupted' });
-    }
+    for (const { approval_id } of stranded) interruptOne(approval_id);
+  };
+  const interruptOne = (approvalId: string): boolean => {
+    const interrupted = write(() => {
+      const open = db.prepare("SELECT 1 AS one FROM approvals WHERE approval_id = ? AND status = 'approved' AND result IS NULL").get(approvalId) !== undefined;
+      if (!open) return false;
+      recordResult(approvalId, 'failed', 'interrupted');
+      insertEvent(db, deps.clock.now(), 'box.notice', { code: 'approval_interrupted', text: 'approval interrupted' });
+      return true;
+    });
+    if (interrupted) audit('approval.executed', approvalId, { result: 'failed', reason_code: 'interrupted' });
+    return interrupted;
   };
 
   const decide: Approvals['decide'] = async (approvalId, decision, proof) => {
@@ -339,7 +357,9 @@ export function createApprovals(deps: ApprovalsDeps): Approvals {
     decide,
     executed,
     sweep,
+    expireNaming,
     interruptStranded,
+    interruptOne,
     enrolStatus(tokenSha256) {
       sweep();
       if (db.prepare('SELECT 1 AS one FROM machines WHERE token_sha256 = ?').get(tokenSha256) !== undefined) return 'approved';

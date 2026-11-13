@@ -2,6 +2,7 @@
 // applies to the key (KBOX-58) rejecting the value (the vault still holds it), or, where no verifier applies or the vault no longer holds the value, a
 // complete listing of the key's recorded location showing the id absent or disabled; never the lister because a verifier that applies is unreachable.
 // One home for the new key's revoke on a failed run, the old key's revoke after the grace, and the orphan found by reconcile.
+import type { KeyKind } from '../ports/issuer.ts';
 import type { KeyLocation, Lent, PlatformId, PlatformKeyId } from '../ports/types.ts';
 import { confirmDead } from '../pure/rotation-machine.ts';
 import type { Evidence } from '../pure/rotation-machine.ts';
@@ -44,19 +45,65 @@ export const enderOf = (kit: PlatformKit, id: PlatformKeyId | null): Ender => (i
 
 /** Ends it where someone can (the issuer or the retirer, their answers and failures dropped) and confirms. True only when the old value is proven dead. */
 export async function revokeAndConfirm(target: RevokeTarget): Promise<boolean> {
+  await end(target);
+  return confirm(target);
+}
+
+/** Ends it where someone can: the issuer's revoke, else the retirer's retire; their answers and failures are dropped (only the evidence counts). */
+export async function end(target: RevokeTarget): Promise<void> {
   const { id, kit, value } = target;
   const { issuer, retirer } = kit;
   switch (enderOf(kit, id)) {
     case 'issuer':
       if (id !== null && issuer !== undefined) await settled(() => issuer.revoke(id, target.master));
-      break;
+      return;
     case 'retirer':
       if (retirer !== undefined && value !== undefined) await settled(() => retirer.retire(value, target.at, target.master));
-      break;
+      return;
     case 'owner':
-      break;
+      return;
   }
-  return confirm(target);
+}
+
+/**
+ * KBOX-62: how a deletion can prove a generation revoked, by the kit's proven evidence (`revoked`): the verifier when it applies to the key,
+ * answers statuses (`answerStatus`) and the vault holds the value; else a complete listing while the generation has a platform key id and the
+ * listing may be used (`listing`: never for a master's own current generation, whose value is what a listing needs); else none.
+ */
+export function revokedPath(kit: PlatformKit, key: KeyKind, id: PlatformKeyId | null, valueHeld: boolean, listing: boolean): 'verifier' | 'lister' | undefined {
+  const verifier = verifierFor(kit, key);
+  if (kit.revoked?.statuses !== undefined && verifier?.answerStatus !== undefined && valueHeld) return 'verifier';
+  if (kit.revoked?.lister === true && kit.lister !== undefined && id !== null && listing) return 'lister';
+  return undefined;
+}
+
+/**
+ * KBOX-62: whether the generation is proven revoked now, on proven evidence only: the verifier's answer status among the statuses a probe proved
+ * mean revoked (a 403, a 404, a network error or any other answer is "not confirmed"), else a complete listing of its recorded location without
+ * its id (or with it disabled). The path is `revokedPath`'s; with none nothing is confirmed.
+ */
+export async function confirmRevoked(target: RevokeTarget, listing: boolean): Promise<boolean> {
+  const { kit, id, value } = target;
+  const key = { scopeItems: target.scopeItems, at: target.at };
+  switch (revokedPath(kit, key, id, value !== undefined, listing)) {
+    case 'verifier': {
+      const verifier = verifierFor(kit, key);
+      const statuses = kit.revoked?.statuses ?? [];
+      if (verifier?.answerStatus === undefined || value === undefined) return false;
+      const ask = verifier.answerStatus.bind(verifier);
+      const asked = verifyTargetOf(verifier, { platform: target.platform, at: target.at, ...(target.hint === undefined ? {} : { hint: target.hint }) }, target.master);
+      const answer = await settled(() => ask(value, asked));
+      return answer.ok && statuses.includes(answer.value);
+    }
+    case 'lister': {
+      const lister = kit.lister;
+      if (lister === undefined || id === null) return false;
+      const listed = await settled(() => lister.listAt(target.at, target.master));
+      return confirmDead({ by: 'lister', id, at: target.at, listing: listed.ok ? listed.value : undefined });
+    }
+    case undefined:
+      return false;
+  }
 }
 
 /** The evidence after a revoke: what the platform says now, not what the revoke call answered. */

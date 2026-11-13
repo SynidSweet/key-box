@@ -150,7 +150,7 @@ export function parseUpstreamJson(textOf: string): unknown {
 
 // --- events (KBOX-31): the closed list of kinds and their data --------------------------------------------------------
 
-export const BOX_NOTICE_TEXTS = ['credential withheld', 'idle near', 'orphan key found', 'delivery unacknowledged', 'rotation skipped', 'grant suspended', 'approval interrupted'] as const;
+export const BOX_NOTICE_TEXTS = ['credential withheld', 'idle near', 'orphan key found', 'delivery unacknowledged', 'rotation skipped', 'grant suspended', 'approval interrupted', 'key deletion waiting'] as const;
 
 export const EVENT_SCHEMAS = {
   'approval.opened': { approval_id: text(NAME), approval_kind: text(CODE), title: text(TITLE), slot: text(NAME), revision: int() },
@@ -233,6 +233,13 @@ export const AUDIT_SCHEMAS = {
   /** KBOX-51 step 10: not proven dead yet; `reason` is `owner_ends` when nobody but the owner can end the old key (no platform key id, no retirer). */
   'rotation.revoke_unconfirmed': { run_id: text(NAME), gen: int(0), attempt: int(1), reason: optional(oneOf('owner_ends')) },
   'rotation.drive_failed': { run_id: text(NAME), code: text(CODE) },
+  // delete-key (KBOX-62): the row's ref is the keyref.
+  /** An approved delete opened its run; how many generations were live, and the rotation run it superseded, if any. */
+  'key.delete_started': { run_id: text(NAME), live_gens: int(), superseded_run: optional(text(NAME)) },
+  /** The first time a deletion could not prove every generation of its batch dead; who ends the weakest of its live generations. */
+  'key.delete_unconfirmed': { run_id: text(NAME), ender: oneOf('issuer', 'retirer', 'owner') },
+  /** The key's rows and vault files are erased; its platform, how many generation rows and destinations went. */
+  'key.deleted': { run_id: text(NAME), platform: text(CODE), gens: int(), destinations: int() },
   /** KBOX-57: the schedule skipped a due key whose stored location its entry now refuses; the refusal code, once per key and code. */
   'rotation.refused': { code: text(CODE) },
   'delivery.acked': {},

@@ -45,7 +45,7 @@ export function controlRoutes(deps: ControlDeps): Route[] {
       handle: () => ({ raw: { type: 'application/json; charset=utf-8', bytes: bootstrapFacts(deps.bootstrapFactsPath) } }),
     }),
 
-    route({ method: 'GET', path: '/api/meta', surface: 'api', scope: 'control', handle: () => ({ json: deps.meta.snapshot() }) }),
+    route({ method: 'GET', path: '/api/meta', surface: 'api', scope: 'control', handle: () => ({ json: deps.meta.controlSnapshot() }) }),
 
     route({
       method: 'GET',

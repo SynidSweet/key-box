@@ -91,7 +91,7 @@ function sentences(action: Action, ctx: PageContext): string[] {
         ...(action.location === undefined ? [] : [locationLine(action.location)]),
       ];
     case 'delete_key':
-      return [`Delete the key ${action.keyref} at its platform.`];
+      return [`Delete the key ${action.keyref} at its platform.`, ...deletionLines(ctx.deletion)];
     case 'rotate_key':
       return [`Change the key ${action.keyref} for a new one.`];
     case 'demote':
@@ -176,6 +176,48 @@ export interface PageContext {
   readonly fallsTo?: KeyClass;
   /** set_schedule (KBOX-60): the key has a destination the apps' runtime reads. */
   readonly runtimeDestination?: true;
+  /** delete_key (KBOX-62): what the deletion does; absent when the box could not tell (no such key). */
+  readonly deletion?: DeletionFacts;
+}
+
+/** KBOX-62: what a deletion of a stored key will do, as its page says it. */
+export interface DeletionFacts {
+  readonly platform: string;
+  /** Who ends its live generations: every one the box (`box`), any the owner (`owner`), or none is live (`none`). */
+  readonly ends: 'box' | 'owner' | 'none';
+  /** Where apps read it from (its destinations' targets, names only). */
+  readonly targets: readonly string[];
+  /** Machines hold grants of it. */
+  readonly grants: boolean;
+  /** A key change of it is open (in grace, or ending its old key). */
+  readonly midChange: boolean;
+}
+
+function deletionLines(facts: DeletionFacts | undefined): string[] {
+  if (facts === undefined) return [];
+  const ends = {
+    box: `The box ends it on ${facts.platform}, waits until it stops working, then erases its copy.`,
+    owner: `The box cannot end it on ${facts.platform} itself. You end it there; the box erases its copy once it stops working.`,
+    none: 'It no longer works anywhere; the box only erases its copy.',
+  }[facts.ends];
+  return [
+    ends,
+    ...(facts.targets.length === 0 ? [] : [`Apps that read it from ${facts.targets.join(', ')} stop working.`]),
+    ...(facts.grants ? ['Machines granted it lose relay use at once.'] : []),
+    ...(facts.midChange ? ['It is in the middle of a key change; the new key and the old one are both ended.'] : []),
+  ];
+}
+
+/**
+ * KBOX-62, KBOX-22: the deletion's pushes, names only: `end` asks the owner to end a key only they can end; `unconfirmed` says the box could
+ * not prove it ended yet. Never a value or a prefix.
+ */
+export function deletePush(which: 'end' | 'unconfirmed', name: string, platform: string): { readonly kind: 'delete_waiting'; readonly title: string } {
+  const title =
+    which === 'end'
+      ? `End the key ${name} on ${platform}; the box erases its copy once it stops working.`
+      : `The box could not end the key ${name} on ${platform} yet. End it there if you can; the box keeps checking.`;
+  return { kind: 'delete_waiting', title };
 }
 
 /** The approving phone compares this line with the new phone; without a fingerprint the page says not to approve. */

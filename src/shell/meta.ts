@@ -25,6 +25,7 @@ import { ApiError, WriteRefused } from '../pure/errors.ts';
 import { CODE, LABEL, NAME, NETWORK, TITLE, int, oneOf, optional, parseObject, text } from '../pure/schemas.ts';
 import type { Parsed } from '../pure/schemas.ts';
 import { inReadTransaction, inTransaction } from './db.ts';
+import { deletingKeyrefs, isDeleting } from './deletion-store.ts';
 import { insertEvent } from './events.ts';
 
 const KEY_SCHEMA = {
@@ -128,6 +129,12 @@ export function createMetaStore(db: DatabaseSync, clock: Clock, hub: EventSignal
     },
 
     snapshot: () => inReadTransaction(db, () => readSnapshot(db)),
+    controlSnapshot: () =>
+      inReadTransaction(db, () => {
+        const snapshot = readSnapshot(db);
+        const deleting = deletingKeyrefs(db);
+        return { ...snapshot, keys: snapshot.keys.map((k) => (deleting.has(k.keyref) ? { ...k, status: 'deleting' as const } : k)) };
+      }),
 
     shareState(): ShareState {
       const row = db.prepare('SELECT share_version, share_public_key_ed25519_b64 FROM box_info').get() as { share_version: number; share_public_key_ed25519_b64: string | null };
@@ -169,6 +176,8 @@ export function createMetaStore(db: DatabaseSync, clock: Clock, hub: EventSignal
       );
       if (key.projects.length > 64 || !key.projects.every((p) => NAME.test(p))) throw new WriteRefused();
       write(() => {
+        // KBOX-62: no upsert resurrects or rewrites a key being deleted.
+        if (isDeleting(db, k.keyref)) throw new ApiError('conflict', 'key_deleting');
         db.prepare(
           `INSERT INTO keys (keyref, platform, name, projects_json, class, status, gen_current, rotate_every_days, grace_hours, next_due_at, expires_at, coverage, last_use_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

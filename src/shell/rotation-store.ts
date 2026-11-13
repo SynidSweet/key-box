@@ -13,7 +13,7 @@ import type { MetaKey } from '../ports/meta.ts';
 import type { Step } from '../pure/rotation-machine.ts';
 
 export type RunState = Step | 'rolling_back' | 'done' | 'failed' | 'abandoned';
-export type RunOrigin = 'schedule' | 'owner' | 'agent' | 'approval' | 'paste' | 'create' | 'reconcile';
+export type RunOrigin = 'schedule' | 'owner' | 'agent' | 'approval' | 'paste' | 'create' | 'reconcile' | 'delete';
 export type GenStatus = 'pending' | 'current' | 'grace' | 'retired' | 'failed';
 
 /** `rotation_receipts.pushed`: the intent is written (the push may or may not have applied), the push applied, or the destination refused it (applied nothing). */

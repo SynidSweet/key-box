@@ -12,6 +12,21 @@ export const META_MIGRATIONS: readonly Migration[] = [
   ['ALTER TABLE rotation_keys ADD COLUMN verify_hint TEXT'],
   // 2: when an STS exchange signed with the generation first succeeded (KBOX-55: a box key is due only once proven).
   ['ALTER TABLE rotation_gens ADD COLUMN proved_at INTEGER'],
+  // 3: the deletion ledger (KBOX-62): it outlives the erase, so it names the key by text and holds no REFERENCES.
+  [
+    `CREATE TABLE key_deletions (
+      approval_id TEXT PRIMARY KEY,
+      keyref TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      run_id TEXT NOT NULL UNIQUE,
+      opened_at INTEGER NOT NULL,
+      notified INTEGER NOT NULL DEFAULT 0 CHECK (notified IN (0, 1)),
+      dead_seen_at INTEGER,
+      confirmed_at INTEGER,
+      outcome TEXT CHECK (outcome IS NULL OR outcome IN ('erased', 'abandoned')),
+      ended_at INTEGER
+    ) STRICT`,
+  ],
 ];
 
 /** The private database's. */

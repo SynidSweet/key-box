@@ -38,6 +38,8 @@ export interface LendCoreDeps {
   readonly journal: (code: string) => void;
   /** KBOX-57: the key's stored location (its rotation record), read at every resolve and lend; undefined when none is stored. */
   readonly locationOf: (keyref: string) => KeyLocation | undefined;
+  /** KBOX-62: whether the key has an open deletion: it is never lent, resolved or scanned, even with a grant row written behind the deletion. */
+  readonly deleting: (keyref: string) => boolean;
 }
 
 type Checked<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly code: LendRefusal };
@@ -59,10 +61,10 @@ export function createLendHandler(deps: LendCoreDeps): LendHandler {
     return record === undefined || record.revoked || record.scope !== 'relay' ? { ok: false, code: 'bad_token' } : { ok: true, value: record };
   };
 
-  /** The key, when it exists and is granted to the pass's machine. */
+  /** The key, when it exists, is granted to the pass's machine and is not being deleted. */
   const grantedKey = (record: TokenRecord, keyref: string): Checked<MetaKey> => {
     const key = deps.meta.snapshot().keys.find((k) => k.keyref === keyref);
-    return key !== undefined && key.grants.some((g) => g.machine === record.label) ? { ok: true, value: key } : { ok: false, code: 'forbidden' };
+    return key !== undefined && key.grants.some((g) => g.machine === record.label) && !deps.deleting(keyref) ? { ok: true, value: key } : { ok: false, code: 'forbidden' };
   };
 
   /**

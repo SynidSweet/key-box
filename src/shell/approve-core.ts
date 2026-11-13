@@ -53,9 +53,10 @@ export interface ApproveCore {
 
 /**
  * KBOX-60 F3: the kinds whose approval is picked up again by the unit that owns it: the updater resumes an `install_update`; a `rotate_key` or
- * `add_key` that opened its run resumes as a run. Every other kind is recorded `interrupted` if it was cut off, never executed again.
+ * `add_key` that opened its run resumes as a run; a `delete_key` is settled by its ledger (KBOX-62, the rotation unit's `deletion.settle`). Every
+ * other kind is recorded `interrupted` if it was cut off, never executed again.
  */
-const RESUMES_ITSELF: readonly ActionKind[] = ['install_update', 'rotate_key', 'add_key'];
+const RESUMES_ITSELF: readonly ActionKind[] = ['install_update', 'rotate_key', 'add_key', 'delete_key'];
 
 /** The meta destination row of an action's destination: where the key goes and who can read it there. */
 const metaDestination = (d: Destination): { kind: string; target: string; readable_by: 'api' | 'runtime' } => ({

@@ -1,5 +1,6 @@
 // KBOX-4: the vault on disk, one file per generation: <root>/<ref>/<gen>, mode 0600 in 0700 directories.
 import { chmodSync, closeSync, existsSync, fchmodSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeSync } from 'node:fs';
+import type { Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { VaultError, osErrorCode } from '../pure/errors.ts';
 import { makeLent } from '../pure/lent.ts';
@@ -101,8 +102,26 @@ export function createFileVault(root: string, ops: VaultFsOps = { rename: rename
         throw new VaultError('write_failed', osErrorCode(error));
       }
     },
+
+    generations(ref: KeyRef): readonly number[] {
+      const { dir } = place(ref, 1);
+      let entries: Dirent[];
+      try {
+        entries = readdirSync(dir, { withFileTypes: true });
+      } catch (error) {
+        if (osErrorCode(error) === 'ENOENT') return [];
+        throw new VaultError('read_failed', osErrorCode(error));
+      }
+      return entries
+        .filter((entry) => entry.isFile() && GENERATION_FILE.test(entry.name))
+        .map((entry) => Number(entry.name))
+        .sort((a, b) => a - b);
+    },
   };
 }
+
+/** A generation's file name: its number, no sign, no leading zero (a temp file starts with a dot). */
+const GENERATION_FILE = /^[1-9][0-9]{0,15}$/;
 
 const ORPHAN_TEMP = /^\.[0-9]+\.tmp-[0-9]+-[0-9]+$/;
 
