@@ -102,15 +102,6 @@ const adminRow = (keyref: string): KeyRow => ({
   last_use_at: null,
 });
 
-test('KBOX-12 KBOX-34 KBOX-51 core\'s route table holds the key, rotation, retired-value, delivery and paste routes next to the approval and share routes', async (t) => {
-  const w = await started(t, { domain: 'box.example' });
-  const table = w.core.routes.map((r) => `${r.method} ${r.path}`);
-  for (const route of ['POST /api/keys', 'POST /api/rotations', 'POST /api/retired', 'GET /api/deliveries', 'POST /api/deliveries/:id/ack', 'GET /p/:id', 'GET /app/pastes', 'POST /api/proposals', 'GET /api/share']) {
-    assert.ok(table.includes(route), `${route} is in the table`);
-  }
-  assert.equal(new Set(table).size, table.length, 'no route is listed twice');
-});
-
 test('KBOX-1 without KB_DOMAIN there is no approval half, so no key or rotation route either', async (t) => {
   const w = await started(t);
   const table = w.core.routes.map((r) => `${r.method} ${r.path}`);

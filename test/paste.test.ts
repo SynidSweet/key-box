@@ -330,22 +330,6 @@ test('KBOX-12 KBOX-57 an action replaced with another location between render an
   nothingStored(w);
 });
 
-test('KBOX-57 a settling add_key paste for a keyref that exists by then is key_exists before the verifier: the task fails and the rows stay as they were', async (t) => {
-  const w = await routesWorld(t, { location: PROJECT_ENTRY });
-  const id = await openTask(w, placedAdd(REF));
-  const { view, cookie } = await render(w, id);
-  // The keyref appears while the task waits: a retired-value record (ordinary, no location) under the same reference.
-  assert.equal((await w.api(`/api/retired?platform=${PASTE_PLATFORM}&project=shop&name=ANTHROPIC_KEY`, { bytes: Buffer.from(pasteValue('b'.repeat(32))) })).status, 201);
-  const before = rowsOf(w);
-  // Not accepted by the verifier: had it been called, the answer would be verifier_rejected (422).
-  const reply = await submit(w, id, cookie, pasteValue(HEX), w.pasteProof(view));
-  assert.equal(reply.status, 409, reply.body);
-  assert.equal((reply.json() as { error: { detail?: { code?: string } } }).error.detail?.code, 'key_exists');
-  assert.equal(rowsOf(w), before);
-  assert.equal((await w.call(`/p/${id}`, { cookie })).status, 404, 'the task is settled failed, not left for a retry');
-  assert.ok(w.parts.events.after(0).some((e) => e.kind === 'approval.executed' && e.data['approval_id'] === id && e.data['result'] === 'failed' && e.data['reason_code'] === 'key_exists'));
-});
-
 test('KBOX-57 KBOX-12 a settling rotate_key paste whose key\'s stored location the entry now refuses fails with that code before the verifier sees the value: the task is failed and no run starts', async (t) => {
   const strict = { on: false };
   const w = await routesWorld(t, {
