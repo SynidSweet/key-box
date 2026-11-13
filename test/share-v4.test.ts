@@ -249,7 +249,7 @@ test(`KBOX-33 no 32-byte window slot appears twice in a file, even where the sta
 
 // ---------------------------------------------------------------- 6. decoys are fresh
 
-test(`KBOX-33 decoy slots differ between two builds with the same salt and different randomness, while every real window slot is equal (seed ${seed})`, () => {
+test(`KBOX-33 decoy slots differ between two builds with the same salt and different randomness, while every real window slot is equal, and no byte of a decoy is fixed (seed ${seed})`, () => {
   const rng = seededRandom(seed + 4);
   const key = fakeKey(rng, 'DECOYS', 32);
   const salt = Buffer.from(rng.bytes(32));
@@ -258,7 +258,7 @@ test(`KBOX-33 decoy slots differ between two builds with the same salt and diffe
   assert.equal(b.salt.toString('hex'), salt.toString('hex'));
   const digest = windowSha256(salt);
   const forms = formsOf(key.core);
-  let decoys = 0;
+  const decoys: Buffer[] = [];
   for (const [index, form] of FORM_NAMES.entries()) {
     const text = forms[form];
     const [left, right] = [slotsOf(a.body.entries[index]), slotsOf(b.body.entries[index])];
@@ -266,12 +266,15 @@ test(`KBOX-33 decoy slots differ between two builds with the same salt and diffe
       const real = j + WINDOW <= text.length && left[j] === digest(Buffer.from(text.slice(j, j + WINDOW)));
       if (real) assert.equal(right[j], left[j], `${form} slot ${j}: a real window is the same under the same salt`);
       else {
-        decoys += 1;
+        decoys.push(Buffer.from(String(left[j]), 'hex'));
         assert.notEqual(right[j], left[j], `${form} slot ${j}: a decoy is drawn fresh`);
       }
     }
   }
-  assert.ok(decoys >= 7 * SLOTS - 7 * 20, `${decoys} decoys: a 32-character core fills at most 19 slots of a form`);
+  assert.ok(decoys.length >= 7 * SLOTS - 7 * 20, `${decoys.length} decoys: a 32-character core fills at most 19 slots of a form`);
+  // A digest is uniform in every byte; a decoy with a fixed byte (a zero tail from a short draw, a constant marker) would tell a
+  // reader which slots are decoys, and so the key's length.
+  for (let i = 0; i < SLOT_BYTES; i += 1) assert.ok(new Set(decoys.map((d) => d[i])).size > 1, `byte ${i} is the same in every decoy`);
 });
 
 // ---------------------------------------------------------------- the slot bound
