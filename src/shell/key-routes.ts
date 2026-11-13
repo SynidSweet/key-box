@@ -4,28 +4,23 @@ import type { MetaStore } from '../ports/meta.ts';
 import type { Random } from '../ports/random.ts';
 import type { Action, Destination } from '../pure/actions.ts';
 import { parseAction } from '../pure/actions.ts';
-import { classOf, keyrefOf, matchesShape } from '../pure/class.ts';
+import { keyrefOf } from '../pure/class.ts';
 import { namesHost } from '../pure/location.ts';
 import { ApiError } from '../pure/errors.ts';
-import { LABEL, NAME, parseQuery, text } from '../pure/schemas.ts';
+import { NAME } from '../pure/schemas.ts';
 import type { Parsed } from '../pure/schemas.ts';
 import type { Approvals } from './approvals.ts';
 import { parsedRoute, route } from './http.ts';
 import type { Route } from './http.ts';
-import { classifierOf, shapeOf } from '../pure/platform-shape.ts';
 import { keyConfigFor, newKeyOf, placedKey } from './new-key.ts';
 import type { AddKey, RotateKey } from './new-key.ts';
 import type { Orchestrator } from './orchestrator.ts';
 import type { Paste } from './paste.ts';
 import { isRecord, only } from './routes-approve.ts';
-import { kitFor, overlapOf, proposalRefusal, rotatesByPaste, verifierFor } from './rotation-ports.ts';
+import { overlapOf, proposalRefusal, rotatesByPaste, verifierFor } from './rotation-ports.ts';
 import type { PlatformSource } from './rotation-ports.ts';
 import type { DestinationRow, RotationStore } from './rotation-store.ts';
-import type { Vault } from '../ports/vault.ts';
-import type { Audit } from '../ports/audit.ts';
-import type { Clock } from '../ports/clock.ts';
 import type { KeyLocation } from '../ports/types.ts';
-import type { EventLog } from '../ports/events.ts';
 
 export interface KeyRouteDeps {
   readonly store: RotationStore;
@@ -34,16 +29,10 @@ export interface KeyRouteDeps {
   readonly approvals: Pick<Approvals, 'propose'>;
   readonly paste: Paste;
   readonly source: PlatformSource;
-  readonly vault: Vault;
-  readonly audit: Audit;
-  readonly events: EventLog;
-  readonly clock: Clock;
   readonly random: Random;
 }
 
 const ENV_KEY_NAME = /^[A-Z][A-Z0-9_]*$/;
-/** The retired hand-off's body bound: the same 64 KiB as every JSON body (http.ts). */
-const RETIRED_VALUE_LIMIT = 64 * 1024;
 const rejected =(code: string): ApiError => new ApiError('rejected', code);
 
 interface KeyRequest {
@@ -159,26 +148,10 @@ export function keyRoutes(deps: KeyRouteDeps): Route[] {
         return { status: 202, json: { approval_id: proposed.approval_id } };
       },
     }),
-
-    {
-      method: 'POST',
-      path: '/api/retired',
-      surface: 'api',
-      scope: 'control',
-      open: false,
-      takesBody: false,
-      // A retired key value as raw bytes (KBOX-34), bounded like any JSON body.
-      rawBody: { type: 'application/octet-stream', limit: RETIRED_VALUE_LIMIT },
-      run: ({ query, raw }) => {
-        const q = parseQuery({ platform: text(LABEL), project: text(NAME), name: text(ENV_KEY_NAME) }, query);
-        if (!q.ok || raw === undefined) throw new ApiError('bad_request');
-        return retire(deps, q.value, raw);
-      },
-    },
   ];
 }
 
-/** KBOX-34, KBOX-55: a request naming the platform and name of the box-made key, under any project (`POST /api/keys`, `POST /api/retired`), is `rejected` (`box_made`). */
+/** KBOX-34, KBOX-55: a request naming the platform and name of the box-made key, under any project (`POST /api/keys`), is `rejected` (`box_made`). */
 function refuseBoxMade(source: PlatformSource, platform: string, name: string): void {
   if (source.platform(platform)?.boxKey?.name === name) throw rejected('box_made');
 }
@@ -224,40 +197,3 @@ async function provenPlacement(source: PlatformSource, action: AddKey, at: KeyLo
   });
   if (seen === 'unseen') throw rejected('location_unknown');
 }
-
-/** Stores a retired value as a retired generation: never lent, never pushed; fingerprinted only when it passes the shape check (KBOX-34). */
-function retire(deps: KeyRouteDeps, q: { readonly platform: string; readonly project: string; readonly name: string }, bytes: Uint8Array): { readonly status: number; readonly json: unknown } {
-  const keyref = keyrefOf(q.platform, [q.project], q.name);
-  refuseBoxMade(deps.source, q.platform, q.name);
-  // KBOX-55: the retired value is of this key, so its class and shape are its own kit's.
-  const kit = kitFor(deps.source, { platform: q.platform, keyref });
-  const classify = classifierOf(kit);
-  const shape = shapeOf(kit);
-  if (classify === undefined || shape === undefined) throw rejected('unknown_platform');
-  const { store } = deps;
-  if (store.key(keyref) === undefined) {
-    deps.meta.putKey({
-      keyref,
-      platform: q.platform,
-      name: q.name,
-      projects: [q.project],
-      class: classOf(classify({ items: [] }, {}), undefined),
-      status: 'works',
-      gen_current: 1,
-      schedule: { rotate_every_days: 90, grace_hours: 1, next_due_at: null, expires_at: null },
-      coverage: null,
-      last_use_at: null,
-    });
-    store.putKeyInfo(keyref, { scopeItems: [], location: {}, rotatedAt: deps.clock.now(), markAdmin: false });
-  }
-  const gen = store.topGen(keyref) + 1;
-  deps.vault.put(keyref, gen, bytes);
-  // KBOX-57: a generation of a key records the key's stored location (the one a new record has just been given is empty).
-  store.putGen({ keyref, gen, status: 'retired', platformKeyId: null, location: store.keyInfo(keyref)?.location ?? {} });
-  deps.vault.retire(keyref, gen);
-  const fits = matchesShape(shape, Buffer.from(bytes).toString('utf8'));
-  deps.audit.append({ action: 'key.issued', subject: keyref, at: deps.clock.now() });
-  deps.events.append('key.changed', { keyref });
-  return { status: 201, json: { keyref, gen, coverage: fits ? null : 'none' } };
-}
-

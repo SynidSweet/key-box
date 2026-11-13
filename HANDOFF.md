@@ -45,7 +45,7 @@ Spec: `docs/spec.md` (Build units table at the end). Verdicts: `/home/petter/.lo
     `location` (KBOX-57), `project-host`.
   - Rotation: `rotation-machine` (steps, intent name, retry delay), `scheduler` (due dates, staggering), `class` (class never
     lowered, KBOX-16).
-  - Share: `coverage` (watch tier), `share-build` (format v3, envelope).
+  - Share: `coverage` (watch tier), `share-build` (format v4, envelope).
 - `src/shell/` (adapters and wiring), by concern:
   - Kernel: `core.ts` (`openCore`: meta.db, audit, events, vault, control routes), `db`, `meta`, `meta-schema`, `migrations`
     (additive only, KBOX-56), `audit`, `events`, `vault-fs`, `http` (frame), `routes-control`, `private-db`, `clock`, `random`.
@@ -59,7 +59,7 @@ Spec: `docs/spec.md` (Build units table at the end). Verdicts: `/home/petter/.lo
   - Rotation: `rotation.ts` (`openRotation`: the one wiring), `orchestrator` (runs, `stop()` cancels run timers), `reconcile`,
     `revoke-confirm`, `rotation-store`, `rotation-ports` (`PlatformSource`, `PlatformKit`, `Point`), `platform-source`
     (`createPlatformSource`: registry to kits, master key = current generation of the platform's master-class key row),
-    `key-routes` (`/api/keys`, `/api/rotations`, `/api/retired`), `deliveries`, `paste` (phone paste flow), `new-key`.
+    `key-routes` (`/api/keys`, `/api/rotations`), `deliveries`, `paste` (phone paste flow), `new-key`.
   - Executors and identity: `key-executors` (`set_schedule`, `demote`, `set_allow_rules`, and the one check each makes at proposal and
     at execution), `vercel-routes` (`createVercelOps`; `POST /api/vercel/{projects,domains,settings}`), `box-keys` (`ensureBoxKeys`,
     `refuseBoxKeyAction`), `identity-routes`, `grant-checks`.
@@ -183,6 +183,9 @@ Spec: `docs/spec.md` (Build units table at the end). Verdicts: `/home/petter/.lo
 
 ## Recent
 
+- `noretired`: `POST /api/retired` is gone (it answers as an unknown route; mission control dropped the hand-off). Retired generations made by the box's own
+  rotations are unchanged. The share file is format v4 (KBOX-33, dcf9e60) and `test/fixtures/share-v4` is vendored by devbox
+  (`adminkeys/tests/fixtures/share-v4`, its README names the key-box commit): a corpus change needs a devbox re-vendor.
 - `paste-master` (b02e3de): the paste check hands a `needsMaster` verifier the master KBOX-57 chooses (KBOX-58, as the run and the
   revoke check already did); before it a pasted Google API key could only verify `unreachable`. Test `test/paste-master.test.ts`.
 - `idle-runtime` (fa4c66d): `CoreRuntime.proc` names the idle watch's `/proc` files; a test runtime names none (KBOX-21). Test

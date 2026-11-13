@@ -86,7 +86,7 @@ export function openRotation(deps: RotationDeps): Rotation {
   const paste = createPaste({ db: parts.db, approvers: deps.approvers, clock: deps.clock, random: deps.random, audit: deps.audit, events: parts.events, push: deps.push, meta: parts.meta, source: deps.source, orchestrator, store });
   const delivery = { store, vault: parts.vault, audit: deps.audit, events: parts.events, clock: deps.clock };
   const routes = [
-    ...keyRoutes({ store, meta: parts.meta, orchestrator, approvals: deps.approvals, paste, source: deps.source, vault: parts.vault, audit: deps.audit, events: parts.events, clock: deps.clock, random: deps.random }),
+    ...keyRoutes({ store, meta: parts.meta, orchestrator, approvals: deps.approvals, paste, source: deps.source, random: deps.random }),
     ...deliveryRoutes(delivery),
     ...pasteRoutes(paste),
   ];
