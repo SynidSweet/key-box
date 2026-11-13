@@ -1,16 +1,18 @@
-// KBOX-33: the share file, format v3, built from a store of admin and master key values: what the workstation's leak scanner reads.
-// The body is JSON {header, entries, probes, coverage}; the envelope {format, v, body_b64, sig_b64} carries an Ed25519 signature over
-// the exact decoded body bytes. Read this before changing anything: the file is public, so what it shows is the whole contract.
+// KBOX-33: the share file, format v4, built from a store of admin and master key values: what the workstation's leak scanner reads.
+// The body is JSON {header, entries, coverage}; the envelope {format, v, body_b64, sig_b64} carries an Ed25519 signature over the
+// exact decoded body bytes. Read this before changing anything: the file is public, so what it shows is the whole contract.
 //
-//  - A windowed entry (a random core of 32 to 256 characters) has seven entries, one per form, and 40 probes each at j = 0, 9, ...
-//    351. A probe is the HMAC-SHA256 of a 24-character window of the form wholly inside the core (never a prefix, a JWT header or
-//    a payload), or 32 random bytes where the form has no window left (a decoy, the same shape). The probe count, the stride, the
-//    probe fields and so the size of the file do not depend on the key's length, and no `len` member exists on a windowed entry.
+//  - A windowed entry (a random core of 32 to 256 characters) has seven entries, one per form, each with `probes_b64`: exactly 320
+//    slots of 32 bytes. Slot j holds SHA-256(salt ‖ form[j:j+24]) for EVERY window of the form (j + 24 <= its length), so a matcher
+//    may hash only the input positions at multiples of `scan_stride` (9) and still meet every copy of at least 32 characters. Every
+//    other slot is 32 random bytes (a decoy, the same shape), so the slot count and the size of the file do not depend on the key's
+//    length, and no `len` member exists on a windowed entry. A window lies wholly inside the core: never a prefix, a JWT header or
+//    a payload.
 //  - An anchored entry (a core of at least 72 bits behind a public prefix of 4 or more characters) is `anchor`, the characters of
 //    the prefix as the form spells them, then `digest`, the HMAC of the `len` characters that core bytes alone fix. Between the two
 //    a base64 form has 0 or 1 characters that mix prefix and core bits and are skipped: 1 unless (alignment + prefix bytes) is a
 //    multiple of 3. `len` and the prefix are the only value-derived text in the file (KBOX-2's declared exception).
-//  - `d` and `digest` are full 32-byte HMACs keyed by this version's salt; the salt is new for every version.
+//  - Window slots and `digest` are keyed by this version's salt; the salt is new for every version.
 import { createHash, createHmac } from 'node:crypto';
 import type { Coverage } from '../ports/meta.ts';
 import type { Random } from '../ports/random.ts';
@@ -21,11 +23,14 @@ import { base64Interior, shareForms } from './forms.ts';
 import type { FormName } from './forms.ts';
 
 export const SHARE_FORMAT = 'kbox-share';
-export const SHARE_V = 3;
-/** The distance between probe windows in every file: never derived from a key. */
-export const STRIDE = 9;
+export const SHARE_V = 4;
+/** The characters a window digest covers. */
 export const WINDOW = 24;
-export const PROBES_PER_ENTRY = 40;
+/** Window slots per windowed entry, in every file: the largest windowed form (342 characters) has 319 windows. */
+export const SLOTS = 320;
+/** The largest input stride at which a matcher still meets a window of every windowed copy: a 32-character core has 9 window starts. */
+export const SCAN_STRIDE = 9;
+const SLOT_BYTES = 32;
 const SALT_BYTES = 32;
 
 export type ShareFormName = 'raw' | 'b64s0' | 'b64s1' | 'b64s2' | 'b64u0' | 'b64u1' | 'b64u2';
@@ -75,6 +80,8 @@ export interface WindowedEntry {
   readonly retired: boolean;
   readonly tier: 'windowed';
   readonly form: ShareFormName;
+  /** Base64 of exactly SLOTS × 32 bytes: the window slots. */
+  readonly probes_b64: string;
 }
 export interface AnchoredEntry {
   readonly project: string;
@@ -87,11 +94,6 @@ export interface AnchoredEntry {
   readonly len: number;
   readonly digest: string;
 }
-export interface Probe {
-  readonly entry: number;
-  readonly j: number;
-  readonly d: string;
-}
 export interface CoverageItem {
   readonly project: string;
   readonly name: string;
@@ -100,15 +102,16 @@ export interface CoverageItem {
 }
 export interface ShareBody {
   readonly header: {
-    readonly v: 3;
+    readonly v: typeof SHARE_V;
     readonly version: number;
     readonly issued_at: number;
     readonly salt_b64: string;
     readonly set_id: string;
-    readonly stride: 9;
+    readonly window: typeof WINDOW;
+    readonly slots: typeof SLOTS;
+    readonly scan_stride: typeof SCAN_STRIDE;
   };
   readonly entries: readonly (WindowedEntry | AnchoredEntry)[];
-  readonly probes: readonly Probe[];
   readonly coverage: readonly CoverageItem[];
 }
 
@@ -120,8 +123,11 @@ export interface Built {
   readonly contentKey: string;
 }
 
-/** HMAC-SHA256 of `bytes` under `salt`, as lower-case hex. */
+/** HMAC-SHA256 of `bytes` under `salt`, as lower-case hex: an anchored entry's `digest` (the name predates v4's SHA-256 windows). */
 export const windowDigest = (salt: Uint8Array, bytes: Uint8Array): string => createHmac('sha256', salt).update(bytes).digest('hex');
+
+/** SHA-256(salt ‖ window): a window slot. The salt is public, so a keyed MAC would add nothing over the salt prefix. */
+export const windowProbe = (salt: Uint8Array, bytes: Uint8Array): Buffer => createHash('sha256').update(salt).update(bytes).digest();
 
 const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString('hex');
 const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
@@ -154,18 +160,22 @@ function anchoredEntry(key: ShareKey, prefix: string, core: string, spec: FormSp
 }
 
 /**
- * The 40 probes of one windowed entry. A window whose digest is already a probe elsewhere in the file (the standard and the url
- * interior are the same text when a window holds no `+`, `/`, `-` or `_`) becomes a decoy: two equal digests would show a reader
- * which slots hold a real window, and so how long the key is. The scanner still finds the copy through the first of the two.
+ * The SLOTS window slots of one windowed entry: slot j is the probe of form[j:j+24] for every window of the form, every other slot 32
+ * random bytes. A window whose digest is already in the file (the standard and the url interior are the same text when a window holds
+ * no `+`, `/`, `-` or `_`) becomes a decoy: two equal digests would show a reader which slots hold a real window, and so how long the
+ * key is. The scanner still finds the copy through the first of the two. A form with more windows than slots is refused.
  */
-function windowedProbes(entry: number, form: Uint8Array, salt: Uint8Array, random: Random, used: Set<string>): Probe[] {
-  return Array.from({ length: PROBES_PER_ENTRY }, (_, slot) => {
-    const j = slot * STRIDE;
-    const real = j + WINDOW <= form.length ? windowDigest(salt, form.subarray(j, j + WINDOW)) : undefined;
-    const d = real !== undefined && !used.has(real) ? real : hex(random.bytes(32));
-    used.add(d);
-    return { entry, j, d };
-  });
+export function windowedSlots(form: Uint8Array, salt: Uint8Array, random: Random, used: Set<string>): Uint8Array {
+  if (form.length - WINDOW + 1 > SLOTS) throw new RangeError('a windowed form has more windows than the file has slots');
+  const slots = new Uint8Array(SLOTS * SLOT_BYTES);
+  for (let j = 0; j < SLOTS; j += 1) {
+    const real = j + WINDOW <= form.length ? windowProbe(salt, form.subarray(j, j + WINDOW)) : undefined;
+    const slot = real !== undefined && !used.has(hex(real)) ? real : random.bytes(SLOT_BYTES);
+    if (slot.length !== SLOT_BYTES) throw new RangeError('a random draw is not the size asked for');
+    used.add(hex(slot));
+    slots.set(slot, j * SLOT_BYTES);
+  }
+  return slots;
 }
 
 export function buildShare(input: BuildInput): Built {
@@ -176,9 +186,9 @@ export function buildShare(input: BuildInput): Built {
   }
   const salt = input.random.bytes(SALT_BYTES);
   const entries: (WindowedEntry | AnchoredEntry)[] = [];
-  const probes: Probe[] = [];
   const coverage: CoverageItem[] = [];
-  const usedProbes = new Set<string>();
+  // Every slot digest written so far, as hex: no digest appears twice in a file.
+  const usedSlots = new Set<string>();
   for (const key of keys) {
     const planned = plan(key);
     coverage.push({ project: key.project, name: key.name, gen: key.gen, tier: planned.tier });
@@ -187,8 +197,8 @@ export function buildShare(input: BuildInput): Built {
       for (const spec of FORMS) {
         const form = planned.forms.get(spec.source);
         if (form === undefined) throw new RangeError('a windowed key is missing a form');
-        probes.push(...windowedProbes(entries.length, form, salt, input.random, usedProbes));
-        entries.push({ ...identity, tier: 'windowed', form: spec.name });
+        const slots = windowedSlots(form, salt, input.random, usedSlots);
+        entries.push({ ...identity, tier: 'windowed', form: spec.name, probes_b64: Buffer.from(slots).toString('base64') });
       }
     } else if (planned.tier === 'anchored') {
       for (const spec of FORMS) entries.push(anchoredEntry(key, planned.prefix, planned.core, spec, salt));
@@ -196,9 +206,8 @@ export function buildShare(input: BuildInput): Built {
   }
   const setId = createHash('sha256').update(JSON.stringify(keys.map((k) => [k.project, k.name, k.gen, k.retired]))).digest('hex');
   const body: ShareBody = {
-    header: { v: SHARE_V, version: input.version, issued_at: input.issuedAt, salt_b64: Buffer.from(salt).toString('base64'), set_id: setId, stride: STRIDE },
+    header: { v: SHARE_V, version: input.version, issued_at: input.issuedAt, salt_b64: Buffer.from(salt).toString('base64'), set_id: setId, window: WINDOW, slots: SLOTS, scan_stride: SCAN_STRIDE },
     entries,
-    probes,
     coverage,
   };
   return { body, bytes: utf8.encode(JSON.stringify(body)), contentKey: `${setId}:${JSON.stringify(coverage)}` };
