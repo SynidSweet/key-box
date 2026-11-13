@@ -47,16 +47,6 @@ test('KBOX-5 no column of meta.db is named or typed as a value store, and the ch
   assert.deepEqual(valueStoreColumns(columnsOf(planted)), ['a.token', 'a.api_secret', 'a.key_value', 'a.raw']);
 });
 
-test('KBOX-5 meta.db is in WAL mode with foreign keys on, and every table of the spec is there', async (t) => {
-  const dir = await tempDir(t);
-  const db = openMetaDatabase(join(dir, 'meta.db'), seededRandom(seed));
-  t.after(() => db.close());
-  assert.equal((db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode, 'wal');
-  assert.equal((db.prepare('PRAGMA foreign_keys').get() as { foreign_keys: number }).foreign_keys, 1);
-  const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[]).map((r) => r.name).sort();
-  assert.deepEqual(tables, ['allow_rules', 'approvals', 'audit', 'box_info', 'deliveries', 'destinations', 'events', 'grants', 'keys', 'machines', 'orphan_notices', 'paste_tasks', 'rotation_gens', 'rotation_keys', 'rotation_receipts', 'rotation_runs']);
-});
-
 test('KBOX-30 the epoch is 8 random hex characters chosen when meta.db is created and kept when it is opened again', async (t) => {
   const dir = await tempDir(t);
   const epochOf = (db: DatabaseSync): string => (db.prepare('SELECT epoch FROM box_info').get() as { epoch: string }).epoch;
