@@ -6,17 +6,16 @@ import type { Audit } from '../ports/audit.ts';
 import type { Clock } from '../ports/clock.ts';
 import type { EventLog } from '../ports/events.ts';
 import type { Push } from '../ports/push.ts';
-import type { Lent } from '../ports/types.ts';
 import type { Vault } from '../ports/vault.ts';
 import { retryDelayMs } from '../pure/rotation-machine.ts';
 import { deletePush } from '../pure/words.ts';
 import type { Approvals } from './approvals.ts';
 import type { DeletionStore, Ledger } from './deletion-store.ts';
-import { confirmRevoked, end, enderOf } from './revoke-confirm.ts';
+import { confirmRevoked, end, enderOf, revokeTargetOf } from './revoke-confirm.ts';
 import type { Ender, RevokeTarget } from './revoke-confirm.ts';
-import { kitFor, tryLend } from './rotation-ports.ts';
+import { kitFor, revokeMasterOf } from './rotation-ports.ts';
 import type { DeletePoint, PlatformKit, PlatformSource } from './rotation-ports.ts';
-import type { GenRow, KeyHead, KeyInfo, RotationStore, RunRow } from './rotation-store.ts';
+import type { GenRow, KeyHead, RotationStore, RunRow } from './rotation-store.ts';
 
 /** The least time between the two dead verdicts (ruling M1: enforced, a restart included). */
 export const DEAD_GAP_MS = 60_000;
@@ -53,31 +52,6 @@ const WEAKEST: readonly Ender[] = ['owner', 'retirer', 'issuer'];
 export function createDeletionDriver(deps: DeletionRunDeps): DeletionDriver {
   const { store, ledgers, vault } = deps;
   const now = (): number => deps.clock.now();
-
-  /** The master the batch is ended and asked about with: a master key's own current value, any other key its platform's master. */
-  const masterOf = (head: KeyHead, info: KeyInfo | undefined): Lent | undefined => {
-    if (head.class === 'master') {
-      const own = tryLend(vault, head.keyref, head.genCurrent);
-      return own.ok ? own.value : undefined;
-    }
-    if (info === undefined) return undefined;
-    const master = deps.source.master(head.platform, info.location, info.scopeItems);
-    return master.ok ? master.value : undefined;
-  };
-
-  const targetOf = (head: KeyHead, info: KeyInfo | undefined, kit: PlatformKit, gen: GenRow, master: Lent): RevokeTarget => {
-    const value = tryLend(vault, head.keyref, gen.gen);
-    return {
-      kit,
-      platform: head.platform,
-      id: gen.platformKeyId,
-      at: gen.location,
-      scopeItems: info?.scopeItems ?? [],
-      value: value.ok ? value.value : undefined,
-      master,
-      ...(info?.verifyHint === undefined ? {} : { hint: info.verifyHint }),
-    };
-  };
 
   /** Every generation of the batch proven revoked; a master's own current generation is never confirmed by a listing (its value is what one needs). */
   const allRevoked = async (head: KeyHead, batch: readonly { readonly gen: GenRow; readonly target: RevokeTarget }[]): Promise<boolean> => {
@@ -153,9 +127,10 @@ export function createDeletionDriver(deps: DeletionRunDeps): DeletionDriver {
     const grace = live.filter((g) => g.status === 'grace').sort((a, b) => a.gen - b.gen);
     const gens = grace.length > 0 ? grace : live;
     const info = store.keyInfo(run.keyref);
-    const master = masterOf(head, info);
+    // The master the batch is ended and asked about with: a master key's own current value, any other key its platform's master.
+    const master = revokeMasterOf(deps.source, vault, head, info);
     if (master === undefined) return unconfirmed(run, fresh, head, kit, live, ctx);
-    const batch = gens.map((gen) => ({ gen, target: targetOf(head, info, kit, gen, master) }));
+    const batch = gens.map((gen) => ({ gen, target: revokeTargetOf(vault, head, info, kit, gen, master) }));
 
     if (fresh.deadSeenAt === null) {
       for (const { target } of batch) await end(target);

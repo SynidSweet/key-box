@@ -27,6 +27,7 @@ import type { Parsed } from '../pure/schemas.ts';
 import { inReadTransaction, inTransaction } from './db.ts';
 import { deletingKeyrefs, isDeleting } from './deletion-store.ts';
 import { insertEvent } from './events.ts';
+import { oldUnprovenCounts } from './rotation-store.ts';
 
 const KEY_SCHEMA = {
   keyref: text(NAME),
@@ -133,7 +134,8 @@ export function createMetaStore(db: DatabaseSync, clock: Clock, hub: EventSignal
       inReadTransaction(db, () => {
         const snapshot = readSnapshot(db);
         const deleting = deletingKeyrefs(db);
-        return { ...snapshot, keys: snapshot.keys.map((k) => (deleting.has(k.keyref) ? { ...k, status: 'deleting' as const } : k)) };
+        const unproven = oldUnprovenCounts(db);
+        return { ...snapshot, keys: snapshot.keys.map((k) => ({ ...k, ...(deleting.has(k.keyref) ? { status: 'deleting' as const } : {}), old_unproven: unproven.get(k.keyref) ?? 0 })) };
       }),
 
     shareState(): ShareState {

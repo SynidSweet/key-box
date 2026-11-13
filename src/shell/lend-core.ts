@@ -21,6 +21,7 @@ import type { CredentialShapes, ResponseScanner } from '../pure/scanner.ts';
 import { findTokenHash } from '../pure/tokens.ts';
 import type { LendHandler, LendSession } from './lend-socket.ts';
 import type { MintedValues } from './minted-values.ts';
+import type { GenRow } from './rotation-store.ts';
 
 export interface LendCoreDeps {
   readonly meta: MetaStore;
@@ -40,6 +41,11 @@ export interface LendCoreDeps {
   readonly locationOf: (keyref: string) => KeyLocation | undefined;
   /** KBOX-62: whether the key has an open deletion: it is never lent, resolved or scanned, even with a grant row written behind the deletion. */
   readonly deleting: (keyref: string) => boolean;
+  /**
+   * KBOX-14 as amended: the generations the rotation store holds for a key; the scanner looks for the current one and every `grace` one, by
+   * status. Absent where nothing rotates: the current generation and the one before it.
+   */
+  readonly generations?: (keyref: string) => readonly Pick<GenRow, 'gen' | 'status'>[];
 }
 
 type Checked<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly code: LendRefusal };
@@ -130,11 +136,18 @@ export function createLendHandler(deps: LendCoreDeps): LendHandler {
     return false;
   };
 
-  /** The forms of every live value: the current generation of each key and the one before it while it may still work, and the minted values. */
+  /** The generations of a key whose values may still work: the current one and every `grace` one, chosen by status (KBOX-14, KBOX-51). */
+  const liveGenerations = (key: MetaKey): readonly number[] => {
+    const rows = deps.generations?.(key.keyref);
+    if (rows === undefined) return [key.gen_current, key.gen_current - 1].filter((g) => g >= 1);
+    return [key.gen_current, ...rows.filter((r) => r.status === 'grace' && r.gen !== key.gen_current).map((r) => r.gen)];
+  };
+
+  /** The forms of every live value: the current generation of each key and every one that may still work, and the minted values. */
   const heldForms = async (): Promise<readonly Form[]> => {
     const all: Form[] = [...deps.minted.forms()];
     for (const key of deps.meta.snapshot().keys) {
-      for (const gen of [key.gen_current, key.gen_current - 1].filter((g) => g >= 1)) {
+      for (const gen of liveGenerations(key)) {
         const stored = await storedForms(key.keyref, gen);
         if (stored.kind === 'forms') all.push(...stored.forms);
         else if (stored.kind === 'unbuildable') deps.journal('forms_unbuildable');

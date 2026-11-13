@@ -194,6 +194,25 @@ export function tryLend(vault: Pick<Vault, 'lend'>, keyref: string, gen: number)
 }
 
 /**
+ * KBOX-62 and KBOX-51 step 10 (the proof watch): the master a generation is ended and asked about with: a master key's own current value, any
+ * other key the KBOX-57 master for its stored location and scope items. Undefined when there is none (or no stored record): no call is made.
+ */
+export function revokeMasterOf(
+  source: Pick<PlatformSource, 'master'>,
+  vault: Pick<Vault, 'lend'>,
+  head: { readonly keyref: string; readonly platform: PlatformId; readonly class: KeyClass; readonly genCurrent: number },
+  info: { readonly location: KeyLocation; readonly scopeItems: readonly string[] } | undefined,
+): Lent | undefined {
+  if (head.class === 'master') {
+    const own = tryLend(vault, head.keyref, head.genCurrent);
+    return own.ok ? own.value : undefined;
+  }
+  if (info === undefined) return undefined;
+  const master = source.master(head.platform, info.location, info.scopeItems);
+  return master.ok ? master.value : undefined;
+}
+
+/**
  * Where the process may be stopped in a test: after a key is created and before it is stored (`issued`), after it is stored and before the
  * step is persisted (`stored`), after a push and before its receipt (`pushed`), after each receipt, after an overlap:false platform took the
  * new value and before its receipt (`taken`), after a redeploy started and before it is ready (`redeployed`), after a rollback removed the

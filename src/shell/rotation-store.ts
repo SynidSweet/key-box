@@ -9,6 +9,7 @@ import { ApiError } from '../pure/errors.ts';
 import { sameLocation } from '../pure/location.ts';
 import { insertEvent } from './events.ts';
 import { inTransaction } from './db.ts';
+import { isDeleting } from './deletion-store.ts';
 import type { MetaKey } from '../ports/meta.ts';
 import type { Step } from '../pure/rotation-machine.ts';
 
@@ -214,6 +215,20 @@ interface GenStored {
   readonly proved_at: number | null;
 }
 
+/**
+ * KBOX-51 step 10 as amended: a lingering generation (alias `g`, its key's row `k`): `grace`, not the key's current one, and neither the old nor
+ * the new generation of an active run of its key. It may still work at its platform and no run owns it: the proof watch settles it and
+ * `GET /api/meta` counts it (`old_unproven`, KBOX-30). The one home of that definition.
+ */
+const LINGERING = `g.status = 'grace' AND g.gen <> k.gen_current AND NOT EXISTS (
+  SELECT 1 FROM rotation_runs r WHERE r.keyref = g.keyref AND r.state NOT IN ('done','failed','abandoned') AND g.gen IN (r.gen_old, r.gen_new))`;
+
+/** KBOX-30: the number of lingering generations of each key that has any, read straight from meta.db (computed, never stored). */
+export function oldUnprovenCounts(db: DatabaseSync): ReadonlyMap<string, number> {
+  const rows = db.prepare(`SELECT g.keyref AS keyref, count(*) AS n FROM rotation_gens g JOIN keys k ON k.keyref = g.keyref WHERE ${LINGERING} GROUP BY g.keyref`).all() as unknown as { keyref: string; n: number }[];
+  return new Map(rows.map((r) => [r.keyref, r.n]));
+}
+
 const locationOf = (region: string | null, project: string | null): KeyLocation => ({ ...(region === null ? {} : { region }), ...(project === null ? {} : { project }) });
 const toGen = (g: GenStored): GenRow => ({ keyref: g.keyref, gen: g.gen, status: g.status, platformKeyId: g.platform_key_id, location: locationOf(g.region, g.project), provedAt: g.proved_at });
 
@@ -260,6 +275,13 @@ export interface RotationStore {
   gen(keyref: string, gen: number): GenRow | undefined;
   gens(keyref: string): readonly GenRow[];
   setGenStatus(keyref: string, gen: number, status: GenStatus): void;
+  /** KBOX-51 step 10 as amended: every lingering generation (grace, not current, owned by no active run), by key and generation. */
+  lingering(): readonly GenRow[];
+  /**
+   * KBOX-51 step 10 as amended, the proof watch's retire: in one transaction the generation is read again and marked `retired` (with its
+   * `key.changed`) only while it still lingers and its key has no open deletion (KBOX-62). True when it was retired; nothing changes otherwise.
+   */
+  retireProven(keyref: string, gen: number): boolean;
   /** The highest generation number ever used, 0 for a key with none. */
   topGen(keyref: string): number;
   generationIdKnown(platformKeyId: string): boolean;
@@ -443,6 +465,16 @@ export function createRotationStore(db: DatabaseSync, clock: Clock, hub: EventSi
         if (db.prepare('UPDATE rotation_gens SET status = ? WHERE keyref = ? AND gen = ?').run(status, keyref, gen).changes === 0) throw new ApiError('not_found');
         // A generation going live, into grace or out of it is a change of what the share file lists (KBOX-33): the share writer follows this event.
         keyChanged(keyref);
+      });
+    },
+    lingering: () => (db.prepare(`SELECT g.* FROM rotation_gens g JOIN keys k ON k.keyref = g.keyref WHERE ${LINGERING} ORDER BY g.keyref, g.gen`).all() as unknown as GenStored[]).map(toGen),
+    retireProven(keyref, gen) {
+      return write(() => {
+        const still = db.prepare(`SELECT 1 AS one FROM rotation_gens g JOIN keys k ON k.keyref = g.keyref WHERE g.keyref = ? AND g.gen = ? AND ${LINGERING}`).get(keyref, gen) !== undefined;
+        if (!still || isDeleting(db, keyref)) return false;
+        db.prepare("UPDATE rotation_gens SET status = 'retired' WHERE keyref = ? AND gen = ?").run(keyref, gen);
+        keyChanged(keyref);
+        return true;
       });
     },
     topGen: (keyref) => (db.prepare('SELECT coalesce(max(gen), 0) AS g FROM rotation_gens WHERE keyref = ?').get(keyref) as { g: number }).g,

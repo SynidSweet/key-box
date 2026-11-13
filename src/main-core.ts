@@ -302,7 +302,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   });
   await server.listen(config.socket);
   const lend = createLendServer(
-    createLendHandler({ meta: parts.meta, tokens: approve?.tokens.tokenStore ?? parts.meta, vault: parts.vault, audit: parts.audit, events: parts.events, registry, shapes: loadCredentialShapes(), clock, minted, journal, locationOf: (keyref) => readKeyInfo(parts.db, keyref)?.location, deleting: (keyref) => isDeleting(parts.db, keyref) }),
+    createLendHandler({ meta: parts.meta, tokens: approve?.tokens.tokenStore ?? parts.meta, vault: parts.vault, audit: parts.audit, events: parts.events, registry, shapes: loadCredentialShapes(), clock, minted, journal, locationOf: (keyref) => readKeyInfo(parts.db, keyref)?.location, deleting: (keyref) => isDeleting(parts.db, keyref), ...(rotationStore === undefined ? {} : { generations: (keyref: string) => rotationStore.gens(keyref) }) }),
     journal,
   );
   if (config.lendSocket === undefined) journal('no_lend_socket');

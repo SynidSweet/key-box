@@ -20,6 +20,8 @@ import type { RotateKey } from './new-key.ts';
 import { createOrchestrator } from './orchestrator.ts';
 import type { Federation, Orchestrator } from './orchestrator.ts';
 import { createPaste, pasteRoutes } from './paste.ts';
+import { createProofWatch } from './proof-watch.ts';
+import type { ProofWatch } from './proof-watch.ts';
 import type { Paste } from './paste.ts';
 import { createReconciler } from './reconcile.ts';
 import type { Reconciler } from './reconcile.ts';
@@ -43,9 +45,9 @@ const AFTER_REFUSAL_MS = 7 * 24 * HOUR_MS;
 /** One that expired unanswered, for this long after the expiry (KBOX-52). */
 const AFTER_EXPIRY_MS = 24 * HOUR_MS;
 /** The fixed codes a failed part of the schedule is audited with (`rotation.drive_failed`). */
-type ScheduleFault = 'tick_failed' | 'resume_failed' | 'reconcile_failed';
+type ScheduleFault = 'tick_failed' | 'resume_failed' | 'reconcile_failed' | 'watch_failed';
 /** The part of the schedule each code names, recorded as the audit row's `run_id`. */
-const PART_OF: Readonly<Record<ScheduleFault, string>> = { tick_failed: 'tick', resume_failed: 'resume', reconcile_failed: 'reconcile' };
+const PART_OF: Readonly<Record<ScheduleFault, string>> = { tick_failed: 'tick', resume_failed: 'resume', reconcile_failed: 'reconcile', watch_failed: 'watch' };
 
 export interface RotationDeps {
   readonly parts: CoreParts;
@@ -68,6 +70,8 @@ export interface Rotation {
   readonly store: RotationStore;
   readonly orchestrator: Orchestrator;
   readonly reconciler: Reconciler;
+  /** KBOX-51 step 10 as amended: the proof watch, the one exit from `grace` for a rotated generation. */
+  readonly watch: ProofWatch;
   readonly paste: Paste;
   /** KBOX-62: the deletion's check, executor, page facts and start-up settle (its executor is also in `executors`). */
   readonly deletion: KeyDelete;
@@ -78,11 +82,15 @@ export interface Rotation {
   tick(): void;
   /**
    * Starts rotation without waiting on any port (review N4): arms the hourly tick and the daily reconcile, and in the background resumes
-   * unfinished runs, then reconciles, then ticks, each audited when it fails. Returns the stop, which also stops the orchestrator's run timers;
-   * start-up work not begun when it is called is not begun.
+   * unfinished runs, then reconciles, then ticks, each audited when it fails. The proof watch sweeps as its own job after the start-up tick and
+   * after each daily reconcile is re-armed, so a platform call that never answers holds back nothing else. Returns the stop, which also stops
+   * the orchestrator's run timers and the watch; start-up work not begun when it is called is not begun.
    */
   run(): () => void;
-  /** Resolves when the start-up work has ended and every run this process works on has finished or waits for a clock. */
+  /**
+   * Resolves when the start-up work has ended and every run this process works on has finished or waits for a clock, and the proof watch is not
+   * working (a sweep waiting on its 60 s gap counts as waiting).
+   */
   idle(): Promise<void>;
 }
 
@@ -98,6 +106,7 @@ export function openRotation(deps: RotationDeps): Rotation {
   const deletionDriver = createDeletionDriver({ store, ledgers, source: deps.source, vault: parts.vault, audit: deps.audit, events: parts.events, push: deps.push, clock: deps.clock, approvals: deps.approvalRecords, expireNaming });
   const orchestrator = createOrchestrator({ ...deps.source, store, meta: parts.meta, vault: parts.vault, clock: deps.clock, scheduler: deps.scheduler, random: deps.random, audit: deps.audit, events: parts.events, push: deps.push, deletion: deletionDriver, ...(deps.checkpoint === undefined ? {} : { checkpoint: deps.checkpoint }), ...(deps.federation === undefined ? {} : { federation: deps.federation }) });
   const reconciler = createReconciler({ ...deps.source, store, audit: deps.audit, events: parts.events, clock: deps.clock, orchestrator });
+  const watch = createProofWatch({ ...deps.source, store, ledgers, vault: parts.vault, audit: deps.audit, clock: deps.clock, scheduler: deps.scheduler });
   const paste = createPaste({ db: parts.db, approvers: deps.approvers, clock: deps.clock, random: deps.random, audit: deps.audit, events: parts.events, push: deps.push, meta: parts.meta, source: deps.source, orchestrator, store });
   const deletion = createKeyDelete({ store, ledgers, source: deps.source, vault: parts.vault, meta: parts.meta, approvals: deps.approvalRecords, expireNaming, orchestrator, audit: deps.audit, clock: deps.clock, random: deps.random, ...(deps.checkpoint === undefined ? {} : { checkpoint: deps.checkpoint }) });
   const delivery = { store, vault: parts.vault, audit: deps.audit, events: parts.events, clock: deps.clock };
@@ -239,7 +248,7 @@ export function openRotation(deps: RotationDeps): Rotation {
   };
 
   /** The start-up and daily work that awaits ports: a throw is audited and the start or the loop goes on. */
-  const scheduledAsync = async (subject: 'resume' | 'reconcile', code: ScheduleFault, work: () => Promise<void>): Promise<void> => {
+  const scheduledAsync = async (subject: 'resume' | 'reconcile' | 'watch', code: ScheduleFault, work: () => Promise<void>): Promise<void> => {
     try {
       await work();
     } catch {
@@ -251,6 +260,7 @@ export function openRotation(deps: RotationDeps): Rotation {
     store,
     orchestrator,
     reconciler,
+    watch,
     paste,
     deletion,
     routes,
@@ -260,6 +270,10 @@ export function openRotation(deps: RotationDeps): Rotation {
       let stopped = false;
       let cancelTick = (): void => undefined;
       let cancelReconcile = (): void => undefined;
+      // Its own job, never awaited by another and never in `inBackground`: a sweep still running is joined, not doubled (ruling 4).
+      const sweep = (): void => {
+        if (!stopped) void scheduledAsync('watch', 'watch_failed', () => watch.run());
+      };
       const loopTick = (): void => {
         if (stopped) return;
         cancelTick = deps.scheduler.after(TICK_MS, loopTick);
@@ -269,7 +283,9 @@ export function openRotation(deps: RotationDeps): Rotation {
         if (stopped) return;
         background(
           scheduledAsync('reconcile', 'reconcile_failed', () => reconciler.run()).finally(() => {
-            if (!stopped) cancelReconcile = deps.scheduler.after(RECONCILE_MS, loopReconcile);
+            if (stopped) return;
+            cancelReconcile = deps.scheduler.after(RECONCILE_MS, loopReconcile);
+            sweep();
           }),
         );
       };
@@ -281,18 +297,22 @@ export function openRotation(deps: RotationDeps): Rotation {
           await scheduledAsync('resume', 'resume_failed', () => orchestrator.resume());
           if (stopped) return;
           await scheduledAsync('reconcile', 'reconcile_failed', () => reconciler.run());
-          if (!stopped) tick();
+          if (stopped) return;
+          tick();
+          sweep();
         })(),
       );
       return () => {
         stopped = true;
         cancelTick();
         cancelReconcile();
+        watch.stop();
         orchestrator.stop();
       };
     },
     async idle() {
       while (inBackground.size > 0) await Promise.all([...inBackground]);
+      await watch.idle();
       await orchestrator.idle();
     },
   };

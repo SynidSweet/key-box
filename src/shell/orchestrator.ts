@@ -24,8 +24,8 @@ import { ownerEndsLine } from '../pure/words.ts';
 import { afterProof, intentName, nextStep, retryDelayMs } from '../pure/rotation-machine.ts';
 import type { KeyMachine, ProofVerdict, Step } from '../pure/rotation-machine.ts';
 import type { DeletionDriver } from './delete-run.ts';
-import { enderOf, revokeAndConfirm } from './revoke-confirm.ts';
-import type { Ender } from './revoke-confirm.ts';
+import { confirmRevoked, enderOf, revokeAndConfirm } from './revoke-confirm.ts';
+import type { Ender, RevokeTarget } from './revoke-confirm.ts';
 import { isPasteSource, kindOfStored, kitFor, overlapOf, setterOf, storedPlacement, tryLend, verifierFor, verifyTargetOf } from './rotation-ports.ts';
 import type { MasterResult, PlatformKit, PlatformSource, Point } from './rotation-ports.ts';
 import type { DestinationRow, KeyHead, KeyInfo, Receipt, RotationStore, RunOrigin, RunRow } from './rotation-store.ts';
@@ -552,7 +552,13 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     return advance(run, 'grace');
   }
 
-  // --- step 10: revoke the old key and confirm it is dead ----------------------------------------------------------------------------
+  // --- step 10: end the old key and hear the platform's word ------------------------------------------------------------------------
+
+  /**
+   * KBOX-51 step 10 as amended: ends the key where the box can, then true once the platform's word says it no longer works, or once its proven
+   * revoked evidence (KBOX-62) says revoked. A listing may be used: the target is never a master's own current generation.
+   */
+  const endedAtPlatform = async (target: RevokeTarget): Promise<boolean> => (await revokeAndConfirm(target)) || (await confirmRevoked(target, true));
 
   async function revokeOld(run: RunRow, head: KeyHead, kit: PlatformKit): Promise<Next> {
     if (run.genOld > 0) {
@@ -561,11 +567,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       // Step 10 without a master to end the old key with: not proven dead, so the old key stays in grace and the step retries (one notice).
       const master = masterFor(head);
       if (!master.ok) return retryRevoke(run, head, enderOf(kit, id));
-      const dead = await revokeAndConfirm({ kit, platform: head.platform, id, at: old?.location ?? {}, scopeItems: scopeItemsOf(run.keyref), value: lendOrUndefined(run.keyref, run.genOld), master: master.value, ...hintOf(run.keyref) });
-      if (!dead) return retryRevoke(run, head, enderOf(kit, id));
-      store.setGenStatus(run.keyref, run.genOld, 'retired');
-      deps.vault.retire(run.keyref, run.genOld);
-      deps.audit.append({ action: 'key.revoked', subject: run.keyref, at: now() });
+      const ended = await endedAtPlatform({ kit, platform: head.platform, id, at: old?.location ?? {}, scopeItems: scopeItemsOf(run.keyref), value: lendOrUndefined(run.keyref, run.genOld), master: master.value, ...hintOf(run.keyref) });
+      if (!ended) return retryRevoke(run, head, enderOf(kit, id));
+      // The platform's word ends the run and marks nothing dead: N stays grace, its value kept and watched, until the proof watch proves it.
     }
     deps.audit.append({ action: 'rotation.completed', subject: run.keyref, at: now(), detail: { run_id: run.runId, gen: run.genNew } });
     return advance(run, 'revoking');
@@ -727,10 +731,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       if (!receipt.rollbackNotified) noticeHeld(run, head, receipt, oldKeyWorks);
     }
     if (held > 0) return false;
-    // A key the box did not make (pasted) has nothing to revoke here; one it made is revoked and confirmed before the run ends.
+    // A key the box did not make (pasted) has nothing to revoke here; one it made is ended and the platform heard before the run ends.
     if (id === null) return true;
     const created = store.gen(run.keyref, run.genNew);
-    return revokeAndConfirm({ kit, platform: head.platform, id, at: created?.location ?? fresh?.at ?? store.keyInfo(run.keyref)?.location ?? {}, scopeItems: scopeItemsOf(run.keyref), value: fresh?.value ?? lendOrUndefined(run.keyref, run.genNew), master, ...hintOf(run.keyref) });
+    return endedAtPlatform({ kit, platform: head.platform, id, at: created?.location ?? fresh?.at ?? store.keyInfo(run.keyref)?.location ?? {}, scopeItems: scopeItemsOf(run.keyref), value: fresh?.value ?? lendOrUndefined(run.keyref, run.genNew), master, ...hintOf(run.keyref) });
   }
 
   async function rollBack(run: RunRow, head: KeyHead, kit: PlatformKit, fresh?: Fresh): Promise<Next> {
@@ -749,7 +753,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       }
       if (!(await undoEverywhere(run, head, kit, chosen.value, receipts, id, fresh))) return rollBackLater(run);
     }
-    if (created !== undefined) {
+    // KBOX-17 as amended: a new key the platform issued may still work there, so it stays grace (watched) until the proof watch proves it
+    // revoked; one it never issued (a pasted value, an overlap:false set) is failed and its value deleted.
+    if (created !== undefined && id !== null) store.setGenStatus(run.keyref, run.genNew, 'grace');
+    else if (created !== undefined) {
       store.setGenStatus(run.keyref, run.genNew, 'failed');
       deps.vault.retire(run.keyref, run.genNew);
     }

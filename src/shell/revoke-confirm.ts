@@ -1,13 +1,17 @@
-// KBOX-51 step 10: end a key at its platform (revoke, retire or the owner), then CONFIRM it is dead. A 404 is not proof. The proof is the verifier that
-// applies to the key (KBOX-58) rejecting the value (the vault still holds it), or, where no verifier applies or the vault no longer holds the value, a
-// complete listing of the key's recorded location showing the id absent or disabled; never the lister because a verifier that applies is unreachable.
-// One home for the new key's revoke on a failed run, the old key's revoke after the grace, and the orphan found by reconcile.
+// KBOX-51 step 10 (as amended by revoke-proof): end a key at its platform (revoke, retire or the owner), then hear the platform's word. A 404 is not
+// its word. The word is the verifier that applies to the key (KBOX-58) rejecting the value (the vault still holds it), or, where no verifier applies or
+// the vault no longer holds the value, a complete listing of the key's recorded location showing the id absent or disabled; never the lister because a
+// verifier that applies is unreachable. The word ends a run; it is not proof of death and marks nothing dead: only the proven revoked evidence
+// (`confirmRevoked`, KBOX-62), seen twice, retires a generation. One home for the new key's end on a failed run, the old key's end after the grace, the
+// orphan found by reconcile, a deletion's batch and the proof watch.
 import type { KeyKind } from '../ports/issuer.ts';
 import type { KeyLocation, Lent, PlatformId, PlatformKeyId } from '../ports/types.ts';
 import { confirmDead } from '../pure/rotation-machine.ts';
 import type { Evidence } from '../pure/rotation-machine.ts';
-import { verifierFor, verifyTargetOf } from './rotation-ports.ts';
+import { tryLend, verifierFor, verifyTargetOf } from './rotation-ports.ts';
 import type { PlatformKit } from './rotation-ports.ts';
+import type { Vault } from '../ports/vault.ts';
+import type { GenRow, KeyHead, KeyInfo } from './rotation-store.ts';
 
 type Settled<T> = { readonly ok: true; readonly value: T } | { readonly ok: false };
 
@@ -38,15 +42,33 @@ export interface RevokeTarget {
 
 /**
  * Who ends a key at step 10 (KBOX-51): the issuer for a generation the box made (it has a platform key id), else the entry's retirer for a
- * pasted one, else the owner. Whoever it is, only the verifier rejecting the value marks it dead (`confirm`).
+ * pasted one, else the owner. Whoever it is, the platform's word (`platformSaysRefused`) ends a run and proven evidence (`confirmRevoked`) retires.
  */
 export type Ender = 'issuer' | 'retirer' | 'owner';
 export const enderOf = (kit: PlatformKit, id: PlatformKeyId | null): Ender => (id !== null ? 'issuer' : kit.retirer !== undefined ? 'retirer' : 'owner');
 
-/** Ends it where someone can (the issuer or the retirer, their answers and failures dropped) and confirms. True only when the old value is proven dead. */
+/**
+ * Ends it where someone can (the issuer or the retirer, their answers and failures dropped), then asks the platform's ordinary answer. True when
+ * that answer says the value no longer works; not proof of death, it marks nothing dead (KBOX-51 step 10 as amended).
+ */
 export async function revokeAndConfirm(target: RevokeTarget): Promise<boolean> {
   await end(target);
-  return confirm(target);
+  return platformSaysRefused(target);
+}
+
+/** The target a stored generation is ended and asked about with: its id, recorded location, value (when the vault holds it) and the key's hint. */
+export function revokeTargetOf(vault: Pick<Vault, 'lend'>, head: Pick<KeyHead, 'keyref' | 'platform'>, info: KeyInfo | undefined, kit: PlatformKit, gen: Pick<GenRow, 'gen' | 'platformKeyId' | 'location'>, master: Lent): RevokeTarget {
+  const value = tryLend(vault, head.keyref, gen.gen);
+  return {
+    kit,
+    platform: head.platform,
+    id: gen.platformKeyId,
+    at: gen.location,
+    scopeItems: info?.scopeItems ?? [],
+    value: value.ok ? value.value : undefined,
+    master,
+    ...(info?.verifyHint === undefined ? {} : { hint: info.verifyHint }),
+  };
 }
 
 /** Ends it where someone can: the issuer's revoke, else the retirer's retire; their answers and failures are dropped (only the evidence counts). */
@@ -106,8 +128,8 @@ export async function confirmRevoked(target: RevokeTarget, listing: boolean): Pr
   }
 }
 
-/** The evidence after a revoke: what the platform says now, not what the revoke call answered. */
-async function confirm(target: RevokeTarget): Promise<boolean> {
+/** The platform's word after an end call: what it says now (the verifier's mapping, else a listing), not what the end call answered. */
+async function platformSaysRefused(target: RevokeTarget): Promise<boolean> {
   const { kit, id, value } = target;
   const verifier = verifierFor(kit, { scopeItems: target.scopeItems, at: target.at });
   if (verifier !== undefined && value !== undefined) {

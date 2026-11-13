@@ -73,9 +73,12 @@ export interface MetaSnapshot {
   readonly approvals: readonly MetaApproval[];
 }
 
-/** KBOX-30, KBOX-62: what `GET /api/meta` shows: the snapshot, with `deleting` as the status of a key with an open deletion (computed, never stored). */
+/**
+ * KBOX-30, KBOX-62: what `GET /api/meta` shows: the snapshot, with `deleting` as the status of a key with an open deletion, and `old_unproven`,
+ * the key's generations that are not current, whose run has ended and that are not proven ended (KBOX-51 step 10); both computed, never stored.
+ */
 export interface ControlSnapshot extends Omit<MetaSnapshot, 'keys'> {
-  readonly keys: readonly (Omit<MetaKey, 'status'> & { readonly status: KeyStatus | 'deleting' })[];
+  readonly keys: readonly (Omit<MetaKey, 'status'> & { readonly status: KeyStatus | 'deleting'; readonly old_unproven: number })[];
 }
 
 export interface NewMachine {
