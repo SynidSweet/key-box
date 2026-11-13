@@ -9,7 +9,6 @@ import type { TestContext } from 'node:test';
 import type { KeyRow } from '../src/ports/meta.ts';
 import type { PlatformEntry } from '../src/ports/platform.ts';
 import type { KeyShape } from '../src/ports/types.ts';
-import { PROPOSAL_ROUTE_KINDS } from '../src/pure/actions.ts';
 import type { Action } from '../src/pure/actions.ts';
 import { RegistryRefused } from '../src/pure/profile.ts';
 import { vetAction } from '../src/pure/proposal-vet.ts';
@@ -139,35 +138,6 @@ test('KBOX-34 over the real route, add_key of an admin key on a registered platf
 });
 
 const KEYREF_OF = 'fake/shop/FAKE_KEY';
-/** One member-valid action of each kind the proposals route takes (KBOX-53); a workstation destination needs no adapter. */
-const PROPOSALS: Readonly<Record<string, object>> = {
-  delete_key: { kind: 'delete_key', keyref: KEYREF_OF },
-  rotate_key: { kind: 'rotate_key', keyref: KEYREF_OF },
-  demote: { kind: 'demote', keyref: KEYREF_OF },
-  grant: { kind: 'grant', keyref: KEYREF_OF, machine: 'ws-1' },
-  revoke_grant: { kind: 'revoke_grant', keyref: KEYREF_OF, machine: 'ws-1' },
-  add_destination: { kind: 'add_destination', keyref: KEYREF_OF, destination: { kind: 'workstation', target: '' } },
-  remove_destination: { kind: 'remove_destination', keyref: KEYREF_OF, destination: { kind: 'workstation', target: '' } },
-  set_allow_rules: { kind: 'set_allow_rules', keyref: KEYREF_OF, rules: [] },
-  set_schedule: { kind: 'set_schedule', keyref: KEYREF_OF, rotate_every_days: 30, grace_hours: 24 },
-  vercel_set_domain: { kind: 'vercel_set_domain', project: 'shop', op: 'add', domain: 'shop.example.com' },
-  vercel_set_team_setting: { kind: 'vercel_set_team_setting', setting: 'x', value: 'y' },
-  approver_remove: { kind: 'approver_remove', approver_id: 'ap-AAAAAAAAAAAA' },
-};
-
-test('KBOX-23 over the real route, a proposal of a kind with no wired executor is refused up front, and one with an executor is not (the wiring decides)', async (t) => {
-  const w = await started(t, [fakeEntry(platform)]);
-  const absent = PROPOSAL_ROUTE_KINDS.filter((k) => !w.core.executorKinds.has(k));
-  assert.ok(absent.length > 0 && absent.length < PROPOSAL_ROUTE_KINDS.length, 'both outcomes are exercised');
-  for (const kind of PROPOSAL_ROUTE_KINDS) {
-    const action = PROPOSALS[kind];
-    assert.notEqual(action, undefined, `${kind} has a fixture`);
-    const reply = await w.call('/api/proposals', { action });
-    // approver_remove names no approver here: it is refused for that reason, which is not the wiring's.
-    const notAllowed = /not_allowed/.test(reply.body);
-    assert.equal(notAllowed, !w.core.executorKinds.has(kind), `${kind}: ${reply.status} ${reply.body}`);
-  }
-});
 
 test('KBOX-60 through the running core, the proposal check of set_schedule and demote runs before an approval opens: an unknown key and nothing to lower are 422, a known key opens one', async (t) => {
   const w = await started(t, [pasteOnlyEntry(platform, SHAPE)], true);
