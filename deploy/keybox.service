@@ -2,6 +2,9 @@
 Description=Key box core
 After=network-online.target
 Wants=network-online.target
+# No listener without the name and time check (kb-join) and the loaded firewall (KBOX-64, KBOX-65).
+After=kb-join.service kb-firewall.service
+Requires=kb-join.service kb-firewall.service
 
 [Service]
 Type=simple

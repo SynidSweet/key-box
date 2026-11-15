@@ -1,0 +1,33 @@
+# KBOX-65: the key box's host firewall (design 3.5). Its own table: never `flush ruleset`, which would delete tailscaled's rules.
+# Loading is idempotent: declare the table (empty if it is new), delete it, then define it, so loading twice gives one copy.
+# Inbound: only tcp 443 and 8443 on tailscale0. Outbound: nothing new on tailscale0; on other interfaces only what the box needs, and
+# tcp 443, tcp 4460 and udp 123 (NTS time) only to non-private addresses.
+table inet keybox
+delete table inet keybox
+
+table inet keybox {
+	chain input {
+		type filter hook input priority filter; policy drop;
+		iifname "lo" accept
+		ct state established,related accept
+		iifname "tailscale0" tcp dport { 443, 8443 } ct state new accept
+		iifname != "tailscale0" udp sport 67 udp dport 68 accept
+		iifname != "tailscale0" udp sport 547 udp dport 546 accept
+		iifname != "tailscale0" icmpv6 type { nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
+	}
+
+	chain output {
+		type filter hook output priority filter; policy drop;
+		oifname "lo" accept
+		ct state established,related accept
+		oifname "tailscale0" drop
+		udp dport { 53, 67, 547 } accept
+		tcp dport 53 accept
+		meta l4proto { icmp, ipv6-icmp } accept
+		udp sport 41641 accept
+		ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16 } drop
+		ip6 daddr { fc00::/7, fe80::/10 } drop
+		tcp dport { 443, 4460 } accept
+		udp dport { 123, 3478 } accept
+	}
+}

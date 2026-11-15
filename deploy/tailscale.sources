@@ -1,0 +1,6 @@
+# Tailscale's apt source for Ubuntu 24.04 (noble), signed by the key file that ships beside it in the release (covered by H).
+Types: deb
+URIs: https://pkgs.tailscale.com/stable/ubuntu
+Suites: noble
+Components: main
+Signed-By: /usr/share/keyrings/tailscale-archive-keyring.asc

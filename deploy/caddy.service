@@ -2,6 +2,9 @@
 Description=Caddy for the key box (KBOX-44): TLS on 443, the client address header, the two unix sockets
 After=network-online.target tailscaled.service keybox.service keyrelay.service
 Wants=network-online.target tailscaled.service
+# No listener without the name and time check (kb-join) and the loaded firewall (KBOX-64, KBOX-65).
+After=kb-join.service kb-firewall.service
+Requires=kb-join.service kb-firewall.service
 
 [Service]
 Type=simple
