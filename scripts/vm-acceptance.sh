@@ -58,12 +58,23 @@ FLOOR=$(sed -n 's/^ *KB_TIME_FLOOR=\([0-9][0-9]*\)$/\1/p' /in/user-data)
 RTC=$(date -u -d "@$((FLOOR - 63072000))" +%Y-%m-%dT%H:%M:%S)   # two years (730 days) before the floor
 
 # The NoCloud seed: vfat, label CIDATA, with the candidate, a meta-data and a junk AppleDouble file.
+# The guest is the generic image, not the raspi one, so it has no /boot/firmware. The seed's vendor-data (a boothook, which runs before
+# any runcmd) gives it the two raspi boot files the hardening edits, shaped like the raspi image's: a config.txt that ends inside a
+# board filter section, and a one-line cmdline.txt. The candidate is not touched.
 truncate -s 8M seed.img
 mkfs.vfat -n CIDATA seed.img >/dev/null
 printf 'instance-id: kb-vm-acceptance\nlocal-hostname: keybox-vm\n' > meta-data
 printf 'junk\000' > junk
+cat > vendor-data <<'EOF'
+#cloud-boothook
+#!/bin/sh
+mkdir -p /boot/firmware
+[ -e /boot/firmware/config.txt ] || printf '[all]\narm_64bit=1\n[cm4]\ndtoverlay=dwc2,dr_mode=host\n' > /boot/firmware/config.txt
+[ -e /boot/firmware/cmdline.txt ] || printf 'console=serial0,115200 console=tty1 root=LABEL=writable rootfstype=ext4\n' > /boot/firmware/cmdline.txt
+EOF
 mcopy -i seed.img /in/user-data ::user-data
 mcopy -i seed.img meta-data ::meta-data
+mcopy -i seed.img vendor-data ::vendor-data
 mcopy -i seed.img junk ::._user-data
 qemu-img create -q -f qcow2 -b "/img/$IMAGE_NAME" -F qcow2 overlay.qcow2
 
