@@ -109,19 +109,23 @@ power_off() { # powerdown, then quit at the bound
   wait "$QPID" 2>/dev/null || true
 }
 
-# Reading the disk: a raw copy of the overlay, its root partition found by sfdisk, journal replayed on the COPY, files read with debugfs.
+# Reading the disk: a raw copy of the overlay, its root partition found by sfdisk and copied to a file of its own, journal replayed on
+# that COPY, files read with debugfs. The partition gets its own file because e2fsck, after replaying a journal, restarts and drops a
+# `?offset=` (measured: a dirty filesystem at an offset exits 12, the same filesystem as a bare file exits 0), and a live copy is dirty.
 PART=
 snapshot() { # [live]: with `live` the guest is stopped for the copy and continued after
   [ "${1:-}" = live ] && mon stop >/dev/null
-  rm -f "$W/snap.raw"
+  rm -f "$W/snap.raw" "$W/root.img"
   local rc=0
   qemu-img convert -U -f qcow2 -O raw "$W/overlay.qcow2" "$W/snap.raw" || rc=$?
   [ "${1:-}" = live ] && mon cont >/dev/null
   [ "$rc" -eq 0 ] || { echo "snapshot: qemu-img convert exited $rc" >&2; return 1; }
-  local start
-  start=$(sfdisk -d "$W/snap.raw" | sed 's/ //g' | awk -F'[=,]' '/type=0FC63DAF/ { if ($4 + 0 > best) { best = $4 + 0; start = $2 } } END { print start }')
-  [ -n "$start" ] || { echo "snapshot: no Linux partition found" >&2; return 1; }
-  PART="$W/snap.raw?offset=$((start * 512))"
+  local start size
+  read -r start size < <(sfdisk -d "$W/snap.raw" | sed 's/ //g' | awk -F'[=,]' '/type=0FC63DAF/ { if ($4 + 0 > best) { best = $4 + 0; start = $2 } } END { print start, best }')
+  [ -n "${start:-}" ] && [ -n "${size:-}" ] || { echo "snapshot: no Linux partition found" >&2; return 1; }
+  dd if="$W/snap.raw" of="$W/root.img" bs=4M iflag=skip_bytes,count_bytes skip=$((start * 512)) count=$((size * 512)) status=none || { echo "snapshot: dd exited $?" >&2; return 1; }
+  rm -f "$W/snap.raw"
+  PART="$W/root.img"
   e2fsck -fy "$PART" >/dev/null 2>&1 && rc=0 || rc=$?  # 0 or 1 (journal replayed, fixed): a clean read
   [ "$rc" -le 1 ] || { echo "snapshot: e2fsck exited $rc" >&2; return 1; }
   # the positive control: a disk that cannot show /etc/passwd shows nothing, and every "absent" check would pass
@@ -138,7 +142,11 @@ until=$(( $(now) + BOOT1_TIME_BOUND ))
 seen=0
 while :; do  # condition: `step` reads `time` on the disk
   alive || { echo "vm-acceptance: the guest stopped by itself during boot 1" >&2; break; }
-  if snapshot live 2>/dev/null && [ "$(trimmed /var/lib/kb-bootstrap/step)" = time ]; then seen=1; break; fi
+  if snapshot live 2>"$W/snap.err"; then
+    if [ "$(trimmed /var/lib/kb-bootstrap/step)" = time ]; then seen=1; break; fi
+  elif [ -z "${told:-}" ]; then
+    echo "note: a live read of the disk failed: $(head -c 300 "$W/snap.err")"; told=1
+  fi
   [ "$(now)" -lt "$until" ] || break
   sleep "$POLL"
 done
