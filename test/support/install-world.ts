@@ -15,12 +15,13 @@ import { WORDLIST } from './approve-world.ts';
 import { createCodeRoot } from '../../src/shell/console.ts';
 import type { CodeRoot } from '../../src/shell/console.ts';
 import { releaseHash } from '../../src/pure/release-hash.ts';
+import { relyingParty } from '../../src/pure/challenge.ts';
 import { runInstaller, syncDirectory } from '../../src/shell/installer.ts';
 import type { InstallHooks, InstallPaths, ReleaseUnits } from '../../src/shell/installer.ts';
 import type { ApprovalProof, TrustApprover } from '../../src/ports/trust.ts';
 
 export const DOMAIN = 'box.example';
-const RP = { rpId: `keys.${DOMAIN}`, origin: `https://keys.${DOMAIN}` } as const;
+const RP = relyingParty(DOMAIN);
 export const BOOT = 'b0070000-0000-4000-8000-000000000002';
 export const COMMIT = 'ab'.repeat(20);
 

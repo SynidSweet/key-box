@@ -16,6 +16,7 @@ import { FakeTrust } from '../fakes/trust.ts';
 import type { TokenScope } from '../../src/ports/meta.ts';
 import type { Action } from '../../src/pure/actions.ts';
 import { parseWordlist } from '../../src/pure/codes.ts';
+import { relyingParty } from '../../src/pure/challenge.ts';
 import { hashToken, newToken } from '../../src/pure/tokens.ts';
 import { openApproveCore } from '../../src/shell/approve-core.ts';
 import type { ApproveCore } from '../../src/shell/approve-core.ts';
@@ -33,7 +34,7 @@ import type { Random } from '../../src/ports/random.ts';
 import type { Route } from '../../src/shell/http.ts';
 
 export const DOMAIN = 'box.example';
-export const RP = { rpId: `keys.${DOMAIN}`, origin: `https://keys.${DOMAIN}` } as const;
+export const RP = relyingParty(DOMAIN);
 export const WORDLIST = parseWordlist(readFileSync(new URL('../../src/data/wordlist.txt', import.meta.url), 'utf8'));
 const BOOT = 'b0070000-0000-4000-8000-000000000001';
 

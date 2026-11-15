@@ -269,7 +269,7 @@ async function main(out: string): Promise<void> {
   let browser: Awaited<ReturnType<typeof launchChromium>> | undefined;
   let phone: Phone | undefined;
   try {
-    browser = await launchChromium('keys.localhost', demo.port);
+    browser = await launchChromium('keybox.localhost', demo.port);
     phone = await Phone.open(browser.cdp, out);
     await walk(phone, demo, notes);
   } catch (error) {

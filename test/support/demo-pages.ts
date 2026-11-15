@@ -14,6 +14,8 @@ import { join } from 'node:path';
 import type { KeyRow } from '../../src/ports/meta.ts';
 import type { Issuer, IssuerCapabilities, Verifier } from '../../src/ports/issuer.ts';
 import type { KeyClass, Scope } from '../../src/ports/types.ts';
+import { pagesOrigin } from '../../src/pure/box-origins.ts';
+import { relyingParty } from '../../src/pure/challenge.ts';
 import { fileSha256, releaseHash } from '../../src/pure/release-hash.ts';
 import { parseWordlist } from '../../src/pure/codes.ts';
 import { hashToken, newToken } from '../../src/pure/tokens.ts';
@@ -38,9 +40,7 @@ import { softApprover } from '../kit/approver.ts';
 import { challenges, newApproverBody, wire } from './approve-world.ts';
 import { tarOf } from './tar.ts';
 
-const DOMAIN = 'localhost';
-const HOST = `keys.${DOMAIN}`;
-const RP = { rpId: HOST, origin: `https://${HOST}` } as const;
+const HOST = 'keybox.localhost';
 const BOOT = 'de300000-0000-4000-8000-000000000001';
 const PLATFORM = 'anthropic';
 const ADMIN_KEYREF = `${PLATFORM}/shop/ANTHROPIC_ADMIN_KEY`;
@@ -211,6 +211,14 @@ export async function startDemo(options: DemoOptions = {}): Promise<Demo> {
       if (executor === undefined) throw new RangeError('rotation is not open');
       return executor(approval);
     };
+    // The front door listens first: the passkey origin carries its port, and the core is opened with it.
+    const socket = join(dir, 'http.sock');
+    const certDir = join(dir, 'tls');
+    mkdirSync(certDir);
+    const certificate = makeCertificate(certDir, HOST);
+    const front = frontDoor(certificate, socket);
+    const port = await listen(front, options.port ?? 0);
+
     const approve = openApproveCore({
       parts,
       approverStore: priv,
@@ -218,7 +226,8 @@ export async function startDemo(options: DemoOptions = {}): Promise<Demo> {
       push,
       clock,
       random,
-      domain: DOMAIN,
+      domain: HOST,
+      pagesPort: port,
       wordlist,
       vet: () => 'ok',
       executors: { install_update: updater.executor, rotate_key: viaRotation('rotate_key'), add_key: viaRotation('add_key') },
@@ -229,16 +238,9 @@ export async function startDemo(options: DemoOptions = {}): Promise<Demo> {
     // As the service does, once the server listens: resume, reconcile and the schedule; the stop cancels the timers, then idle waits for work in flight.
     closers.push(() => rotationOpen.idle());
     const server = createApiServer({ routes: [...parts.routes, ...approve.routes, ...updater.routes, ...rotation.routes], tokens: approve.tokens.tokenStore, audit: parts.audit, random, clock, journal: () => undefined });
-    const socket = join(dir, 'http.sock');
     await server.listen(socket);
     closers.push(() => server.stop());
     closers.push(rotationOpen.run());
-
-    const certDir = join(dir, 'tls');
-    mkdirSync(certDir);
-    const certificate = makeCertificate(certDir, HOST);
-    const front = frontDoor(certificate, socket);
-    const port = await listen(front, options.port ?? 0);
     closers.push(() => closeServer(front));
 
     // The owner's phone has not set up: the console shows the setup code, and kb-code has written this boot's recovery code.
@@ -262,12 +264,12 @@ export async function startDemo(options: DemoOptions = {}): Promise<Demo> {
     if (typeof pasteId !== 'string') throw new Error('the box opened no paste task');
 
     const pages: readonly DemoPage[] = [
-      { name: 'setup (before the owner sets up)', url: `https://${HOST}/setup` },
-      { name: 'recovery or add a phone', url: `https://${HOST}/recover` },
-      { name: 'the app: queue of approvals', url: `https://${HOST}/` },
-      { name: 'paste a key', url: `https://${HOST}/paste.html#${pasteId}` },
+      { name: 'setup (before the owner sets up)', url: `${pagesOrigin(HOST, port)}/setup` },
+      { name: 'recovery or add a phone', url: `${pagesOrigin(HOST, port)}/recover` },
+      { name: 'the app: queue of approvals', url: `${pagesOrigin(HOST, port)}/` },
+      { name: 'paste a key', url: `${pagesOrigin(HOST, port)}/paste.html#${pasteId}` },
     ];
-    const pendingPhone = seedPendingPhone(driver, approve.approvers, closers);
+    const pendingPhone = seedPendingPhone(driver, approve.approvers, closers, relyingParty(HOST, port));
     return { port, certificatePath: join(certDir, 'cert.pem'), setupCode, recoveryCode, pages, pendingPhone, stop };
   } catch (error) {
     await stop();
@@ -282,7 +284,7 @@ const codeOf = (lines: readonly string[]): string => /([a-z]+(?: [a-z]+){11})/.e
  * Once an owner has set up: an approving phone asks for a registration code, a second phone registers with it at /recover/register (the box holds it
  * pending and opens the approver_add with its fingerprint). Stops looking when the demo stops.
  */
-async function seedPendingPhone(driver: Driver, approvers: { count(): number; ids(): readonly string[]; startAdd(issuerId: string): string }, closers: (() => void | Promise<void>)[]): Promise<void> {
+async function seedPendingPhone(driver: Driver, approvers: { count(): number; ids(): readonly string[]; startAdd(issuerId: string): string }, closers: (() => void | Promise<void>)[], rp: { readonly rpId: string; readonly origin: string }): Promise<void> {
   let stopped = false;
   closers.push(() => void (stopped = true));
   while (approvers.count() === 0) {
@@ -295,7 +297,7 @@ async function seedPendingPhone(driver: Driver, approvers: { count(): number; id
   const second = softApprover();
   const nonce = await must(driver.request({ path: '/app/nonce?purpose=register', headers: { 'x-kb-client-ip': '203.0.113.10' } }), 200, 'the registration nonce');
   const bytes = Uint8Array.from(Buffer.from((nonce as { nonce_b64: string }).nonce_b64, 'base64url'));
-  const body = { code, approver: newApproverBody(second), proof: wire(bytes, second.prove(challenges.register(bytes), RP)), phrase: 'green lantern' };
+  const body = { code, approver: newApproverBody(second), proof: wire(bytes, second.prove(challenges.register(bytes), rp)), phrase: 'green lantern' };
   await must(driver.request({ path: '/recover/register', method: 'POST', headers: { 'x-kb-client-ip': '203.0.113.10', 'content-type': 'application/json' }, body: JSON.stringify(body) }), 201, 'the second phone');
 }
 
@@ -310,7 +312,7 @@ async function main(argv: readonly string[]): Promise<void> {
   const demo = await startDemo({ ...(port === undefined ? {} : { port: Number(port) }), ...(dir === undefined ? {} : { dir }) });
   const out = [
     `demo serving on 127.0.0.1:${demo.port} (TLS, certificate ${demo.certificatePath})`,
-    `browse with: --host-resolver-rules="MAP ${HOST} 127.0.0.1:${demo.port}" --ignore-certificate-errors (the passkey origin is https://${HOST})`,
+    `browse with: --host-resolver-rules="MAP ${HOST} 127.0.0.1:${demo.port}" --ignore-certificate-errors (the passkey origin is ${pagesOrigin(HOST, demo.port)})`,
     `setup code: ${demo.setupCode}`,
     `recovery code: ${demo.recoveryCode}`,
     `paste value: ${DEMO_PASTE_VALUE}`,
