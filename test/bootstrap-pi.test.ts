@@ -80,14 +80,18 @@ test('KBOX-65 the stage-0 time wait comes before any apt-get that fetches, and s
   assert.equal(lines[disable - 1], 'done', 'the disable comes right after the wait loop');
 });
 
-test('KBOX-48 ssh goes first (design 3.6a): the purge, the mask and the authorized_keys removal, in that order, under their own step, before the stage-0 wait; snapd stays after it', () => {
+test('KBOX-48 the order is ssh items, then the whole hardening item, then the stage-0 wait, then the first fetching apt-get (design 3.6a steps 1-3)', () => {
+  const step = at(/^step ssh\b/);
   const purge = at(/^apt-get purge -y openssh-server openssh-client$/);
   const mask = at(/^systemctl mask --now ssh\.service ssh\.socket$/);
   const rm = at(/^rm -f \/home\/ubuntu\/\.ssh\/authorized_keys \/root\/\.ssh\/authorized_keys$/);
-  const step = at(/^step ssh\b/);
+  const hardening = at(/^step hardening\b/);
   const wait = at(/timedatectl/);
-  assert.ok(step < purge && purge < mask && mask < rm && rm < wait);
-  assert.ok(at(/^apt-get purge -y snapd$/) > wait, 'the snapd purge stays in hardening, after the wait');
+  assert.ok(step < purge && purge < mask && mask < rm && rm < hardening, 'ssh items, in order, then hardening');
+  for (const re of [/^if id ubuntu\b/, /^passwd -l root$/, /^apt-get purge -y snapd$/, /^systemctl mask getty@tty1\.service /, /^rfkill block /, /setterm --blank 0/, /^sysctl -p /, /ShowStatus=no/]) {
+    assert.ok(at(re) > hardening && at(re) < wait, `${re.source} is in the hardening item, before the stage-0 wait`);
+  }
+  assert.ok(hardening < wait && wait < firstFetch(), 'hardening, then the wait, then the first fetching apt-get');
   assert.ok(step > at(/^trap \S+ EXIT$/), 'after strict mode, guard and trap');
 });
 
@@ -199,7 +203,8 @@ echo "timedatectl $*" >> "$EVENTS"
 if [ "$n" -lt "\${FAKE_SYNC_AFTER:-0}" ]; then echo no; else echo yes; fi`,
   date: `n=$(cat "$DIR/date.n" 2>/dev/null || echo 0); echo $((n + 1)) > "$DIR/date.n"
 if [ "$n" -lt "\${FAKE_STALE_DATES:-0}" ]; then echo ${FLOOR - 1000}; else echo ${FLOOR + 1000}; fi`,
-  sleep: `echo "sleep $*" >> "$EVENTS"`,
+  sleep: `echo "sleep $*" >> "$EVENTS"
+if [ -n "\${FAKE_SLEEP_MAX:-}" ] && [ "$(grep -c '^sleep' "$EVENTS")" -ge "$FAKE_SLEEP_MAX" ]; then exit 1; fi`,
   'apt-get': `echo "apt-get $*" >> "$EVENTS"
 case " $* " in
   *" install "*" chrony "*)
@@ -284,6 +289,16 @@ test('KBOX-65 the stage-0 time wait waits while timesyncd reports no sync and wh
   const purge = b.events.indexOf('apt-get purge -y openssh-server openssh-client');
   assert.ok(purge >= 0 && purge < b.events.indexOf('timedatectl show -p NTPSynchronized --value'), 'ssh is purged before the time wait');
   assert.match(b.console, /Key box setup, 1 of 5: getting the time/);
+});
+
+test('KBOX-48 a run stuck at the stage-0 time wait has already hardened the image: step reads time, ubuntu is gone, the gettys are masked', async (t) => {
+  // The fake sleep gives up after three calls, so the never-synced loop ends (set -e) with no real time passing.
+  const b = await bootstrap(t, { syncAfter: 1_000_000, env: { FAKE_UBUNTU: '1', FAKE_SLEEP_MAX: '3' } });
+  assert.notEqual(b.status, 0, 'the run was stopped inside the wait');
+  assert.ok(b.events.filter((e) => e.startsWith('sleep')).length >= 3, 'the loop was reached');
+  assert.equal(b.file('var/lib/kb-bootstrap/step')?.trim(), 'time');
+  for (const call of ['userdel -r ubuntu', 'passwd -l root', 'systemctl mask getty@tty1.service autovt@tty1.service serial-getty@ttyS0.service', 'rfkill block wifi bluetooth']) assert.ok(b.events.includes(call), call);
+  assert.ok(!b.events.some((e) => /^apt-get (-y )?(update|upgrade|install)\b/.test(e)), 'nothing fetched');
 });
 
 test('KBOX-65 a whole run holds chrony masked through the install and unmasks it only after the NTS-only file is copied over the package\'s', async (t) => {

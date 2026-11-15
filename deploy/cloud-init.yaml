@@ -87,17 +87,6 @@ runcmd:
   - apt-get purge -y openssh-server openssh-client
   - systemctl mask --now ssh.service ssh.socket
   - rm -f /home/ubuntu/.ssh/authorized_keys /root/.ssh/authorized_keys
-  # Stage-0 time (M-G): the image's timesyncd gives a first plain time. Wait, with no deadline, for a sync that is at least the floor,
-  # then stop timesyncd at once: from here only elapsed time moves the clock until chrony's first NTS update. This comes before any
-  # apt-get.
-  - |
-    step time "1 of 5: getting the time"
-    . "$K/root/keybox-release.env"
-    while :; do
-      if [ "$(timedatectl show -p NTPSynchronized --value)" = yes ] && [ "$(date +%s)" -ge "$KB_TIME_FLOOR" ]; then break; fi
-      sleep 5
-    done
-    systemctl disable --now systemd-timesyncd
   # The image hardening of design 3.1: nobody logs in, nothing clears tty1, no radios, nothing scrolls a code off the screen.
   - |
     step hardening
@@ -115,6 +104,17 @@ runcmd:
     sysctl -p "$K/etc/sysctl.d/60-keybox.conf"
     mkdir -p "$K/etc/systemd/system.conf.d"
     printf '[Manager]\nShowStatus=no\n' > "$K/etc/systemd/system.conf.d/60-keybox.conf"
+  # Stage-0 time (M-G): the image's timesyncd gives a first plain time. Wait, with no deadline, for a sync that is at least the floor,
+  # then stop timesyncd at once: from here only elapsed time moves the clock until chrony's first NTS update. This comes before any
+  # apt-get.
+  - |
+    step time "1 of 5: getting the time"
+    . "$K/root/keybox-release.env"
+    while :; do
+      if [ "$(timedatectl show -p NTPSynchronized --value)" = yes ] && [ "$(date +%s)" -ge "$KB_TIME_FLOOR" ]; then break; fi
+      sleep 5
+    done
+    systemctl disable --now systemd-timesyncd
   # Packages. chrony is NOT installed here: it is masked first and installed in the time-daemon item, so no plain-NTP window exists.
   # A failed apt step is retried with the same line; it carries no integrity decision.
   - |
