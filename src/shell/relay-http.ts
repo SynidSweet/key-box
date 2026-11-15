@@ -9,6 +9,7 @@ import type { IncomingHttpHeaders, IncomingMessage, OutgoingHttpHeaders, ServerR
 import type { Duplex } from 'node:stream';
 import type { PlatformEntry } from '../ports/platform.ts';
 import type { RelayProfile } from '../ports/relay-profile.ts';
+import { relayUrl as relayUrlOf } from '../pure/box-origins.ts';
 import { parseClientAddress } from '../pure/address.ts';
 import type { ClientAddress } from '../pure/address.ts';
 import type { LendRefusal, RelayAuditRow } from '../pure/lend-protocol.ts';
@@ -37,7 +38,7 @@ export interface RelayDeps {
   readonly registry: readonly PlatformEntry[];
   readonly lend: LendClient;
   readonly egress: Egress;
-  /** The box's domain: the relay URL of a key is `https://api.keys.<domain>/r/<address>`. Absent until the bootstrap sets it: then /r/_/grants is unavailable. */
+  /** The box's one host name: the relay URL of a key is `https://<host>/r/<address>`. Absent until the bootstrap sets it: then /r/_/grants is unavailable. */
   readonly domain: string | undefined;
   /** A fixed code when the relay itself could not do its job. Never text of a request, a value or an answer. */
   readonly journal: (code: string) => void;
@@ -214,7 +215,7 @@ export function createRelayServer(deps: RelayDeps): RelayServer {
     trace.confirmed = true;
     trace.label = answer.machine;
     const list = answer.grants.map((g) => {
-      const relayUrl = `https://api.keys.${domain}/r/${relayAddressOf(g.keyref)}`;
+      const relayUrl = relayUrlOf(domain, relayAddressOf(g.keyref));
       const profile = engines.get(g.platform)?.profile;
       return { keyref: g.keyref, platform: g.platform, name: g.name, projects: g.projects, env: profile === undefined ? {} : profile.envForClients(relayUrl) };
     });

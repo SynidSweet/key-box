@@ -14,9 +14,9 @@ export interface Assertion {
 export interface AssertionExpect {
   /** The 32 challenge bytes the box built. */
   readonly challenge: Uint8Array;
-  /** Exactly `https://keys.<domain>`. */
+  /** Exactly the pages origin: `https://<host>:<pagesPort>`. */
   readonly origin: string;
-  /** Exactly `keys.<domain>`. */
+  /** Exactly the box's host name. */
   readonly rpId: string;
   /** The approver's last signature counter; 0 when it never sent one. */
   readonly storedCounter: number;

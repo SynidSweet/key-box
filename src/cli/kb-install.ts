@@ -30,7 +30,7 @@ function readPaths(env: NodeJS.ProcessEnv): InstallPaths {
   };
 }
 
-/** KB_DOMAIN, set by the bootstrap's drop-in: setup is checked against it. Unset, setup is refused; malformed, the run stops. */
+/** KB_DOMAIN (the box's full host name), set by the bootstrap's drop-in: setup is checked against it. Unset, setup is refused; malformed, the run stops. */
 function readDomain(env: NodeJS.ProcessEnv): string | undefined {
   const domain = env['KB_DOMAIN'];
   if (domain !== undefined && !DOMAIN_NAME.test(domain)) throw new RangeError('KB_DOMAIN is not a domain name');

@@ -27,6 +27,8 @@ export interface ApproveCoreDeps {
   readonly clock: Clock;
   readonly random: Random;
   readonly domain: string;
+  /** The port the pages are served on (design 3.3); production leaves it unset: 8443. */
+  readonly pagesPort?: number;
   readonly wordlist: readonly string[];
   /** Proposal-time checks that need an adapter's profile. With no adapter registered, every kind that needs one is refused. */
   readonly vet: (action: Action) => 'ok' | 'rejected';
@@ -78,7 +80,7 @@ function attempt(write: () => void, reason: string): ExecuteResult {
 
 export function openApproveCore(deps: ApproveCoreDeps): ApproveCore {
   const { parts } = deps;
-  const approvers = createApprovers({ store: deps.approverStore, trust: deps.trust, push: deps.push, audit: parts.audit, clock: deps.clock, random: deps.random, domain: deps.domain, wordlist: deps.wordlist });
+  const approvers = createApprovers({ store: deps.approverStore, trust: deps.trust, push: deps.push, audit: parts.audit, clock: deps.clock, random: deps.random, domain: deps.domain, pagesPort: deps.pagesPort, wordlist: deps.wordlist });
   const own: Partial<Record<ActionKind, Executor>> = {
     grant: (a) => {
       const action = a.action;

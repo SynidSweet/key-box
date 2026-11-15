@@ -8,6 +8,7 @@ import type { Clock, Scheduler } from './ports/clock.ts';
 import type { BoxIdentity, PlatformEntry, RegistryDeps, StoredKey } from './ports/platform.ts';
 import type { Random } from './ports/random.ts';
 import { DOMAIN_NAME } from './pure/actions.ts';
+import { oidcIssuer, pushSubject } from './pure/box-origins.ts';
 import type { Action, ActionKind } from './pure/actions.ts';
 import { parseWordlist } from './pure/codes.ts';
 import { RegistryRefused, assertRegistry } from './pure/profile.ts';
@@ -56,7 +57,7 @@ interface Config {
   readonly socket: string;
   /** Where kb-relay asks core for passes, grants, lent values, scans and audit rows (KBOX-3). Absent: no relay call is served. */
   readonly lendSocket: string | undefined;
-  /** The box's domain; the phone app lives on `keys.<domain>`. Absent until the bootstrap configures it. */
+  /** The box's one host name (KB_DOMAIN holds the full host); the phone app is on its pages port, the machine API on 443. Absent until the bootstrap configures it. */
   readonly domain: string | undefined;
   /** Core's staging directory, root's results directory and the running release's link (KBOX-6). */
   readonly staging: string;
@@ -160,7 +161,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   const egress = createLazyEgress(() => registry, loadEgressHosts(runtime.egressHostsFile));
   // Platform adapters register the short-lived values they mint here, so the scanner holds them while they live (KBOX-14).
   const minted = createMintedValues(clock);
-  const identity: BoxIdentity | undefined = config.domain === undefined || config.oidcAudience === undefined ? undefined : { issuer: `https://keys.${config.domain}`, audience: config.oidcAudience };
+  const identity: BoxIdentity | undefined = config.domain === undefined || config.oidcAudience === undefined ? undefined : { issuer: oidcIssuer(config.domain), audience: config.oidcAudience };
   // The stored-record reader the registry is handed answers nothing until the store is open below, so an early mint fails closed.
   let storedOf: ((keyref: string) => StoredKey | undefined) | undefined;
   // KBOX-55: a mint's exchange that STS accepted proves the box key's current generation. Rotation opens after the registry is built, so the
@@ -211,7 +212,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   if (config.domain === undefined) journal('no_domain');
   else {
     const trust = createTrustInstaller({ stagingDir: config.staging, resultsDir: config.installResults, random, clock, wait });
-    const push = createPush({ store: privateStore, transport: createHttpPushTransport(egress), scheduler, clock, random, audit: parts.audit, subject: `https://keys.${config.domain}` });
+    const push = createPush({ store: privateStore, transport: createHttpPushTransport(egress), scheduler, clock, random, audit: parts.audit, subject: pushSubject(config.domain) });
     const wordlist = parseWordlist(readFileSync(new URL('./data/wordlist.txt', import.meta.url), 'utf8'));
     if (runtime.proc !== undefined) idle = createIdleWatch({ files: runtime.proc, clock, push, linkMbps: linkMbps(), notifier: { notice: journal } });
     // Rotation needs the approvals and approvers that need its executors: the executors reach it once it is open (an approval is decided long after start).

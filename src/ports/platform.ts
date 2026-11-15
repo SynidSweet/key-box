@@ -33,7 +33,7 @@ export interface BoxMadeKey {
 }
 
 /**
- * KBOX-41: the box's own OIDC identity, from core's configuration: who it says it is (`https://keys.<domain>`) and the audience its
+ * KBOX-41: the box's own OIDC identity, from core's configuration: who it says it is (`https://<host>`, an identifier only) and the audience its
  * assertions are for (the platform's federation, for Google the workload identity provider). The adapter checks the audience's form.
  */
 export interface BoxIdentity {
@@ -41,7 +41,7 @@ export interface BoxIdentity {
   readonly audience: string;
 }
 
-/** KBOX-41: the two documents core serves for a platform that trusts the box's own identity, on keys.<domain>. */
+/** KBOX-41: the two documents core serves for a platform that trusts the box's own identity, on the pages port. */
 export interface IdentityDocuments {
   /** `/.well-known/openid-configuration` for this issuer. */
   discovery(issuer: string): Readonly<Record<string, unknown>>;

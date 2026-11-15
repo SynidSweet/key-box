@@ -1,5 +1,5 @@
 // KBOX-41: the box as an OIDC issuer toward Google's workload identity federation. Core serves the discovery document and the JWKS on
-// keys.<domain>; the minter signs one short ES256 assertion per exchange. The claims are fixed: issuer and audience come from core's
+// the pages port of https://<host>; the minter signs one short ES256 assertion per exchange. The claims are fixed: issuer and audience come from core's
 // configuration, the subject is the box, and no caller can ask for another audience or subject.
 import type { BoxIdentity } from '../../ports/platform.ts';
 import type { Lent } from '../../ports/types.ts';

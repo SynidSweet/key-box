@@ -1,4 +1,4 @@
-// KBOX-41, KBOX-55: the box's OIDC documents on keys.<domain>, open to anyone (Google's STS fetches them): the discovery document and the JWKS.
+// KBOX-41, KBOX-55: the box's OIDC documents (the issuer is https://<host>, an identifier only: a box in the tailnet cannot be fetched), served on the pages port: the discovery document and the JWKS.
 // The JWKS lists the box-made signing key's generations by their status: the one waiting to become current (`pending`), the current one and
 // the one before it while it is still kept (`grace`), never by arithmetic on `gen_current`, so a failed generation is never published and a
 // pending one after it always is (KBOX-22 names these documents as places that hold a URL to the box).
@@ -21,7 +21,7 @@ export interface IdentityRoutesDeps {
   readonly vault: Pick<Vault, 'lend'>;
   /** The generations the rotation store holds for a key, read at each request. */
   readonly generations: (keyref: string) => readonly Pick<GenRow, 'gen' | 'status'>[];
-  /** `https://keys.<domain>`. */
+  /** `https://<host>`. */
   readonly issuer: string;
 }
 

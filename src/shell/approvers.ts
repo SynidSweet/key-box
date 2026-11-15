@@ -101,8 +101,10 @@ export interface ApproversDeps {
   readonly audit: Audit;
   readonly clock: Clock;
   readonly random: Random;
-  /** The box's domain: the pages are on `keys.<domain>`. */
+  /** The box's one host name: the pages are on `https://<host>:<pagesPort>`. */
   readonly domain: string;
+  /** The port the pages are served on; unset: PAGES_PORT. */
+  readonly pagesPort?: number | undefined;
   readonly wordlist: readonly string[];
 }
 
@@ -155,7 +157,7 @@ export interface Approvers {
 }
 
 export function createApprovers(deps: ApproversDeps): Approvers {
-  const rp = relyingParty(deps.domain);
+  const rp = relyingParty(deps.domain, deps.pagesPort);
   const nonceKey = deps.random.bytes(32);
   /** Spent nonces, hex, with their issue time; dropped once too old to pass the age check anyway. */
   const spent = new Map<string, number>();

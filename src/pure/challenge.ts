@@ -2,6 +2,7 @@
 // approver over the same challenge. The one home of every challenge the box builds (approval, denial, view, operation,
 // paste, registration) and of the single-use nonces the pages carry. core and kb-install import this file; it has no state.
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { PAGES_PORT, pagesOrigin } from './box-origins.ts';
 import { canonicalJson } from './canonical.ts';
 import type { Es256PublicKey } from './cose.ts';
 import { verifyAssertion, verifyEs256Raw } from './webauthn.ts';
@@ -59,9 +60,9 @@ export function registrationChallenge(nonce: Uint8Array): Uint8Array {
   return sha256('kbox-v1-register', fixed(nonce, NONCE_BYTES, 'the nonce'));
 }
 
-/** The relying party of a box: the phone pages live on `keys.<domain>`. */
-export function relyingParty(domain: string): { readonly rpId: string; readonly origin: string } {
-  return { rpId: `keys.${domain}`, origin: `https://keys.${domain}` };
+/** The relying party of a box: the phone pages live on `<host>:<pagesPort>`. */
+export function relyingParty(host: string, pagesPort: number = PAGES_PORT): { readonly rpId: string; readonly origin: string } {
+  return { rpId: host, origin: pagesOrigin(host, pagesPort) };
 }
 
 // --- the approver proof --------------------------------------------------------------------------------------------
