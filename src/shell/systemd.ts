@@ -81,5 +81,11 @@ export function systemdUnits(deps: SystemdDeps): SystemdUnits {
       const done = spawnSync(node, [join(releaseDir, 'src', 'cli', 'kb-install.ts'), SELF_CHECK, FOR_UPDATE], { stdio: 'ignore', timeout, killSignal: 'SIGKILL', env });
       return Promise.resolve(done.error === undefined && done.status === 0);
     },
+    joinCheck(releaseDir, until) {
+      const node = deps.nodeOf?.(releaseDir) ?? join(releaseDir, 'bin', 'node');
+      const timeout = Math.max(1, until - deps.clock.now());
+      const done = spawnSync(node, [join(releaseDir, 'src', 'cli', 'kb-join.ts'), SELF_CHECK], { stdio: 'ignore', timeout, killSignal: 'SIGKILL', env: {} });
+      return Promise.resolve(done.error === undefined && done.status === 0);
+    },
   };
 }

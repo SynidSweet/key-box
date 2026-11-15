@@ -98,6 +98,10 @@ export interface FakeUnits extends ReleaseUnits {
   readonly selfChecks: { readonly release: string; readonly until: number }[];
   /** The self-check to run instead of passing (the real one from systemd.ts, say); undefined passes every release. */
   checkSelf: ReleaseUnits['selfCheck'] | undefined;
+  /** Each release directory whose kb-join check was run, with its bound, in order. */
+  readonly joinChecks: { readonly release: string; readonly until: number }[];
+  /** The kb-join check to run instead of passing; undefined passes every release. */
+  checkJoin: ReleaseUnits['joinCheck'] | undefined;
 }
 
 export function fakeUnits(current: () => string, now: () => number): FakeUnits {
@@ -123,6 +127,12 @@ export function fakeUnits(current: () => string, now: () => number): FakeUnits {
     selfCheck(release: string, until: number): Promise<boolean> {
       units.selfChecks.push({ release, until });
       return units.checkSelf === undefined ? Promise.resolve(true) : units.checkSelf(release, until);
+    },
+    joinChecks: [],
+    checkJoin: undefined,
+    joinCheck(release: string, until: number): Promise<boolean> {
+      units.joinChecks.push({ release, until });
+      return units.checkJoin === undefined ? Promise.resolve(true) : units.checkJoin(release, until);
     },
   };
   return units;

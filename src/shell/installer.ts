@@ -52,6 +52,10 @@ export interface ReleaseUnits {
   /** True when the kb-install of the release in `releaseDir` loads every module it imports and exits 0 in its no-op
    * `--self-check` mode before `until`: a release whose root installer cannot start must never stay current. */
   selfCheck(releaseDir: string, until: number): Promise<boolean>;
+  /** True when the kb-join of the release in `releaseDir` loads every module it imports and exits 0 in its `--self-check`
+   * mode before `until`: kb-join stays active from boot through a restart, so only this check shows that the release's
+   * kb-join would load at the next boot. */
+  joinCheck(releaseDir: string, until: number): Promise<boolean>;
 }
 
 /** Test seams between the steps of the safe copy, after it and after the switch. Production passes none. */
@@ -423,7 +427,10 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     const within = (ms: number): number => Math.min(deps.clock.now() + ms, rollbackAt);
     const healthy = await deps.units
       .restart(within(RESTART_WITHIN_MS))
-      .then(() => deps.units.selfCheck(release, within(SELF_CHECK_WITHIN_MS)))
+      .then(async () => {
+        const until = within(SELF_CHECK_WITHIN_MS);
+        return (await deps.units.selfCheck(release, until)) && (await deps.units.joinCheck(release, until));
+      })
       .then((loads) => loads && deps.units.healthCheck(h, rollbackAt))
       .catch(() => false);
     if (!healthy) {
