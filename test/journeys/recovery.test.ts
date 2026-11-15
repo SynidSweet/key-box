@@ -26,7 +26,7 @@ test('J5 recovery after a reboot: kb-code writes the code to the console, a new 
   const w = await approveWorld(t, { codes: { dir: codesDir, bootId } });
 
   const kbCode = (): { status: number | null; stdout: string; stderr: string } => {
-    const env = { KB_CODES_DIR: codesDir, KB_BOOT_ID_FILE: bootFile, KB_RUNTIME_CONFIG: config, KB_TRUST_FILE: join(dir, 'trust.json') };
+    const env = { KB_CODES_DIR: codesDir, KB_BOOT_ID_FILE: bootFile, KB_RUNTIME_CONFIG: config, KB_TRUST_FILE: join(dir, 'trust.json'), KB_DOMAIN: 'box.example' };
     const run = runNode(['--input-type=module', '-e', `Object.assign(process.env, ${JSON.stringify(env)});process.argv[2]='recovery';await import(${JSON.stringify(KB_CODE)});`], dir);
     return run;
   };

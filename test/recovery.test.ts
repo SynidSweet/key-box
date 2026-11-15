@@ -123,14 +123,14 @@ test('KBOX-20 kb-code writes the code to the console sink only: not to stdout, s
   writeFileSync(config, JSON.stringify({ console_device: device }));
   const codesDir = join(dir, 'codes');
   const env = `KB_CODES_DIR=${codesDir}`;
-  const run = runNode(['--input-type=module', '-e', `process.env.KB_CODES_DIR=${JSON.stringify(codesDir)};process.env.KB_BOOT_ID_FILE=${JSON.stringify(bootFile)};process.env.KB_RUNTIME_CONFIG=${JSON.stringify(config)};process.env.KB_TRUST_FILE=${JSON.stringify(join(dir, 'trust.json'))};process.argv[2]='recovery';await import(${JSON.stringify(new URL('../src/cli/kb-code.ts', import.meta.url).pathname)});`], dir);
+  const run = runNode(['--input-type=module', '-e', `process.env.KB_CODES_DIR=${JSON.stringify(codesDir)};process.env.KB_BOOT_ID_FILE=${JSON.stringify(bootFile)};process.env.KB_RUNTIME_CONFIG=${JSON.stringify(config)};process.env.KB_TRUST_FILE=${JSON.stringify(join(dir, 'trust.json'))};process.env.KB_DOMAIN='box.example';process.argv[2]='recovery';await import(${JSON.stringify(new URL('../src/cli/kb-code.ts', import.meta.url).pathname)});`], dir);
   assert.equal(run.status, 0, run.stderr);
   const shown = readFileSync(device, 'utf8');
   const code = /([a-z]+(?: [a-z]+){11})/.exec(shown)?.[1];
   assert.ok(code !== undefined, 'the console got the code');
   for (const [name, text] of [['stdout', run.stdout], ['stderr', run.stderr], ['env', env]] as const) assert.equal(text.includes(code), false, name);
   for (const f of readdirSync(codesDir)) assert.equal(readFileSync(join(codesDir, f), 'utf8').includes(code), false, f);
-  const again = runNode(['--input-type=module', '-e', `process.env.KB_CODES_DIR=${JSON.stringify(codesDir)};process.env.KB_BOOT_ID_FILE=${JSON.stringify(bootFile)};process.env.KB_RUNTIME_CONFIG=${JSON.stringify(config)};process.env.KB_TRUST_FILE=${JSON.stringify(join(dir, 'trust.json'))};process.argv[2]='recovery';await import(${JSON.stringify(new URL('../src/cli/kb-code.ts', import.meta.url).pathname)});`], dir);
+  const again = runNode(['--input-type=module', '-e', `process.env.KB_CODES_DIR=${JSON.stringify(codesDir)};process.env.KB_BOOT_ID_FILE=${JSON.stringify(bootFile)};process.env.KB_RUNTIME_CONFIG=${JSON.stringify(config)};process.env.KB_TRUST_FILE=${JSON.stringify(join(dir, 'trust.json'))};process.env.KB_DOMAIN='box.example';process.argv[2]='recovery';await import(${JSON.stringify(new URL('../src/cli/kb-code.ts', import.meta.url).pathname)});`], dir);
   assert.equal(again.status, 0, again.stderr);
   assert.equal(readFileSync(device, 'utf8'), shown, 'a second run in the same boot writes no new code');
 });
