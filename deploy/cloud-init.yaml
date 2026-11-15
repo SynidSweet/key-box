@@ -30,6 +30,11 @@ write_files:
       NODE_SHA256=9189756f81aa0d5c706826f2a7763227a5abba0b5ca8c770096a25f35cf10e55
       CADDY_ARCHIVE_SHA256=501e955fa634c5aab63247458c3ac655cfdd6cbf1e0436528f41248451c190ac
       CADDY_SHA256=6f297c7f4807d9e4d54137de4dc26fe51e9ddf9c2dae69bc6762d05330a77984
+  # A first-boot apt-daily or unattended-upgrades may hold the dpkg lock: apt waits for it (cloud-init writes this before runcmd).
+  - path: /etc/apt/apt.conf.d/50keybox-lock
+    permissions: '0644'
+    content: |
+      DPkg::Lock::Timeout "1800";
   # unattended-upgrades also takes Tailscale's packages (the origin its Release file names).
   - path: /etc/apt/apt.conf.d/52keybox-tailscale
     permissions: '0644'
@@ -77,6 +82,11 @@ runcmd:
       printf '%s\n' "$1" > "$K/var/lib/kb-bootstrap/step"
       if [ -n "${2:-}" ]; then printf 'Key box setup, %s\n' "$2" >> "$K/dev/tty1"; fi
     }
+  # ssh first (design 3.6a): these need no network and no correct clock.
+  - step ssh
+  - apt-get purge -y openssh-server openssh-client
+  - systemctl mask --now ssh.service ssh.socket
+  - rm -f /home/ubuntu/.ssh/authorized_keys /root/.ssh/authorized_keys
   # Stage-0 time (M-G): the image's timesyncd gives a first plain time. Wait, with no deadline, for a sync that is at least the floor,
   # then stop timesyncd at once: from here only elapsed time moves the clock until chrony's first NTS update. This comes before any
   # apt-get.
@@ -88,9 +98,6 @@ runcmd:
       sleep 5
     done
     systemctl disable --now systemd-timesyncd
-  - apt-get purge -y openssh-server openssh-client
-  - systemctl mask --now ssh.service ssh.socket
-  - rm -f /home/ubuntu/.ssh/authorized_keys /root/.ssh/authorized_keys
   # The image hardening of design 3.1: nobody logs in, nothing clears tty1, no radios, nothing scrolls a code off the screen.
   - |
     step hardening

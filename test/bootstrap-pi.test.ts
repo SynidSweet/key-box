@@ -45,7 +45,7 @@ const at = (re: RegExp, from = 0): number => {
   assert.ok(i >= 0, `runcmd has a line matching ${re.source}`);
   return i;
 };
-const firstApt = (): number => at(/\bapt-get\b/);
+const firstFetch = (): number => at(/\bapt-get (-y )?(update|upgrade|install)\b/);
 
 // --- hardening, time, packages: the text ------------------------------------------------------------------------------
 
@@ -72,12 +72,27 @@ test('KBOX-48 the first runcmd item holds set -eu, the re-run guard and the trap
   assert.match(first, /Key box setup stopped at: \$/);
 });
 
-test('KBOX-65 the stage-0 time wait comes before any apt-get, and systemd-timesyncd is disabled right after it, before any apt-get', () => {
+test('KBOX-65 the stage-0 time wait comes before any apt-get that fetches, and systemd-timesyncd is disabled right after it, before any fetch', () => {
   const wait = at(/timedatectl/);
   const disable = at(/^systemctl disable --now systemd-timesyncd$/);
-  assert.ok(wait < firstApt(), 'the wait comes before every apt-get (the ssh purge included)');
-  assert.ok(disable > wait && disable < firstApt());
+  assert.ok(wait < firstFetch(), 'the wait comes before every apt-get that fetches (update, upgrade, install)');
+  assert.ok(disable > wait && disable < firstFetch());
   assert.equal(lines[disable - 1], 'done', 'the disable comes right after the wait loop');
+});
+
+test('KBOX-48 ssh goes first (design 3.6a): the purge, the mask and the authorized_keys removal, in that order, under their own step, before the stage-0 wait; snapd stays after it', () => {
+  const purge = at(/^apt-get purge -y openssh-server openssh-client$/);
+  const mask = at(/^systemctl mask --now ssh\.service ssh\.socket$/);
+  const rm = at(/^rm -f \/home\/ubuntu\/\.ssh\/authorized_keys \/root\/\.ssh\/authorized_keys$/);
+  const step = at(/^step ssh\b/);
+  const wait = at(/timedatectl/);
+  assert.ok(step < purge && purge < mask && mask < rm && rm < wait);
+  assert.ok(at(/^apt-get purge -y snapd$/) > wait, 'the snapd purge stays in hardening, after the wait');
+  assert.ok(step > at(/^trap \S+ EXIT$/), 'after strict mode, guard and trap');
+});
+
+test('KBOX-65 apt waits up to 30 minutes for the package lock a first-boot apt-daily may hold, by a file cloud-init writes before runcmd', () => {
+  assert.match(cloudInit, /  - path: \/etc\/apt\/apt\.conf\.d\/50keybox-lock\n    permissions: '0644'\n    content: \|\n      DPkg::Lock::Timeout "1800";\n/);
 });
 
 test('KBOX-65 step 4 installs unattended-upgrades and nftables and not chrony; chrony comes only with tailscale in step 6', () => {
@@ -265,7 +280,9 @@ test('KBOX-65 the stage-0 time wait waits while timesyncd reports no sync and wh
   assert.ok(sleeps >= 4, `it waited at least four rounds (two without sync, two before the floor), saw ${sleeps}`);
   const disable = b.events.indexOf('systemctl disable --now systemd-timesyncd');
   assert.ok(disable > b.events.lastIndexOf('timedatectl show -p NTPSynchronized --value'), 'timesyncd is stopped after the last time check');
-  assert.ok(disable < b.events.findIndex((e) => e.startsWith('apt-get')), 'and before any apt-get');
+  assert.ok(disable < b.events.findIndex((e) => /^apt-get (-y )?(update|upgrade|install)\b/.test(e)), 'and before any apt-get that fetches');
+  const purge = b.events.indexOf('apt-get purge -y openssh-server openssh-client');
+  assert.ok(purge >= 0 && purge < b.events.indexOf('timedatectl show -p NTPSynchronized --value'), 'ssh is purged before the time wait');
   assert.match(b.console, /Key box setup, 1 of 5: getting the time/);
 });
 
