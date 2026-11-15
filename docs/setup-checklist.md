@@ -62,12 +62,12 @@ Where to look on each platform, from that platform's public documentation, read 
 
 | Platform | Delete these | Where (read 2026-11-16) |
 |---|---|---|
-| Google | Disable the workload identity provider the agents' list names (this ends the stolen signing key's power; the box's `kbox-wif` and `kbox-keys` service accounts are named with it); delete every API key of the listed projects | IAM and Admin, Workload Identity Pools: open the pool, edit the provider (Google's page names no separate disable control, so disable it there, or delete the provider if no switch is shown); APIs and Services, Credentials, for the keys |
+| Google | Disable the box's workload identity pool the agents' list names (this ends the stolen signing key's power; the box's `kbox-wif` and `kbox-keys` service accounts are named with it); delete every API key of the listed projects | IAM and Admin, Workload Identity Pools: open the box's pool and switch its Status toggle to Disabled (Google's docs name this for the pool, which stops every provider in it); APIs and Services, Credentials, for the keys |
 | OpenAI | Every admin key (`sk-admin-`) of the organisation; every service-account key of the listed projects | Organization settings, Admin keys; the project's Service accounts. Not confirmed from the public docs (OpenAI's docs refused automated reading) |
 | Anthropic | Every admin key; every ordinary API key of the listed workspaces | Claude Console, Settings, Admin keys and Settings, API keys (`platform.claude.com`), the Organization page for an individual account; page paths from the Console, not confirmed in the docs text |
 | Stripe | Every restricted key (`rk_live_`); the box holds no secret key | Dashboard, API keys page: the overflow menu of the key in the "Restricted keys" list, then Expire key (Stripe's docs name expire and rotate; there is no separate delete) |
-| Supabase | Every personal access token; the API keys of the listed projects | Account, Access Tokens (`/dashboard/account/tokens`, named as where tokens are made; listing and revoking there is not stated in the docs); the project's API settings |
-| Vercel | Every project-scoped token of the listed projects; any account-level token the agents name | Account Settings, Tokens. The REST docs name a delete for an auth token; the page path is not stated there |
+| Supabase | Every personal access token; the API keys of the listed projects | Account preferences, Access Tokens (`supabase.com/dashboard/account/tokens`); the project's Settings, API Keys |
+| Vercel | Every project-scoped token of the listed projects; any account-level token the agents name | Account Settings, Tokens (`vercel.com/account/tokens`): delete the token there |
 | ElevenLabs | Every service-account API key of the listed service accounts | Workspace settings (profile icon, top right), Service Accounts tab: delete the key |
 
 The agents mark the box retired in mission control at once, so nothing calls it. When you want a new box, they prepare the steps above again; the policy needs no change unless the phone changed.
