@@ -2,14 +2,15 @@
 // from the RUNNING release: systemd starts /opt/keybox/current/bin/node on /opt/keybox/current/src/cli/kb-install.ts, Node
 // resolves the main module's real path once, and every module below is a static import loaded before the first step, so a
 // rollback after the switch never loads code from the new release. stdout carries a count, never a request's content.
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { DOMAIN_NAME } from '../pure/actions.ts';
 import { parseWordlist } from '../pure/codes.ts';
+import { TIME_OK_FILE } from '../pure/time-gate.ts';
 import { systemClock, systemScheduler } from '../shell/clock.ts';
 import { runInstaller } from '../shell/installer.ts';
 import type { InstallPaths } from '../shell/installer.ts';
-import { SELF_CHECK, systemdUnits } from '../shell/systemd.ts';
+import { FOR_UPDATE, SELF_CHECK, systemdUnits } from '../shell/systemd.ts';
 
 const absolute = (value: string | undefined, fallback: string): string => {
   const path = value ?? fallback;
@@ -42,24 +43,29 @@ async function main(): Promise<number> {
   const env = process.env;
   const paths = readPaths(env);
   const wordlist = readWordlist();
+  // The deploy unit sets it (the time gate); unset, as in the tests, there is no gate.
+  const timeOkFile = env['KB_TIME_OK_FILE'];
   const units = systemdUnits({
     systemctl: absolute(env['KB_SYSTEMCTL'], '/usr/bin/systemctl'),
     units: ['keybox.service', 'keyrelay.service', 'caddy.service'],
     healthSockets: [absolute(env['KB_CORE_SOCKET'], '/run/keybox/http.sock'), absolute(env['KB_RELAY_SOCKET'], '/run/keyrelay/http.sock')],
     clock: systemClock,
+    ...(timeOkFile === undefined ? {} : { timeOkFile }),
     wait: (ms) => new Promise<void>((resolve) => void systemScheduler.after(ms, resolve)),
   });
-  const answered = await runInstaller({ paths, units, clock: systemClock, wordlist, domain: readDomain(env), journal: (code) => void process.stderr.write(`kb-install: ${code}\n`) });
+  const answered = await runInstaller({ paths, units, clock: systemClock, wordlist, domain: readDomain(env), ...(timeOkFile === undefined ? {} : { timeAuthenticated: () => existsSync(timeOkFile) }), journal: (code) => void process.stderr.write(`kb-install: ${code}\n`) });
   process.stdout.write(`kb-install: ${answered.length} answered\n`);
   return 0;
 }
 
 /** `--self-check`, run by the installing release's kb-install on a new release before it counts as healthy: every module
  * above is a static import, so reaching this line loaded them all; the wordlist is read too. Nothing else is touched. */
-function selfCheck(): number {
+function selfCheck(forUpdate: boolean): number {
   readWordlist();
-  return 0;
+  // The installing release passes its own KB_TIME_OK_FILE: a release that renames the variable or moves the path is
+  // refused here, so the host's unit (which an update never changes) and this release cannot disagree.
+  return forUpdate && process.env['KB_TIME_OK_FILE'] !== TIME_OK_FILE ? 1 : 0;
 }
 
 // A refusal is a decided outcome written as a result (exit 0); only a run that could not start or read staging fails.
-process.exitCode = process.argv[2] === SELF_CHECK ? selfCheck() : await main();
+process.exitCode = process.argv[2] === SELF_CHECK ? selfCheck(process.argv[3] === FOR_UPDATE) : await main();

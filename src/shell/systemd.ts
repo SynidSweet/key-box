@@ -15,6 +15,8 @@ const ASK_EVERY_MS = 1_000;
 const ASK_TIMEOUT_MS = 2_000;
 /** kb-install's argument for its no-op mode: load every module, touch nothing, exit 0. */
 export const SELF_CHECK = '--self-check';
+/** The installing kb-install's second argument: the new release also compares its time-gate wiring with the host's. */
+export const FOR_UPDATE = '--for-update';
 
 export interface SystemdDeps {
   readonly systemctl: string;
@@ -24,6 +26,8 @@ export interface SystemdDeps {
   readonly clock: Clock;
   readonly wait: (ms: number) => Promise<void>;
   /** The Node that runs a release's kb-install for its self-check: by default the release's own pinned `bin/node`. */
+  /** kb-install's own KB_TIME_OK_FILE value, the one variable the self-check spawn gets; unset, it gets none. */
+  readonly timeOkFile?: string;
   readonly nodeOf?: (releaseDir: string) => string;
 }
 
@@ -71,8 +75,10 @@ export function systemdUnits(deps: SystemdDeps): SystemdUnits {
     selfCheck(releaseDir, until) {
       const node = deps.nodeOf?.(releaseDir) ?? join(releaseDir, 'bin', 'node');
       const timeout = Math.max(1, until - deps.clock.now());
-      // No environment: the self-check reads no path, so nothing of kb-install's own settings may reach it.
-      const done = spawnSync(node, [join(releaseDir, 'src', 'cli', 'kb-install.ts'), SELF_CHECK], { stdio: 'ignore', timeout, killSignal: 'SIGKILL', env: {} });
+      // Only the gate's path reaches the check, so the new release can compare it with its own constant; nothing else of
+      // kb-install's own settings does. Unset here, nothing is passed and the new release fails the check: fail closed.
+      const env = deps.timeOkFile === undefined ? {} : { KB_TIME_OK_FILE: deps.timeOkFile };
+      const done = spawnSync(node, [join(releaseDir, 'src', 'cli', 'kb-install.ts'), SELF_CHECK, FOR_UPDATE], { stdio: 'ignore', timeout, killSignal: 'SIGKILL', env });
       return Promise.resolve(done.error === undefined && done.status === 0);
     },
   };

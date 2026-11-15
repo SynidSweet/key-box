@@ -9,6 +9,8 @@ User=root
 # Runs from the RUNNING release, never from staging or a new releases/<H>.
 ExecStart=/opt/keybox/current/bin/node /opt/keybox/current/src/cli/kb-install.ts
 TimeoutStartSec=120s
+# The time gate (3.6a): until kb-join writes this file, every request is refused without reading the clock.
+Environment=KB_TIME_OK_FILE=/run/keybox-time/ok
 LimitCORE=0
 NoNewPrivileges=yes
 ProtectSystem=strict

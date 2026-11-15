@@ -76,6 +76,10 @@ export interface InstallerDeps {
   readonly journal?: (code: string) => void;
   /** Makes a directory's renames and removals durable (fsync of the directory); `syncDirectory` unless a test watches it. */
   readonly syncDir?: (dir: string) => void;
+  /** Whether the box's time is authenticated (the gate file exists), read once at the start of a run. Absent means it is.
+   * Not authenticated, every request is refused without a look at the clock and an interrupted switch is undone without a
+   * restart: no unit has run this boot (3.6a). */
+  readonly timeAuthenticated?: () => boolean;
 }
 
 /** fsyncs a directory, so an entry renamed into it, or removed from it, survives a power cut in that state. */
@@ -134,6 +138,7 @@ const endsWith = (name: Buffer, suffix: Buffer): boolean => name.length > suffix
 export async function runInstaller(deps: InstallerDeps): Promise<readonly { readonly name: string; readonly result: RootResult }[]> {
   const { paths } = deps;
   const hooks = deps.hooks ?? {};
+  const authenticated = deps.timeAuthenticated?.() ?? true;
   const runDeadline = deps.clock.now() + RUN_BUDGET_MS;
   const syncDir = deps.syncDir ?? syncDirectory;
   const noCodes = (): never => {
@@ -372,7 +377,8 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
     const release = join(paths.releases, h);
     const ranFromH = existsSync(release);
     if (running !== base) switchCurrent(base);
-    if (ranFromH) await restartBy(Math.min(deps.clock.now() + RESTART_WITHIN_MS, runDeadline));
+    // Not authenticated: no unit has run this boot (they require kb-join), so there is nothing to restart.
+    if (ranFromH && authenticated) await restartBy(Math.min(deps.clock.now() + RESTART_WITHIN_MS, runDeadline));
     rmSync(`${release}.tmp`, { recursive: true, force: true });
     rmSync(release, { recursive: true, force: true });
     writeResult(h, 'failed:interrupted');
@@ -495,6 +501,7 @@ export async function runInstaller(deps: InstallerDeps): Promise<readonly { read
       if (!taken.ok) return `refused:${taken.code}`;
       const parsed = parseRootRequest(taken.bytes);
       if (!parsed.ok) return `refused:${parsed.code}`;
+      if (!authenticated) return parsed.request.kind === 'install' ? 'refused:timeout' : 'refused:late';
       return parsed.request.kind === 'install' ? await install(stagingFd, parsed.request) : trustChange(parsed.request);
     } catch (error) {
       deps.journal?.(error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : 'internal');
