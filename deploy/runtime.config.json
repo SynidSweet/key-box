@@ -1,4 +1,3 @@
 {
-  "console_device": "/dev/ttyAMA0",
-  "link_mbps": 1000
+  "console_device": "/dev/ttyAMA0"
 }

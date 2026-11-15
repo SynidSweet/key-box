@@ -15,7 +15,6 @@ import { RegistryRefused, assertRegistry } from './pure/profile.ts';
 import { shapeOfKey } from './pure/platform-shape.ts';
 import { vetAction } from './pure/proposal-vet.ts';
 import { osErrorCode } from './pure/errors.ts';
-import { decodeJsonBody } from './pure/schemas.ts';
 import { openApproveCore } from './shell/approve-core.ts';
 import { systemClock, systemScheduler } from './shell/clock.ts';
 import { openCore } from './shell/core.ts';
@@ -24,8 +23,6 @@ import { createLendHandler, loadCredentialShapes } from './shell/lend-core.ts';
 import { createLendServer } from './shell/lend-socket.ts';
 import { createMintedValues } from './shell/minted-values.ts';
 import type { Route } from './shell/http.ts';
-import { createIdleWatch } from './shell/idle-watch.ts';
-import type { IdleWatch } from './shell/idle-watch.ts';
 import { createShareWriter, shareRoute } from './shell/share-writer.ts';
 import { createMetaShareSource } from './shell/share-source.ts';
 import { createPush } from './shell/push.ts';
@@ -91,18 +88,8 @@ function readConfig(env: NodeJS.ProcessEnv): Config {
 const SWEEP_EVERY_MS = 60 * 60_000;
 /** How often core looks for root's answer to an install it waits for. */
 const SETTLE_EVERY_MS = 5_000;
-/** How often core samples /proc for the idle watch (KBOX-21). */
-const IDLE_SAMPLE_EVERY_MS = 10 * 60_000;
 /** How often granted keys are checked again (KBOX-24: daily). */
 const GRANT_CHECK_EVERY_MS = 24 * 3600_000;
-
-/** The nominal link speed from deploy/runtime.config.json (KBOX-21); the file is shared, so only this member is read. */
-function linkMbps(): number {
-  const raw = decodeJsonBody(readFileSync(new URL('../deploy/runtime.config.json', import.meta.url)));
-  const value = raw.ok && typeof raw.value === 'object' && raw.value !== null ? (raw.value as Record<string, unknown>)['link_mbps'] : undefined;
-  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) throw new RangeError('runtime.config.json does not name link_mbps');
-  return value;
-}
 
 /** The route table of core (KBOX-1): the store's control routes, then the phone and approval routes, then the update intake. */
 export function coreRoutes(parts: readonly Route[], approve: readonly Route[], update: readonly Route[]): readonly Route[] {
@@ -124,11 +111,6 @@ export interface CoreRuntime {
   readonly registry?: readonly PlatformEntry[] | ((deps: RegistryDeps) => readonly PlatformEntry[]);
   /** The egress host list core reads and checks at its start; production reads deploy/egress-hosts.json (a test passes another file). */
   readonly egressHostsFile?: URL;
-  /**
-   * The /proc files of the idle watch (KBOX-21). The system runtime names the real ones; a runtime that names none runs no idle watch and
-   * holds no reserve (an in-process test core).
-   */
-  readonly proc?: { readonly stat: string; readonly meminfo: string; readonly netdev: string };
 }
 
 const systemRuntime: CoreRuntime = {
@@ -136,7 +118,6 @@ const systemRuntime: CoreRuntime = {
   scheduler: systemScheduler,
   random: systemRandom,
   journal: (code) => void process.stderr.write(`keybox core: ${code}\n`),
-  proc: { stat: '/proc/stat', meminfo: '/proc/meminfo', netdev: '/proc/net/dev' },
 };
 
 export interface StartedCore {
@@ -185,7 +166,6 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   // runtime's source when a test passes one.
   const registrySource = createPlatformSource({ registry, meta: parts.meta, vault: parts.vault, keyInfo: storedRecord, deleting: () => deletingKeyrefs(parts.db) });
   let approve: ReturnType<typeof openApproveCore> | undefined;
-  let idle: IdleWatch | undefined;
   let rotation: Rotation | undefined;
   let grantChecks: GrantChecks | undefined;
   let identityPages: readonly Route[] = [];
@@ -214,7 +194,6 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
     const trust = createTrustInstaller({ stagingDir: config.staging, resultsDir: config.installResults, random, clock, wait });
     const push = createPush({ store: privateStore, transport: createHttpPushTransport(egress), scheduler, clock, random, audit: parts.audit, subject: pushSubject(config.domain) });
     const wordlist = parseWordlist(readFileSync(new URL('./data/wordlist.txt', import.meta.url), 'utf8'));
-    if (runtime.proc !== undefined) idle = createIdleWatch({ files: runtime.proc, clock, push, linkMbps: linkMbps(), notifier: { notice: journal } });
     // Rotation needs the approvals and approvers that need its executors: the executors reach it once it is open (an approval is decided long after start).
     const viaRotation = (kind: 'rotate_key' | 'add_key' | 'delete_key'): Executor => (approval) => {
       const executor = rotation?.executors[kind];
@@ -340,12 +319,6 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
     }
   };
   if (approve !== undefined) settle();
-  let cancelIdle = (): void => undefined;
-  const sampleIdle = (): void => {
-    idle?.sample();
-    cancelIdle = scheduler.after(IDLE_SAMPLE_EVERY_MS, sampleIdle);
-  };
-  if (idle !== undefined) sampleIdle();
   if (approve !== undefined) sweep();
   // KBOX-24: granted keys are checked at start and then daily. Like every timed job the next run is armed before the work, so a run that
   // throws (audited) never stops the schedule; the run in flight is waited for before the stores close.
@@ -372,9 +345,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   const shutDown = async (): Promise<void> => {
     cancelSweep();
     cancelSettle();
-    cancelIdle();
     cancelGrantCheck();
-    idle?.stop();
     shares.stop();
     stopRotation();
     await Promise.all([server.stop(), lend.stop()]);
