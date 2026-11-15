@@ -73,6 +73,8 @@ export interface CoreDeps {
   readonly random: Random;
   /** Where the schema codes of KBOX-56 go (`schema_newer`, `schema_migration_failed`); a test over a scratch directory may leave it out. */
   readonly journal?: (code: string) => void;
+  /** The box's domain, when configured (KB_DOMAIN); /api/meta derives the OIDC issuer from it. */
+  readonly domain?: string;
 }
 
 export interface CoreParts {
@@ -100,5 +102,5 @@ export function openCore(deps: CoreDeps): CoreParts {
   const vaultRoot = join(deps.stateDir, 'vault');
   for (const ref of sweepOrphanTemps(vaultRoot)) audit.append({ action: 'vault.temp_swept', subject: ref, at: deps.clock.now() });
   const vault = createFileVault(vaultRoot);
-  return { db, meta, audit, events, hub, poller, vault, share: { signingKey: shareSigningKeyIn(vault), values: shareValuesIn(vault) }, routes: controlRoutes({ bootstrapFactsPath: join(deps.stateDir, 'bootstrap-facts.json'), meta, audit, events, poller }), close: () => db.close() };
+  return { db, meta, audit, events, hub, poller, vault, share: { signingKey: shareSigningKeyIn(vault), values: shareValuesIn(vault) }, routes: controlRoutes({ bootstrapFactsPath: join(deps.stateDir, 'bootstrap-facts.json'), meta, audit, events, poller, ...(deps.domain === undefined ? {} : { domain: deps.domain }) }), close: () => db.close() };
 }

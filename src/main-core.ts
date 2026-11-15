@@ -177,7 +177,7 @@ export async function startCore(env: NodeJS.ProcessEnv, runtime: CoreRuntime = s
   };
   const registry = typeof runtime.registry === 'function' ? runtime.registry(registryDeps) : (runtime.registry ?? createRegistry(registryDeps));
   assertRegistry(registry);
-  const parts = openCore({ stateDir: config.stateDir, clock, scheduler, random, journal });
+  const parts = openCore({ stateDir: config.stateDir, clock, scheduler, random, journal, ...(config.domain === undefined ? {} : { domain: config.domain }) });
   const storedRecord = (keyref: string): StoredKey | undefined => readKeyInfo(parts.db, keyref);
   storedOf = storedRecord;
   const privateStore = openPrivateDatabase(join(config.stateDir, 'private.db'), journal);
