@@ -15,7 +15,7 @@ import { counting } from './counters.ts';
 
 // Pinned as measured: PER_OPERATION (src/pure/bench.ts) must equal these, and the judge multiplies PER_OPERATION.
 const APPROVAL_COMMITS = 6;
-const RELAY_COMMITS = 5;
+const RELAY_COMMITS = 1;
 
 test('M1 per approval: two ES256 verifies (the design says two), six SQLite commits (one durable write transaction each), seven SHA-256 calls', async (t) => {
   const w = await approveWorld(t);
@@ -30,7 +30,7 @@ test('M1 per approval: two ES256 verifies (the design says two), six SQLite comm
   assert.deepEqual({ commits: counts.commits, es256: counts.es256 }, PER_OPERATION.approval, 'the judge multiplies PER_OPERATION: it follows the code');
 });
 
-test('M1 per relay call: one SHA-256 (the token check), no signature verify, five SQLite commits', async (t) => {
+test('M1 per relay call: one SHA-256 (the token check), no signature verify, one SQLite commit', async (t) => {
   const w = await relayWorld(t);
   let status = 0;
   const counts = await counting(async () => void (status = (await w.call('/r/adminkey1/v1/models')).status));
@@ -70,4 +70,23 @@ test('M1 commits: an autocommit write is one commit, an explicit transaction of 
   const execWrite = await counting(() => void db.exec('DELETE FROM t'));
   db.close();
   assert.deepEqual([autocommit.commits, explicit.commits, read.commits, execWrite.commits], [1, 1, 0, 1]);
+});
+
+test('M1 commits: a read transaction closed with COMMIT wrote nothing and counts none (no fsync under WAL), while a write transaction still counts one', async () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE t (n INTEGER)');
+  const select = db.prepare('SELECT n FROM t');
+  const insert = db.prepare('INSERT INTO t (n) VALUES (?)');
+  const readTx = await counting(() => {
+    db.exec('BEGIN');
+    select.all();
+    db.exec('COMMIT');
+  });
+  const writeTx = await counting(() => {
+    db.exec('BEGIN');
+    insert.run(1);
+    db.exec('COMMIT');
+  });
+  db.close();
+  assert.deepEqual([readTx.commits, writeTx.commits], [0, 1]);
 });

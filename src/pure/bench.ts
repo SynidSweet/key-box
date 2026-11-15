@@ -43,7 +43,7 @@ export function meminfoKib(text: string, key: 'MemTotal' | 'MemAvailable'): numb
 /** The work one operation does, as counted by test/perf/counts.test.ts (M1; the test asserts the code still does exactly this). */
 export const PER_OPERATION = {
   approval: { commits: 6, es256: 2 },
-  relay: { commits: 5, sha256: 1 },
+  relay: { commits: 1, sha256: 1 },
   share: { sha256: 13351 },
 } as const;
 

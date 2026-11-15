@@ -1,7 +1,8 @@
 // M1 counters (design 3.8): hardware-free counts of the work one operation does, taken from the seams the tests already run through.
 // SHA-256 and ES256 work is counted by wrapping node:crypto's `createHash`, `createHmac` and `verify` with a counting twin that calls the
 // real one (node's own module, not ours); a commit is one durable write transaction: an explicit `COMMIT` the real SQLite connection receives,
-// or a write statement run while its connection is in no transaction (it commits itself). The counters live in
+// that follows a write (total_changes() rose since its BEGIN: a read transaction closed with COMMIT costs no fsync), or a write statement run
+// while its connection is in no transaction and changed something (it commits itself). The counters live in
 // test code only: production carries none.
 import crypto from 'node:crypto';
 import { syncBuiltinESMExports } from 'node:module';
@@ -20,6 +21,12 @@ DatabaseSync.prototype.prepare = function (this: DatabaseSync, sql: string): Sta
 /** A statement that writes (and so, outside a transaction, commits by itself: one fsync under synchronous=FULL). */
 const WRITES = /^\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER)\b/i;
 const COMMIT = /^\s*COMMIT\s*;?\s*$/i;
+const BEGIN = /^\s*BEGIN\b/i;
+/** total_changes() through the real, unpatched prepare and get captured at load, so the counter never counts its own reads. */
+const realGet = StatementSync.prototype.get as (this: StatementSync) => { n: number | bigint };
+const totalChanges = (db: DatabaseSync): number => Number(realGet.call(realPrepare.call(db, 'SELECT total_changes() AS n')).n);
+/** total_changes() at each connection's open transaction's BEGIN. */
+const changesAtBegin = new WeakMap<DatabaseSync, number>();
 
 export interface Counts {
   /** `createHash('sha256')` and `createHmac('sha256')` calls. */
@@ -51,16 +58,21 @@ export async function counting(work: () => Promise<void> | void): Promise<Counts
     return (realVerify as (...a: unknown[]) => boolean)(algorithm, ...rest);
   }) as typeof crypto.verify;
   DatabaseSync.prototype.exec = function (this: DatabaseSync, sql: string): void {
-    if (COMMIT.test(sql) || (WRITES.test(sql) && !this.isTransaction)) counts.commits += 1;
+    if (BEGIN.test(sql)) changesAtBegin.set(this, totalChanges(this));
+    const before = WRITES.test(sql) && !this.isTransaction ? totalChanges(this) : undefined;
+    const wroteInTransaction = COMMIT.test(sql) && totalChanges(this) > (changesAtBegin.get(this) ?? Infinity);
     realExec.call(this, sql);
+    if (wroteInTransaction || (before !== undefined && totalChanges(this) > before)) counts.commits += 1;
   };
   const realStatement = { run: StatementSync.prototype.run, get: StatementSync.prototype.get, all: StatementSync.prototype.all };
   const counted = <K extends keyof typeof realStatement>(method: K): void => {
     const real = realStatement[method] as (this: StatementSync, ...a: unknown[]) => unknown;
     const wrapped = function (this: StatementSync, ...args: unknown[]): unknown {
       const db = connectionOf.get(this);
-      if (db !== undefined && WRITES.test(this.sourceSQL) && !db.isTransaction) counts.commits += 1;
-      return real.apply(this, args);
+      const before = db !== undefined && WRITES.test(this.sourceSQL) && !db.isTransaction ? totalChanges(db) : undefined;
+      const result = real.apply(this, args);
+      if (db !== undefined && before !== undefined && totalChanges(db) > before) counts.commits += 1;
+      return result;
     };
     Object.assign(StatementSync.prototype, { [method]: wrapped });
   };
