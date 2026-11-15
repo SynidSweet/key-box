@@ -3,12 +3,13 @@
 // the installer's own full check (`selfCheck`, then `joinCheck`, one window). It writes `bench` into the facts file: names and numbers,
 // no value and no environment text. It takes at most 120 s: the unit costs are cut there, and a rehearsal is not started after it.
 import { createHash, generateKeyPairSync, sign, verify } from 'node:crypto';
-import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import { isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import type { Clock, Scheduler } from '../ports/clock.ts';
 import type { Random } from '../ports/random.ts';
 import type { JudgedCosts } from '../pure/bench.ts';
+import { RELEASE_HASH } from '../pure/release-hash.ts';
 import { judge, meminfoKib, overItems, p95 } from '../pure/bench.ts';
 import { TIME_OK_FILE } from '../pure/time-gate.ts';
 import { systemScheduler } from '../shell/clock.ts';
@@ -17,6 +18,7 @@ import { SELF_CHECK_WITHIN_MS } from '../shell/installer.ts';
 import type { ReleaseUnits } from '../shell/installer.ts';
 import { systemRandom } from '../shell/random.ts';
 import { systemdUnits } from '../shell/systemd.ts';
+import type { CopyMeasure } from '../shell/update-rehearsal.ts';
 import { REHEARSAL_PREFIX, rehearseCopy } from '../shell/update-rehearsal.ts';
 
 const LIMIT_MS = 120_000;
@@ -45,7 +47,8 @@ export interface BenchDeps {
   readonly meminfoFile: string;
   /** The process's peak resident set (VmHWM), kB. */
   readonly peakRssKb: () => number;
-  readonly releaseDir: string;
+  /** The resolved release directory (see `resolveRelease`), or undefined when `current` names none. */
+  readonly releaseDir: string | undefined;
   readonly installDir: string;
   readonly random: Random;
   /** The installer's own checks (the port `systemdUnits` implements). */
@@ -93,10 +96,10 @@ async function unitCosts(deps: BenchDeps): Promise<UnitCosts> {
 }
 
 /** The full update check as the installer runs it: `selfCheck` then `joinCheck` with one `until`, timed as one window. A failed or hung check is the bound itself: the update would roll back. */
-async function timeFullCheck(deps: BenchDeps): Promise<number> {
+async function timeFullCheck(deps: BenchDeps, releaseDir: string): Promise<number> {
   const started = deps.clock.now();
   const until = started + SELF_CHECK_WITHIN_MS;
-  const ok = (await deps.units.selfCheck(deps.releaseDir, until)) && (await deps.units.joinCheck(deps.releaseDir, until));
+  const ok = (await deps.units.selfCheck(releaseDir, until)) && (await deps.units.joinCheck(releaseDir, until));
   return ok ? deps.clock.now() - started : Math.max(deps.clock.now() - started, SELF_CHECK_WITHIN_MS);
 }
 
@@ -130,11 +133,40 @@ export async function runBench(deps: BenchDeps): Promise<number> {
   const { estimates, over: judged } = judge(measured.costs);
   const first = { unit_costs: measured.costs, estimates, ...memory };
   updateFacts(deps.factsFile, (facts) => void (facts['bench'] = { ...first, over: judged }));
-  const copy = rehearseCopy({ clock: deps.clock, random: deps.random, releaseDir: deps.releaseDir, installDir: deps.installDir, ...(deps.writeDurable === undefined ? {} : { writeDurable: deps.writeDurable }) });
-  const self_check_ms = await timeFullCheck(deps);
-  const update = { copy_ms: copy.copy_ms, bytes: copy.bytes, self_check_ms, peak_rss_kb: deps.peakRssKb() };
-  updateFacts(deps.factsFile, (facts) => void (facts['bench'] = { ...first, update, over: [...judged, ...overItems(update, null, null, null)] }));
+  const update = await rehearse(deps);
+  const over = 'error' in update ? judged : [...judged, ...overItems(update, null, null, null)];
+  updateFacts(deps.factsFile, (facts) => void (facts['bench'] = { ...first, update, over }));
   return 0;
+}
+
+/** The fixed words a failed update rehearsal is recorded as: never a path or a message. */
+export type UpdateError = 'no current release' | 'rehearsal copy failed' | 'rehearsal check failed';
+
+type Rehearsed = { readonly copy_ms: number; readonly bytes: number; readonly self_check_ms: number; readonly peak_rss_kb: number } | { readonly error: UpdateError };
+
+/** The copy rehearsal and the full check over one resolved release; every failure is a recorded word, so a fresh box's setup never stops on the bench. */
+async function rehearse(deps: BenchDeps): Promise<Rehearsed> {
+  const releaseDir = deps.releaseDir;
+  if (releaseDir === undefined) return { error: 'no current release' };
+  let copy: CopyMeasure;
+  try {
+    copy = rehearseCopy({ clock: deps.clock, random: deps.random, releaseDir, installDir: deps.installDir, ...(deps.writeDurable === undefined ? {} : { writeDurable: deps.writeDurable }) });
+  } catch {
+    return { error: 'rehearsal copy failed' };
+  }
+  try {
+    const self_check_ms = await timeFullCheck(deps, releaseDir);
+    return { copy_ms: copy.copy_ms, bytes: copy.bytes, self_check_ms, peak_rss_kb: deps.peakRssKb() };
+  } catch {
+    return { error: 'rehearsal check failed' };
+  }
+}
+
+/** The release `current` names, resolved as the installer does: a directory directly under a `releases` directory with a 64-hex name; otherwise undefined. */
+export function resolveRelease(current: string): string | undefined {
+  if (!existsSync(current)) return undefined;
+  const target = realpathSync(current);
+  return RELEASE_HASH.test(basename(target)) && basename(dirname(target)) === 'releases' ? target : undefined;
 }
 
 // ------------------------------------------------------------------------------------------------ the real workloads
@@ -192,7 +224,7 @@ async function main(env: NodeJS.ProcessEnv): Promise<number> {
       clock, scheduler: systemScheduler, workloads, installDir, random: systemRandom, peakRssKb,
       factsFile: join(stateDir, 'bootstrap-facts.json'),
       meminfoFile: '/proc/meminfo',
-      releaseDir: absolute(env['KB_CURRENT'], '/opt/keybox/current'),
+      releaseDir: resolveRelease(absolute(env['KB_CURRENT'], '/opt/keybox/current')),
       units: benchUnits(clock),
     });
   } finally {

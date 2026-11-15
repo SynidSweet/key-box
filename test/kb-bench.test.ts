@@ -1,7 +1,7 @@
 // kb-bench (3.8 M3, M-E, N-M4): the first-start measurement of the Pi. Fake workloads and fake release checks on an injected clock,
 // a temporary directory for the facts, the release fixture and the install directory; no real /opt, no real systemctl.
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
@@ -9,7 +9,7 @@ import { TimedClock, tempDir } from './kit/index.ts';
 import { BUDGET, judge, overItems } from '../src/pure/bench.ts';
 import { runReady } from '../src/cli/kb-join.ts';
 import { COPY_DEADLINE_MS, SELF_CHECK_WITHIN_MS } from '../src/shell/installer.ts';
-import { benchUnits, realWorkloads, runBench } from '../src/cli/kb-bench.ts';
+import { benchUnits, realWorkloads, resolveRelease, runBench } from '../src/cli/kb-bench.ts';
 import type { BenchDeps, Workloads } from '../src/cli/kb-bench.ts';
 import { TIME_OK_FILE } from '../src/pure/time-gate.ts';
 
@@ -181,16 +181,82 @@ test('rehearsal: the release tree is byte-identical before and after, and nothin
   assert.deepEqual(tree(w.release), before);
 });
 
-test('rehearsal N-L5: a write that throws leaves no rehearsal.* and the error is not swallowed', async (t) => {
+test('rehearsal N-L5: a write that throws leaves no rehearsal.* and is recorded as bench.update.error "rehearsal copy failed", exit 0, no path or message', async (t) => {
   const w = await world(t);
   let n = 0;
   const writeDurable = (path: string, bytes: Uint8Array): void => {
     mkdirSync(join(path, '..'), { recursive: true });
     writeFileSync(path, bytes);
     n += 1;
-    if (n === 2) throw new Error('disk full');
+    if (n === 2) throw new Error(`disk full at ${path}`);
   };
-  await assert.rejects(runBench(w.deps({ writeDurable })), /disk full/);
+  assert.equal(await runBench(w.deps({ writeDurable })), 0);
+  assert.deepEqual(readdirSync(w.install), []);
+  assert.deepEqual(w.bench()['update'], { error: 'rehearsal copy failed' });
+});
+
+test('rehearsal: a release that cannot be read (a link inside it) is recorded as "rehearsal copy failed", exit 0, nothing left', async (t) => {
+  const w = await world(t);
+  symlinkSync('/etc', join(w.release, 'src', 'inner-link'));
+  assert.equal(await runBench(w.deps()), 0);
+  assert.deepEqual(readdirSync(w.install), []);
+  assert.deepEqual(w.bench()['update'], { error: 'rehearsal copy failed' });
+});
+
+test('the check: a selfCheck that throws is recorded as "rehearsal check failed", exit 0, nothing left', async (t) => {
+  const w = await world(t);
+  const selfCheck = (): Promise<boolean> => Promise.reject(new Error('spawn failed at /x'));
+  assert.equal(await runBench(w.deps({ units: { selfCheck, joinCheck: () => Promise.resolve(true) } })), 0);
+  assert.deepEqual(readdirSync(w.install), []);
+  assert.deepEqual(w.bench()['update'], { error: 'rehearsal check failed' });
+});
+
+/** The box's shape: `current` is a link to releases/<64 hex>. */
+async function linkedWorld(t: TestContext): Promise<{ w: World; current: string; real: string }> {
+  const w = await world(t);
+  const real = join(w.dir, 'releases', 'ab'.repeat(32));
+  mkdirSync(join(w.dir, 'releases'));
+  renameSync(w.release, real);
+  const current = join(w.dir, 'link-current');
+  symlinkSync(real, current);
+  return { w, current, real };
+}
+
+test('current is a link to releases/<64 hex>: the rehearsal runs on the release, its bytes equal the release, the tree is unchanged, and the checks get the resolved directory', async (t) => {
+  const { w, current, real } = await linkedWorld(t);
+  const before = tree(real);
+  const seen: Record<string, string> = {};
+  const writeDurable = (path: string, bytes: Uint8Array): void => {
+    mkdirSync(join(path, '..'), { recursive: true });
+    writeFileSync(path, bytes);
+    seen[relative(join(w.install, REHEARSAL), path)] = Buffer.from(bytes).toString('utf8');
+  };
+  const dirs: string[] = [];
+  const units = { selfCheck: (d: string) => (dirs.push(d), Promise.resolve(true)), joinCheck: (d: string) => (dirs.push(d), Promise.resolve(true)) };
+  assert.equal(await runBench(w.deps({ releaseDir: resolveRelease(current), writeDurable, units })), 0);
+  assert.deepEqual(seen, FILES);
+  assert.deepEqual(tree(real), before);
+  assert.deepEqual(dirs, [real, real]);
+  assert.equal('error' in (w.bench()['update'] as Record<string, unknown>), false);
+});
+
+test('current absent, outside releases, or not a 64-hex name: no release; the run exits 0, writes unit costs and bench.update.error "no current release", no rehearsal.*', async (t) => {
+  const { w, real } = await linkedWorld(t);
+  const outside = join(w.dir, 'elsewhere');
+  mkdirSync(outside);
+  const badName = join(w.dir, 'releases', 'not-a-hash');
+  mkdirSync(badName);
+  assert.equal(resolveRelease(join(w.dir, 'absent')), undefined);
+  for (const [i, target] of [outside, badName].entries()) {
+    const link = join(w.dir, `cur${i}`);
+    symlinkSync(target, link);
+    assert.equal(resolveRelease(link), undefined, target);
+  }
+  assert.equal(resolveRelease(real), real, 'a plain directory directly under releases resolves too');
+  assert.equal(await runBench(w.deps({ releaseDir: undefined })), 0);
+  const bench = w.bench();
+  assert.ok('unit_costs' in bench);
+  assert.deepEqual(bench['update'], { error: 'no current release' });
   assert.deepEqual(readdirSync(w.install), []);
 });
 
