@@ -25,7 +25,7 @@ test('KBOX-48 the checklist has the three recovery cases of section 4, equal to 
 });
 
 test('KBOX-48 the checklist has the eight owner steps in order, and none of Oracle', () => {
-  const steps = [...checklist.split('\n## ')[0]!.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
+  const steps = [...(checklist.split('\n## ')[0] ?? '').matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
   assert.deepEqual(steps.slice(0, 8), [1, 2, 3, 4, 5, 6, 7, 8]);
   assert.doesNotMatch(checklist, /oracle|dedyn|desec|cloud-init user data|security list/i);
 });
