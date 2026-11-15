@@ -94,9 +94,19 @@ runcmd:
     passwd -l root
     apt-get purge -y snapd
     systemctl mask getty@tty1.service autovt@tty1.service serial-getty@ttyS0.service
-    rfkill block wifi bluetooth
+    # The raspi image has no rfkill program: soft-block Wi-Fi and Bluetooth through sysfs. No such entry means nothing to do; a
+    # failed write stops the bootstrap (set -eu and the trap).
+    for r in "$K"/sys/class/rfkill/rfkill*; do
+      [ -e "$r/type" ] || continue
+      case "$(cat "$r/type")" in wlan|bluetooth) echo 1 > "$r/soft";; esac
+    done
+    # The lines go under [all], so a config.txt that ends inside a board section ([pi4], [cm4] ...) still applies them to every board.
+    ALL=
     for l in dtoverlay=disable-wifi dtoverlay=disable-bt hdmi_force_hotplug=1 gpu_mem=16; do
-      grep -qxF "$l" "$K/boot/firmware/config.txt" || printf '%s\n' "$l" >> "$K/boot/firmware/config.txt"
+      if ! grep -qxF "$l" "$K/boot/firmware/config.txt"; then
+        if [ -z "$ALL" ]; then printf '[all]\n' >> "$K/boot/firmware/config.txt"; ALL=1; fi
+        printf '%s\n' "$l" >> "$K/boot/firmware/config.txt"
+      fi
     done
     grep -q 'consoleblank=0' "$K/boot/firmware/cmdline.txt" || sed -i '1s/$/ consoleblank=0/' "$K/boot/firmware/cmdline.txt"
     TERM=linux setterm --blank 0 >> "$K/dev/tty1"
