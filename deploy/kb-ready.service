@@ -1,0 +1,20 @@
+[Unit]
+Description=Key box ready (KBOX-64): the certificate answers on this host, then the start times and memory are recorded
+After=caddy.service keybox.service
+Requires=caddy.service keybox.service
+After=keyrelay.service
+Wants=keyrelay.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=infinity
+User=root
+ExecStart=/opt/keybox/current/bin/node /opt/keybox/current/src/cli/kb-join.ts ready
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

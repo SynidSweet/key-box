@@ -1,0 +1,29 @@
+[Unit]
+Description=Key box join (KBOX-64): an authenticated time, Tailscale, the box's own name, then the time gate file
+After=kb-firewall.service
+Requires=kb-firewall.service
+# Ordering only: no Wants or Requires on the installer, so the rollback never waits on this unit and this unit never pulls it in.
+After=kb-install.service
+After=chrony.service tailscaled.service network-online.target
+Wants=chrony.service tailscaled.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# It waits for the time and for the owner as long as it takes; only a settled wrong name makes it exit 1.
+TimeoutStartSec=infinity
+Restart=no
+User=root
+ExecStart=/opt/keybox/current/bin/node /opt/keybox/current/src/cli/kb-join.ts join
+# The screen: systemd opens the terminal for the unit, so no DeviceAllow and no SupplementaryGroups.
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+# /run/keybox-time/ok exists only in a boot whose time was authenticated; the directory is kept while this unit is not running.
+RuntimeDirectory=keybox-time
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target
