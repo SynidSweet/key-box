@@ -28,6 +28,7 @@ const UP_ARGS = ['up', '--qr', '--hostname=keybox', '--advertise-tags=tag:keybox
 const L1 = (name: string): string =>
   `This box joined Tailscale as "${name}" because another machine already has the name "keybox". In Tailscale's Machines page, remove that other machine, then rename this one to "keybox". Then restart this box (unplug it and plug it back in).`;
 const TAG_LINE = 'This box does not carry the tag keybox with key expiry off. Fix it on its Machines page; the box goes on by itself.';
+const DAMAGED_TRUST = "This box's setup record cannot be read. The box needs a new setup.";
 const NO_LONGER = 'This box is no longer in Tailscale. It has to be set up again (guide: If the card dies).';
 
 export interface JoinDeps {
@@ -45,7 +46,7 @@ export interface JoinDeps {
   readonly installDir: string;
   /** KB_DOMAIN: the expected host. */
   readonly domain: string;
-  /** KB_TIME_FLOOR in milliseconds; 0 when the drop-in sets none. */
+  /** KB_TIME_FLOOR in milliseconds (the entry refuses to run without it). */
   readonly timeFloorMs: number;
 }
 
@@ -114,7 +115,7 @@ interface Ran {
 /** A command that is not there, or that exits non-zero, is a not-ok result: tailscaled and chrony are allowed to be late. */
 function run(env: NodeJS.ProcessEnv, command: string, args: readonly string[]): Ran {
   const done = spawnSync(command, [...args], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  return { ok: done.error === undefined && done.status === 0, stdout: done.stdout };
+  return { ok: done.error === undefined && done.status === 0, stdout: done.stdout ?? '' };
 }
 
 /** `tailscale up --qr ...`: its output goes to the tty as it comes (the QR code must show while it waits for the login). */
@@ -176,24 +177,33 @@ function readStatus(env: NodeJS.ProcessEnv): Read {
   return { kind: 'state', backend: decoded.value['BackendState'], dns, tags, expiry };
 }
 
-interface Trust {
-  readonly exists: boolean;
-  readonly host: string | undefined;
-}
+/** The one reader of trust.json: absent, present with its pinned host, or damaged (unreadable, not JSON, or no string `domain`). */
+type Trust = { readonly kind: 'absent' } | { readonly kind: 'pinned'; readonly host: string } | { readonly kind: 'damaged' };
 
 function readTrust(path: string): Trust {
-  if (!existsSync(path)) return { exists: false, host: undefined };
-  const decoded = decodeJsonBody(readFileSync(path));
-  const host = decoded.ok && isObject(decoded.value) && typeof decoded.value['domain'] === 'string' ? decoded.value['domain'] : undefined;
-  return { exists: true, host };
+  if (!existsSync(path)) return { kind: 'absent' };
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(path);
+  } catch {
+    return { kind: 'damaged' };
+  }
+  const decoded = decodeJsonBody(bytes);
+  if (!decoded.ok || !isObject(decoded.value)) return { kind: 'damaged' };
+  const domain = decoded.value['domain'];
+  return typeof domain === 'string' ? { kind: 'pinned', host: domain } : { kind: 'damaged' };
 }
 
 // ------------------------------------------------------------------------------------------------ join
 
-/** Sources that passed selection: with `authselectmode require` those are authenticated ones. */
+/** NTP server rows (mode `^`) that passed selection: with `authselectmode require` those are authenticated ones. A chronyc that cannot run counts 0. */
 function answering(env: NodeJS.ProcessEnv): number {
   const listed = run(env, 'chronyc', ['-n', '-c', 'sources']);
-  return listed.stdout.split('\n').filter((row) => ['*', '+', '-'].includes(row.split(',')[1] ?? '')).length;
+  if (!listed.ok) return 0;
+  return listed.stdout.split('\n').filter((row) => {
+    const [mode, state] = row.split(',');
+    return mode === '^' && ['*', '+', '-'].includes(state ?? '');
+  }).length;
 }
 
 /** Stage 1: waits for as long as it takes, and returns the number of authenticated sources. */
@@ -238,14 +248,20 @@ export async function runJoin(deps: JoinDeps): Promise<number> {
       continue;
     }
     const trust = readTrust(deps.trustFile);
-    const hosts = trust.host === undefined ? [deps.domain] : [deps.domain, trust.host];
+    if (trust.kind === 'damaged') {
+      screen.status(DAMAGED_TRUST);
+      screen.end();
+      return 1;
+    }
+    const pinned = trust.kind === 'pinned' ? trust.host : undefined;
+    const hosts = pinned === undefined ? [deps.domain] : [deps.domain, pinned];
     const named = read.dns !== undefined && read.dns !== '';
     if (read.backend === 'Running' && named) {
       const dns = read.dns ?? '';
       if (!hosts.every((h) => sameHostName(dns, h))) {
         if (wrongName !== undefined && sameHostName(wrongName, dns)) {
           // Only the pinned host differs: the name is the expected one, so the "another machine has it" text would be wrong.
-          screen.status(sameHostName(dns, deps.domain) ? `This box's Tailscale name is "${dns}", not the name it was set up with ("${trust.host ?? ''}"). Fix the name on Tailscale's Machines page, then restart this box.` : L1(dns.split('.')[0] ?? dns));
+          screen.status(sameHostName(dns, deps.domain) ? `This box's Tailscale name is "${dns}", not the name it was set up with ("${pinned ?? ''}"). Fix the name on Tailscale's Machines page, then restart this box.` : L1(dns.split('.')[0] ?? dns));
           screen.end();
           return 1;
         }
@@ -270,7 +286,7 @@ export async function runJoin(deps: JoinDeps): Promise<number> {
     wrongName = undefined;
     if (read.backend === 'Running' || read.backend === 'NoState' || read.backend === 'Starting') {
       step2('waiting for Tailscale to connect');
-    } else if (read.backend === 'NeedsLogin' && !trust.exists) {
+    } else if (read.backend === 'NeedsLogin' && trust.kind === 'absent') {
       step2('scan this code with your phone to add the key box to Tailscale');
       if (!upStarted) {
         const up = await runUp(deps, screen);
@@ -282,7 +298,7 @@ export async function runJoin(deps: JoinDeps): Promise<number> {
         await deps.wait(NO_LOGIN_MS);
         continue;
       }
-    } else if ((read.backend === 'NeedsLogin' || read.backend === 'Stopped') && trust.exists) {
+    } else if ((read.backend === 'NeedsLogin' || read.backend === 'Stopped') && trust.kind === 'pinned') {
       screen.status(NO_LONGER);
       await deps.wait(NO_LOGIN_MS);
       continue;
@@ -376,9 +392,9 @@ export function tlsCheck(host: string, port: number, ca?: string): Promise<boole
 
 // ------------------------------------------------------------------------------------------------ the entry
 
-const absolute = (value: string | undefined, fallback: string): string => {
+const absolute = (value: string | undefined, fallback: string, name = 'a kb-join path'): string => {
   const path = value ?? fallback;
-  if (!isAbsolute(path)) throw new RangeError('kb-join paths are absolute');
+  if (!isAbsolute(path)) throw new RangeError(`${name} must be an absolute path`);
   return path;
 };
 
@@ -389,10 +405,10 @@ function readDomain(env: NodeJS.ProcessEnv): string {
   return domain;
 }
 
-/** KB_TIME_FLOOR is the Unix time (seconds) of the release's commit; unset, no floor beyond systemd's own epoch. */
+/** KB_TIME_FLOOR is the Unix time (seconds) of the release's commit; unset is a configuration error, never a floor of 0. */
 function readFloorMs(env: NodeJS.ProcessEnv): number {
   const floor = env['KB_TIME_FLOOR'];
-  if (floor === undefined) return 0;
+  if (floor === undefined) throw new RangeError('KB_TIME_FLOOR is not set');
   if (!/^\d{1,12}$/.test(floor)) throw new RangeError('KB_TIME_FLOOR is not a Unix time in seconds');
   return Number(floor) * 1000;
 }
@@ -400,8 +416,9 @@ function readFloorMs(env: NodeJS.ProcessEnv): number {
 const wait = (ms: number): Promise<void> => new Promise<void>((resolve) => void systemScheduler.after(ms, resolve));
 
 async function main(mode: string | undefined, env: NodeJS.ProcessEnv): Promise<number> {
-  const tty = absolute(env['KB_TTY'], '/dev/tty1');
+  let tty: string | undefined;
   try {
+    tty = absolute(env['KB_TTY'], '/dev/tty1', 'KB_TTY');
     if (mode !== 'join' && mode !== 'ready') throw new RangeError('kb-join needs a mode: join, ready or --self-check');
     const domain = readDomain(env);
     const stateDir = absolute(env['KB_STATE_DIR'], '/var/lib/keybox');
@@ -425,7 +442,10 @@ async function main(mode: string | undefined, env: NodeJS.ProcessEnv): Promise<n
       timeFloorMs: readFloorMs(env),
     });
   } catch (e) {
-    appendFileSync(tty, `${LINE_START}kb-join stopped: ${e instanceof Error ? e.message : 'unknown error'}\n`);
+    const line = `kb-join stopped: ${e instanceof Error ? e.message : 'unknown error'}\n`;
+    // With no usable terminal name the line can only go to stderr (the unit points it at the tty).
+    if (tty === undefined) process.stderr.write(line);
+    else appendFileSync(tty, LINE_START + line);
     return 2;
   }
 }

@@ -4,7 +4,7 @@
 // temporary directory through the `okFile` dependency whose default is TIME_OK_FILE.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer as createTlsServer } from 'node:tls';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -328,6 +328,43 @@ test('KBOX-64 a later boot where the name differs from the pinned host, on two r
   assert.ok(last.includes('pinned.tail09a879.ts.net'), last);
 });
 
+const DAMAGED_LINE = "This box's setup record cannot be read. The box needs a new setup.";
+
+test('KBOX-64 M1 a damaged trust.json ({}, not JSON, a directory) shows one line and exits 1, with no tailscale up, whatever the state', async (t) => {
+  for (const content of ['{}', 'not json', '{"domain":7}', 'DIR']) {
+    for (const backend of [GOOD, state('NeedsLogin')]) {
+      const w = await world(t);
+      if (content === 'DIR') mkdirSync(w.trust);
+      else writeFileSync(w.trust, content);
+      script(w, [backend]);
+      assert.equal(await runJoin(deps(w)), 1, `${content} ${backend}`);
+      const last = screen(w).split(LINE_START).pop() ?? '';
+      assert.equal(last.trim(), DAMAGED_LINE);
+      assert.deepEqual(tailscaleCalls(w, 'up'), []);
+      assert.equal(existsSync(w.facts), false);
+    }
+  }
+});
+
+test('KBOX-64 M1 the name matches KB_DOMAIN but not the pinned host: the pinned-mismatch line on two reads, exit 1', async (t) => {
+  const w = await world(t);
+  writeFileSync(w.trust, JSON.stringify({ domain: 'pinned.tail09a879.ts.net' }));
+  script(w, [GOOD]);
+  assert.equal(await runJoin(deps(w)), 1);
+  assert.equal(tailscaleCalls(w, 'status').length, 2);
+  const last = screen(w).split(LINE_START).pop() ?? '';
+  assert.ok(last.includes('not the name it was set up with ("pinned.tail09a879.ts.net")'), last);
+});
+
+test('KBOX-64 M1 the name matches the pinned host but not KB_DOMAIN: the L1 line on two reads, exit 1', async (t) => {
+  const w = await world(t);
+  writeFileSync(w.trust, JSON.stringify({ domain: 'keybox-1.tail09a879.ts.net' }));
+  script(w, [state('Running', { dns: 'keybox-1.tail09a879.ts.net.' })]);
+  assert.equal(await runJoin(deps(w)), 1);
+  assert.equal(tailscaleCalls(w, 'status').length, 2);
+  assert.ok(screen(w).includes(L1), screen(w));
+});
+
 // ------------------------------------------------------------------ tags and expiry
 
 const TAG_CASES: readonly (readonly [string, string])[] = [
@@ -389,6 +426,56 @@ test('KBOX-64 a missing install directory is not a failure', async (t) => {
   const w = await world(t);
   script(w, [GOOD]);
   assert.equal(await runJoin(deps(w, { installDir: join(w.dir, 'nowhere') })), 0);
+});
+
+test('KBOX-64 M2 a chronyc that is not on PATH counts as 0 sources: the step-1 line, no ok file, no exit; a synced chronyc that appears lets the run go on', async (t) => {
+  const w = await world(t);
+  const util = join(w.dir, 'util');
+  mkdirSync(util);
+  for (const tool of ['cat', 'wc', 'sed']) symlinkSync(`/usr/bin/${tool}`, join(util, tool));
+  const chronyc = join(w.bin, 'chronyc');
+  rmSync(chronyc);
+  script(w, [GOOD]);
+  const base = deps(w, { env: { ...w.env, PATH: `${w.bin}:${util}` } });
+  const seen: boolean[] = [];
+  const result = await runJoin({
+    ...base,
+    wait: async (ms) => {
+      await base.wait(ms);
+      seen.push(existsSync(w.ok));
+      if (w.waits.length === 3) {
+        assert.ok(lines(w).some((l) => l.startsWith('Key box, step 1 of 4: getting the time from secure time servers (0 of 3 answer)')), screen(w));
+        writeFileSync(chronyc, FAKES['chronyc'] ?? '');
+        chmodSync(chronyc, 0o755);
+      }
+    },
+  });
+  assert.equal(result, 0);
+  assert.deepEqual(seen, [false, false, false]);
+});
+
+test('KBOX-64 L1 refclock rows (mode #) never count: two #* rows and one ^* row is not enough and waits', async (t) => {
+  const w = await world(t);
+  writeFileSync(join(w.dir, 'sources.csv'), '#,*,GPS,0,4,377,1,0,0,0\n#,*,PPS,0,4,377,1,0,0,0\n^,*,time.cloudflare.com,3,6,377,10,0.0001,0.0002,0.0001\n');
+  script(w, [GOOD]);
+  await stopped(runJoin(deps(w, {}, 3)));
+  assert.ok(lines(w).some((l) => l.includes('(1 of 3 answer)')), screen(w));
+  assert.equal(existsSync(w.ok), false);
+});
+
+test('KBOX-64 L4 debris rules: a rehearsal.x symlink goes but not its target, rehearsal and xrehearsal.y stay, a file rehearsal.z goes', async (t) => {
+  const w = await world(t);
+  const target = join(w.dir, 'victim');
+  mkdirSync(target);
+  writeFileSync(join(target, 'data'), 'keep');
+  symlinkSync(target, join(w.install, 'rehearsal.x'));
+  mkdirSync(join(w.install, 'rehearsal'));
+  mkdirSync(join(w.install, 'xrehearsal.y'));
+  writeFileSync(join(w.install, 'rehearsal.z'), 'bytes');
+  script(w, [GOOD]);
+  assert.equal(await runJoin(deps(w)), 0);
+  assert.deepEqual(readdirSync(w.install).sort(), ['rehearsal', 'xrehearsal.y']);
+  assert.equal(readFileSync(join(target, 'data'), 'utf8'), 'keep');
 });
 
 // ------------------------------------------------------------------ stdout and stderr
@@ -541,6 +628,29 @@ test('KBOX-64 an unknown mode is refused on the tty file, not run', async (t) =>
   const run = spawnSync(process.execPath, [CLI, 'frobnicate'], { encoding: 'utf8', cwd: w.dir, env: { ...w.env, KB_TTY: w.tty } });
   assert.notEqual(run.status, 0);
   assert.equal(run.stdout + run.stderr, '');
+  assert.equal(existsSync(join(w.dir, 'calls.log')), false);
+});
+
+test('KBOX-64 L2 KB_TIME_FLOOR unset or not a number is a configuration error on the tty file naming it: exit 2, no command', async (t) => {
+  for (const floor of [undefined, 'abc', '-5']) {
+    const w = await world(t);
+    const env: Record<string, string> = { ...w.env, KB_TTY: w.tty, KB_DOMAIN: DOMAIN, KB_STATE_DIR: join(w.dir, 'state') };
+    if (floor !== undefined) env['KB_TIME_FLOOR'] = floor;
+    const run = spawnSync(process.execPath, [CLI, 'join'], { encoding: 'utf8', cwd: w.dir, env });
+    assert.equal(run.status, 2, `${floor}`);
+    assert.equal(run.stdout + run.stderr, '');
+    assert.ok(screen(w).includes('KB_TIME_FLOOR'), screen(w));
+    assert.equal(existsSync(join(w.dir, 'calls.log')), false);
+  }
+});
+
+test('KBOX-64 L3 a relative KB_TTY is a configuration error with no stack trace, exit 2 (exit 1 stays for the name and the setup record)', async (t) => {
+  const w = await world(t);
+  const run = spawnSync(process.execPath, [CLI, 'join'], { encoding: 'utf8', cwd: w.dir, env: { ...w.env, KB_TTY: 'relative/path', KB_DOMAIN: DOMAIN, KB_TIME_FLOOR: '1' } });
+  assert.equal(run.status, 2);
+  assert.equal(run.stdout, '');
+  assert.ok(run.stderr.includes('KB_TTY'), run.stderr);
+  assert.equal(/\n\s+at /.test(run.stderr), false, run.stderr);
   assert.equal(existsSync(join(w.dir, 'calls.log')), false);
 });
 
