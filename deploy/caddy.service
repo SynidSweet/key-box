@@ -1,7 +1,7 @@
 [Unit]
 Description=Caddy for the key box (KBOX-44): TLS on 443, the client address header, the two unix sockets
-After=network-online.target keybox.service keyrelay.service
-Wants=network-online.target
+After=network-online.target tailscaled.service keybox.service keyrelay.service
+Wants=network-online.target tailscaled.service
 
 [Service]
 Type=simple

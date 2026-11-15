@@ -1,0 +1,2 @@
+# /etc/default/tailscaled (KBOX-44): lets the caddy user fetch the box's certificate from the local tailscaled.
+TS_PERMIT_CERT_UID=caddy

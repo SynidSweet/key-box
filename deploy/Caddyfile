@@ -1,19 +1,20 @@
-# KBOX-44: Caddy terminates TLS on 443 only, with ACME TLS-ALPN-01 (no HTTP challenge, no port 80 redirect listener), and
-# reaches core and the relay over their unix sockets. X-KB-Client-Ip is set from Caddy's own view of the connection and
-# replaces any value a client sent; the forwarding headers a client could forge, and those Caddy adds itself, are dropped.
+# KBOX-44: Caddy serves the box's one Tailscale name (KB_DOMAIN) on two ports and takes each certificate from the local
+# tailscaled (get_certificate tailscale; tailscaled grants the caddy user, see tailscaled.defaults). No ACME, no port 80 listener,
+# no admin endpoint. Core and the relay are reached over their unix sockets. X-KB-Client-Ip is set from Caddy's own view of the
+# connection and replaces any value a client sent; the forwarding headers a client could forge, and those Caddy adds itself, are
+# dropped. :8443 is the phone pages (core only); :443 is the machine API (core), /r/* (relay) and 404 otherwise.
 # Changes to this file come only through the bootstrap (KBOX-6, KBOX-48). Real header handling on the instance: UNVERIFIED.
 {
 	auto_https disable_redirects
+	admin off
 	servers {
-		protocols h1
+		protocols h1 h2
 	}
 }
 
-keys.{$KB_DOMAIN}:443 {
+{$KB_DOMAIN}:8443 {
 	tls {
-		issuer acme {
-			disable_http_challenge
-		}
+		get_certificate tailscale
 	}
 	reverse_proxy unix//run/keybox/http.sock {
 		header_up X-KB-Client-Ip {remote_host}
@@ -25,12 +26,11 @@ keys.{$KB_DOMAIN}:443 {
 	}
 }
 
-api.keys.{$KB_DOMAIN}:443 {
+{$KB_DOMAIN}:443 {
 	tls {
-		issuer acme {
-			disable_http_challenge
-		}
+		get_certificate tailscale
 	}
+	header -Set-Cookie
 	handle /api/* {
 		reverse_proxy unix//run/keybox/http.sock {
 			header_up X-KB-Client-Ip {remote_host}
