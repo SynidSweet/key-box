@@ -8,7 +8,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { isAbsolute, join } from 'node:path';
 import type { Clock, Scheduler } from '../ports/clock.ts';
 import type { Random } from '../ports/random.ts';
-import { meminfoKib, overItems, p95 } from '../pure/bench.ts';
+import type { JudgedCosts } from '../pure/bench.ts';
+import { judge, meminfoKib, overItems, p95 } from '../pure/bench.ts';
 import { TIME_OK_FILE } from '../pure/time-gate.ts';
 import { systemScheduler } from '../shell/clock.ts';
 import { updateFacts } from '../shell/facts-file.ts';
@@ -75,8 +76,13 @@ async function commitsP95(clock: Clock, fn: () => void | Promise<void>): Promise
   return p95(samples);
 }
 
+/** The four unit costs: the three the judge reads, and the JSON loop. */
+interface UnitCosts extends JudgedCosts {
+  readonly json_regex_loop_ms: number;
+}
+
 /** The four unit costs. */
-async function unitCosts(deps: BenchDeps): Promise<Record<string, number>> {
+async function unitCosts(deps: BenchDeps): Promise<UnitCosts> {
   const { clock, workloads: w } = deps;
   return {
     sha256_56b_x1000_ms: await timed(clock, SHA_CALLS, w.sha256),
@@ -94,7 +100,7 @@ async function timeFullCheck(deps: BenchDeps): Promise<number> {
   return ok ? deps.clock.now() - started : Math.max(deps.clock.now() - started, SELF_CHECK_WITHIN_MS);
 }
 
-type Costs = { readonly kind: 'done'; readonly costs: Record<string, number> } | { readonly kind: 'timeout' };
+type Costs = { readonly kind: 'done'; readonly costs: UnitCosts } | { readonly kind: 'timeout' };
 
 /** The unit costs, or `timeout` when 120 s pass first (a workload that hangs). */
 function costsWithin(deps: BenchDeps): Promise<Costs> {
@@ -121,12 +127,13 @@ export async function runBench(deps: BenchDeps): Promise<number> {
     updateFacts(deps.factsFile, (facts) => void (facts['bench'] = { ...memory, timed_out: true, over: [] }));
     return 0;
   }
-  const first = { unit_costs: measured.costs, ...memory };
-  updateFacts(deps.factsFile, (facts) => void (facts['bench'] = { ...first, over: [] }));
+  const { estimates, over: judged } = judge(measured.costs);
+  const first = { unit_costs: measured.costs, estimates, ...memory };
+  updateFacts(deps.factsFile, (facts) => void (facts['bench'] = { ...first, over: judged }));
   const copy = rehearseCopy({ clock: deps.clock, random: deps.random, releaseDir: deps.releaseDir, installDir: deps.installDir, ...(deps.writeDurable === undefined ? {} : { writeDurable: deps.writeDurable }) });
   const self_check_ms = await timeFullCheck(deps);
   const update = { copy_ms: copy.copy_ms, bytes: copy.bytes, self_check_ms, peak_rss_kb: deps.peakRssKb() };
-  updateFacts(deps.factsFile, (facts) => void (facts['bench'] = { ...first, update, over: overItems(update, null, null, null) }));
+  updateFacts(deps.factsFile, (facts) => void (facts['bench'] = { ...first, update, over: [...judged, ...overItems(update, null, null, null)] }));
   return 0;
 }
 

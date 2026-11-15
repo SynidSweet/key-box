@@ -6,7 +6,8 @@ import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import { TimedClock, tempDir } from './kit/index.ts';
-import { BUDGET, overItems } from '../src/pure/bench.ts';
+import { BUDGET, judge, overItems } from '../src/pure/bench.ts';
+import { runReady } from '../src/cli/kb-join.ts';
 import { COPY_DEADLINE_MS, SELF_CHECK_WITHIN_MS } from '../src/shell/installer.ts';
 import { benchUnits, realWorkloads, runBench } from '../src/cli/kb-bench.ts';
 import type { BenchDeps, Workloads } from '../src/cli/kb-bench.ts';
@@ -289,4 +290,84 @@ test('the real workloads run once each over a temporary database and leave nothi
   await real.jsonRegex();
   real.close();
   assert.deepEqual(readdirSync(dir), []);
+});
+
+// ------------------------------------------------------------------------------------------------ the judge: counts times costs (3.8)
+
+/** Unit costs as kb-bench records them, built from the per-call times the estimates use: commit p95, one SHA-256, one ES256 verify. */
+const costs = (commit: number, shaMs: number, es256Ms: number) => ({ wal_commit_p95_ms: commit, sha256_56b_x1000_ms: shaMs * 1000, es256_verify_x50_ms: es256Ms * 50 });
+const overOf = (c: ReturnType<typeof costs>, only?: string): string[] => judge(c).over.map((o) => o.item).filter((item) => only === undefined || item === only);
+
+test('the judge: the estimates are counts times costs (approval 6 commits + 2 verifies, relay 5 commits + 1 SHA-256, share 13,351 SHA-256)', () => {
+  assert.deepEqual(judge(costs(10, 2, 3)).estimates, { approval_ms: 6 * 10 + 2 * 3, relay_ms: 5 * 10 + 1 * 2, share_ms: 13_351 * 2 });
+});
+
+test('the judge: the budgets are 50 ms commit p95, 500 ms approval, 100 ms relay, 10,000 ms share', () => {
+  assert.deepEqual([BUDGET.commit_p95_ms, BUDGET.approval_ms, BUDGET.relay_ms, BUDGET.share_ms], [50, 500, 100, 10_000]);
+});
+
+test('the judge: commit.p95 is over only strictly above 50 ms (at, just below, just above)', () => {
+  assert.deepEqual(overOf(costs(50, 0, 0), 'commit.p95'), []);
+  assert.deepEqual(overOf(costs(49.9, 0, 0), 'commit.p95'), []);
+  assert.deepEqual(judge(costs(50.1, 0, 0)).over.filter((o) => o.item === 'commit.p95'), [{ item: 'commit.p95', measured: 50.1, budget: 50, unit: 'ms' }]);
+});
+
+test('the judge: approval.estimate is over only strictly above 500 ms (6 x 40 + 2 x 130 is exactly 500)', () => {
+  assert.deepEqual(overOf(costs(40, 0, 130), 'approval.estimate'), []);
+  assert.deepEqual(overOf(costs(40, 0, 129.9), 'approval.estimate'), []);
+  assert.deepEqual(judge(costs(40, 0, 130.1)).over.filter((o) => o.item === 'approval.estimate'), [{ item: 'approval.estimate', measured: 6 * 40 + 2 * 130.1, budget: 500, unit: 'ms' }]);
+});
+
+test('the judge: relay.estimate is over only strictly above 100 ms (5 x 10 + 50 is exactly 100)', () => {
+  assert.deepEqual(overOf(costs(10, 50, 0), 'relay.estimate'), []);
+  assert.deepEqual(overOf(costs(10, 49.9, 0), 'relay.estimate'), []);
+  assert.deepEqual(judge(costs(10, 50.1, 0)).over.filter((o) => o.item === 'relay.estimate'), [{ item: 'relay.estimate', measured: 5 * 10 + 50.1, budget: 100, unit: 'ms' }]);
+});
+
+test('the judge: share.estimate is over only strictly above 10,000 ms (13,351 SHA-256 at 0.7489 ms is under, at 0.7491 ms over)', () => {
+  assert.deepEqual(overOf(costs(0, 0.7489, 0)), []);
+  assert.deepEqual(overOf(costs(0, 0.7491, 0)), ['share.estimate']);
+});
+
+test('the judge: the items come in the order commit, approval, relay, share', () => {
+  assert.deepEqual(overOf(costs(60, 100, 300)), ['commit.p95', 'approval.estimate', 'relay.estimate', 'share.estimate']);
+});
+
+test('the judge in a run: bench.estimates and bench.over are written from the measured unit costs, in both writes', async (t) => {
+  const w = await world(t);
+  const workloads: Workloads = { ...instant, sha256: () => void w.clock.advance(1), es256: () => void w.clock.advance(2), walCommit: () => void w.clock.advance(60) };
+  assert.equal(await runBench(w.deps({ workloads })), 0);
+  const bench = w.bench();
+  assert.deepEqual(bench['estimates'], { approval_ms: 6 * 60 + 2 * 2, relay_ms: 5 * 60 + 1, share_ms: 13_351 });
+  assert.deepEqual(bench['over'], [
+    { item: 'commit.p95', measured: 60, budget: 50, unit: 'ms' },
+    { item: 'relay.estimate', measured: 301, budget: 100, unit: 'ms' },
+    { item: 'share.estimate', measured: 13_351, budget: 10_000, unit: 'ms' },
+  ]);
+});
+
+test('the judge in a run: costs within every budget write the estimates and no over item', async (t) => {
+  const w = await world(t);
+  assert.equal(await runBench(w.deps()), 0);
+  assert.deepEqual(w.bench()['estimates'], { approval_ms: 0, relay_ms: 0, share_ms: 0 });
+  assert.deepEqual(w.bench()['over'], []);
+});
+
+test('kb-ready rewrites only its own over items: the judge items kb-bench wrote are still there, and so are the estimates', async (t) => {
+  const w = await world(t);
+  const workloads: Workloads = { ...instant, sha256: () => void w.clock.advance(1), es256: () => void w.clock.advance(2), walCommit: () => void w.clock.advance(60) };
+  await runBench(w.deps({ workloads }));
+  const before = w.bench();
+  const tty = join(w.dir, 'tty1');
+  assert.equal(
+    await runReady({
+      env: {}, clock: w.clock, wait: () => Promise.resolve(), tty, factsFile: w.facts, domain: 'keybox.example.ts.net', tlsOk: () => Promise.resolve(true),
+      meminfoFile: join(w.dir, 'meminfo'), uptimeMs: () => 100_000, socketBornMs: () => Number.NaN, coreSocket: '/run/keybox/http.sock', relaySocket: '/run/keyrelay/http.sock',
+    }),
+    0,
+  );
+  const after = w.bench();
+  assert.deepEqual(after['over'], before['over']);
+  assert.deepEqual(after['estimates'], before['estimates']);
+  assert.equal((after['over'] as { item: string }[]).length, 3);
 });
