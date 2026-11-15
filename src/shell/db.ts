@@ -115,6 +115,7 @@ export function openMetaDatabase(path: string, random: Random, journal: (code: s
   const db = new DatabaseSync(path);
   try {
     db.exec('PRAGMA journal_mode = WAL');
+    db.exec('PRAGMA synchronous = FULL');
     db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
     db.exec('PRAGMA foreign_keys = ON');
     db.exec(META_SCHEMA_V0);

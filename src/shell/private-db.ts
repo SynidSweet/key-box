@@ -31,6 +31,7 @@ export const PRIVATE_SCHEMA_V0 = `
 export function openPrivateDatabase(path: string, journal: (code: string) => void = noJournal): PrivateStore {
   const db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode = WAL');
+  db.exec('PRAGMA synchronous = FULL');
   db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
   db.exec(PRIVATE_SCHEMA_V0);
   try {
