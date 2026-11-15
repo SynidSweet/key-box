@@ -11,9 +11,9 @@ ALPINE=alpine@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734
 IMAGE_NAME=noble-server-cloudimg-amd64.img
 IMAGE_BASE=https://cloud-images.ubuntu.com/noble/current
 # Bounds, in seconds. Every wait polls a named condition and gives up at its bound.
-BOOT1_TIME_BOUND=1800  # boot 1: until `step` reads `time`
-BOOT1_HOLD=600         # boot 1: `step` stays `time` for this long, then power off
-BOOT2_RUN=300          # boot 2: runs this long, then power off
+BOOT1_TIME_BOUND=${BOOT1_TIME_BOUND:-1800}  # boot 1: until `step` reads `time`
+BOOT1_HOLD=${BOOT1_HOLD:-600}         # boot 1: `step` stays `time` for this long, then power off
+BOOT2_RUN=${BOOT2_RUN:-300}          # boot 2: runs this long, then power off
 POWER_BOUND=120        # after system_powerdown, until qemu exits (then `quit`)
 POLL=45                # between looks at the disk
 
@@ -41,14 +41,14 @@ if [ "${1:-}" != "--inside" ]; then
   NAME=kbvm-$$
   trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
   docker run --rm --name "$NAME" --device /dev/kvm --memory=3g --memory-swap=3g \
-    -e IMAGE_NAME="$IMAGE_NAME" \
+    -e IMAGE_NAME="$IMAGE_NAME" -e BOOT1_TIME_BOUND -e BOOT1_HOLD -e BOOT2_RUN \
     -v "$CACHE/$IMAGE_NAME:/img/$IMAGE_NAME:ro" -v "$USERDATA:/in/user-data:ro" -v "$SELF:/harness.sh:ro" \
     "$ALPINE" sh -c 'apk add --no-cache bash >/dev/null && exec bash /harness.sh --inside'
   exit $?
 fi
 
 # ------------------------------------------------------------------------------------------------------------------ inside the container
-apk add --no-cache qemu-system-x86_64 qemu-img mtools e2fsprogs dosfstools sfdisk socat coreutils >/dev/null
+apk add --no-cache qemu-system-x86_64 qemu-img mtools e2fsprogs e2fsprogs-extra dosfstools sfdisk socat coreutils >/dev/null
 W=/work
 mkdir -p "$W"
 cd "$W"
@@ -106,12 +106,15 @@ snapshot() { # [live]: with `live` the guest is stopped for the copy and continu
   local rc=0
   qemu-img convert -U -f qcow2 -O raw "$W/overlay.qcow2" "$W/snap.raw" || rc=$?
   [ "${1:-}" = live ] && mon cont >/dev/null
-  [ "$rc" -eq 0 ] || return 1
+  [ "$rc" -eq 0 ] || { echo "snapshot: qemu-img convert exited $rc" >&2; return 1; }
   local start
   start=$(sfdisk -d "$W/snap.raw" | sed 's/ //g' | awk -F'[=,]' '/type=0FC63DAF/ { if ($4 + 0 > best) { best = $4 + 0; start = $2 } } END { print start }')
-  [ -n "$start" ] || return 1
+  [ -n "$start" ] || { echo "snapshot: no Linux partition found" >&2; return 1; }
   PART="$W/snap.raw?offset=$((start * 512))"
-  e2fsck -fy "$PART" >/dev/null 2>&1 || [ $? -le 1 ]  # 0 or 1 (journal replayed, fixed): a clean read
+  e2fsck -fy "$PART" >/dev/null 2>&1 && rc=0 || rc=$?  # 0 or 1 (journal replayed, fixed): a clean read
+  [ "$rc" -le 1 ] || { echo "snapshot: e2fsck exited $rc" >&2; return 1; }
+  # the positive control: a disk that cannot show /etc/passwd shows nothing, and every "absent" check would pass
+  has /etc/passwd || { echo "snapshot: /etc/passwd is not readable on the partition" >&2; return 1; }
 }
 rd() { debugfs -R "cat $1" "$PART" 2>/dev/null; }
 has() { debugfs -R "stat $1" "$PART" 2>&1 | grep -q '^Inode:'; }
@@ -137,6 +140,12 @@ else
 fi
 power_off
 snapshot || { echo "FAIL boot 1: the disk could not be read"; exit 1; }
+if [ "$seen" -ne 1 ]; then  # what the disk and the console say, for whoever reads a failure
+  echo "--- diagnostics: console cloud-init lines"; grep -ai "cloud-init\|nocloud\|datasource\|cidata" "$W/console-1.log" | cut -c1-200 | tail -n 40 || true
+  echo "--- diagnostics: /var/lib/kb-bootstrap"; debugfs -R 'ls -l /var/lib/kb-bootstrap' "$PART" 2>&1 | head -20
+  echo "--- diagnostics: /var/lib/cloud"; debugfs -R 'ls -l /var/lib/cloud' "$PART" 2>&1 | head -20
+  echo "--- diagnostics: cloud-init-output.log tail"; rd /var/log/cloud-init-output.log | tail -n 25
+fi
 
 # The units of ours: none may be enabled (a link in any .wants/.requires directory) and no unit file of theirs may sit in /etc/systemd/system.
 ours='kb-[a-z]*\.(service|path)|keybox\.service|keyrelay\.service|caddy\.service'
