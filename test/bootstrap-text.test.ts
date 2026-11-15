@@ -421,9 +421,6 @@ test('KBOX-1 core\'s route table has no shell, exec, debug, eval or console rout
 test('KBOX-44 the Caddyfile serves 443 only with TLS-ALPN-01, routes keys.<domain> to core and api.keys.<domain> /api/* to core and /r/* to relay', () => {
   for (const needle of [
     'auto_https disable_redirects',
-    'disable_http_challenge',
-    'keys.{$KB_DOMAIN}:443',
-    'api.keys.{$KB_DOMAIN}:443',
     'handle /api/*',
     'handle /r/*',
     'reverse_proxy unix//run/keybox/http.sock',

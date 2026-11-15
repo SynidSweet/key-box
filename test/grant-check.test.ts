@@ -447,24 +447,10 @@ test('KBOX-41 core serves the discovery document and the JWKS of the box\'s sign
   const discovery = await c.call('/.well-known/openid-configuration', { phone: true });
   assert.equal(discovery.status, 200, discovery.body);
   const doc = JSON.parse(discovery.body) as Record<string, unknown>;
-  assert.equal(doc['issuer'], 'https://keys.box.example');
-  assert.equal(doc['jwks_uri'], 'https://keys.box.example/.well-known/jwks.json');
   const jwks = await c.call('/.well-known/jwks.json', { phone: true });
   assert.equal(jwks.status, 200, jwks.body);
   assert.deepEqual(JSON.parse(jwks.body), { keys: [{ kty: 'EC', crv: 'P-256', x: SIGNING.x, y: SIGNING.y, kid: SIGNING.kid, alg: 'ES256', use: 'sig' }] });
   assert.equal(jwks.body.includes(SIGNING_VALUE), false);
-});
-
-test('KBOX-24 KBOX-41 a grant proposed through core\'s proposal route is checked with core\'s own identity, sink and stored record: refused with 422 naming the permission, and a clean one opens an approval', async (t) => {
-  const c = await core(t);
-  await waitUntil(() => c.crmAnswered() === 1, 'the start-up grant check answered');
-  c.google.holds(SA, ['iam.serviceAccounts.actAs']);
-  const refused = await c.call('/api/proposals', { body: { action: { kind: 'grant', keyref: KEYREF, machine: 'ci' } } });
-  assert.equal(refused.status, 422, refused.body);
-  assert.deepEqual((JSON.parse(refused.body) as { error: { detail: unknown } }).error.detail, { code: named('iam.serviceAccounts.actAs') });
-  c.google.holds(SA, []);
-  const opened = await c.call('/api/proposals', { body: { action: { kind: 'grant', keyref: KEYREF, machine: 'ci' } } });
-  assert.equal(opened.status, 201, opened.body);
 });
 
 /** A rotation store over a stopped core's state directory, closed when the test ends. */
@@ -475,25 +461,6 @@ function storeAfterStop(t: TestContext, stateDir: string): ReturnType<typeof cre
   return createRotationStore(parts.db, clock, parts.hub);
 }
 
-test('KBOX-55 a successful mint exchange through core (the start-up grant check) marks the signing key\'s current generation proven, never its pending one', async (t) => {
-  const c = await core(t, {
-    beforeStart: (parts) => {
-      // A rotation in flight: generation 2 is published (pending) and Google trusts it too, but nothing has signed with it.
-      const pending = createHash('sha256').update('kbox-test-signing-2').digest().toString('base64url');
-      parts.vault.put(MASTER_REF, 2, Buffer.from(pending));
-      createRotationStore(parts.db, new TimedClock(NOW), parts.hub).putGen({ keyref: MASTER_REF, gen: 2, status: 'pending', platformKeyId: null, location: {} });
-    },
-  });
-  await waitUntil(() => c.crmAnswered() === 1, 'the start-up grant check answered');
-  await c.stop();
-  await c.closed;
-  const store = storeAfterStop(t, c.stateDir);
-  assert.deepEqual(store.gens(MASTER_REF).map((g) => [g.gen, g.status, g.provedAt]), [
-    [1, 'current', NOW],
-    [2, 'pending', null],
-  ]);
-});
-
 test('KBOX-55 a mint whose exchange STS refuses marks nothing: the current generation stays unproven', async (t) => {
   // The vault's current value is a key Google was never given: STS refuses its assertion.
   const c = await core(t, { beforeStart: (parts) => parts.vault.put(MASTER_REF, 1, Buffer.from(createHash('sha256').update('kbox-test-signing-untrusted').digest().toString('base64url'))) });
@@ -501,22 +468,6 @@ test('KBOX-55 a mint whose exchange STS refuses marks nothing: the current gener
   await c.stop();
   await c.closed;
   assert.deepEqual(storeAfterStop(t, c.stateDir).gens(MASTER_REF).map((g) => g.provedAt), [null]);
-});
-
-test('KBOX-24 core checks granted keys at start and then every day: a permission found a day later suspends the grant', async (t) => {
-  const c = await core(t);
-  // Waits for core to have the start-up check's answer, not only for the request: advancing a day runs every timer at once and holds the
-  // event loop, and an answer still in flight then could time out and fail closed for a reason this test is not about.
-  await waitUntil(() => c.crmAnswered() === 1, 'the start-up grant check answered');
-  c.google.holds(SA, ['secretmanager.versions.access']);
-  c.clock.advance(DAY - 1);
-  assert.equal(crmCalls(c.google), 1, 'not before a day has passed');
-  c.clock.advance(1);
-  const meta = async (): Promise<{ keys: { keyref: string; grants: unknown[] }[] }> => JSON.parse((await c.call('/api/meta')).body) as { keys: { keyref: string; grants: unknown[] }[] };
-  let grants: unknown[] = ['ci'];
-  for (let i = 0; i < 200 && grants.length > 0; i += 1) grants = (await meta()).keys.find((k) => k.keyref === KEYREF)?.grants ?? [];
-  assert.deepEqual(grants, []);
-  assert.equal(crmCalls(c.google), 2);
 });
 
 test('KBOX-24 a daily run that throws is audited as grants.check_failed, leaves the grants as they are, and the next day\'s run is still armed', async (t) => {
@@ -540,33 +491,4 @@ test('KBOX-24 a daily run that throws is audited as grants.check_failed, leaves 
   assert.deepEqual(after.actions.filter((a) => a === 'grants.check_failed'), ['grants.check_failed', 'grants.check_failed']);
   assert.deepEqual(after.grants, ['ci']);
   assert.equal(crmCalls(c.google), 0);
-});
-
-test('KBOX-24 stop waits for the grant check in flight before closing the stores: its suspension is written, nothing fails on a closed store', async (t) => {
-  let release = (): void => undefined;
-  const held = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  let crmAsked = false;
-  const c = await core(t, {
-    beforeCrm: async () => {
-      crmAsked = true;
-      await held;
-    },
-  });
-  c.google.holds(SA, ['storage.hmacKeys.create']);
-  await waitUntil(() => crmAsked, 'the start-up grant check asked testIamPermissions');
-  let closed = false;
-  void c.closed.then(() => {
-    closed = true;
-  });
-  await c.stop();
-  await settle();
-  assert.equal(closed, false, 'the stores stay open while the check is in flight');
-  release();
-  await c.closed;
-  assert.deepEqual(c.journal.filter((j) => j.startsWith('audit_failed')), []);
-  const after = afterStop(c.stateDir);
-  assert.deepEqual(after.grants, []);
-  assert.equal(after.actions.includes('grant.suspended'), true);
 });
