@@ -1,17 +1,18 @@
 [Unit]
-Description=Key box recovery code (KBOX-20): a fresh code on the console at every host boot
+Description=Key box code (KBOX-20, KBOX-66): a fresh setup or recovery code, with the box address, on the console at every host boot
 DefaultDependencies=no
-After=local-fs.target
+After=local-fs.target kb-join.service
+Requires=kb-join.service
 Before=keybox.service
 
 [Service]
 Type=oneshot
 User=root
-ExecStart=/opt/keybox/current/bin/node /opt/keybox/current/src/cli/kb-code.ts recovery
+ExecStart=/opt/keybox/current/bin/node /opt/keybox/current/src/cli/kb-code.ts boot
 # The console device is UNVERIFIED on the A1 instance (KBOX-20, design section 12); its path is console_device in
 # deploy/runtime.config.json and is probed by the update unit. This is the only unit with device access.
 SupplementaryGroups=tty
-DeviceAllow=/dev/ttyAMA0 w
+DeviceAllow=/dev/tty1 w
 PrivateDevices=no
 LimitCORE=0
 NoNewPrivileges=yes
