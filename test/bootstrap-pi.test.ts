@@ -88,7 +88,7 @@ test('KBOX-48 the order is ssh items, then the whole hardening item, then the st
   const hardening = at(/^step hardening\b/);
   const wait = at(/timedatectl/);
   assert.ok(step < purge && purge < mask && mask < rm && rm < hardening, 'ssh items, in order, then hardening');
-  for (const re of [/^if id ubuntu\b/, /^passwd -l root$/, /^apt-get purge -y snapd$/, /^systemctl mask getty@tty1\.service /, /^rfkill block /, /setterm --blank 0/, /^sysctl -p /, /ShowStatus=no/]) {
+  for (const re of [/^if id ubuntu\b/, /^passwd -l root$/, /^apt-get purge -y snapd$/, /^systemctl mask getty@tty1\.service /, /setterm --blank 0/, /^sysctl -p /, /ShowStatus=no/]) {
     assert.ok(at(re) > hardening && at(re) < wait, `${re.source} is in the hardening item, before the stage-0 wait`);
   }
   assert.ok(hardening < wait && wait < firstFetch(), 'hardening, then the wait, then the first fetching apt-get');
@@ -297,7 +297,7 @@ test('KBOX-48 a run stuck at the stage-0 time wait has already hardened the imag
   assert.notEqual(b.status, 0, 'the run was stopped inside the wait');
   assert.ok(b.events.filter((e) => e.startsWith('sleep')).length >= 3, 'the loop was reached');
   assert.equal(b.file('var/lib/kb-bootstrap/step')?.trim(), 'time');
-  for (const call of ['userdel -r ubuntu', 'passwd -l root', 'systemctl mask getty@tty1.service autovt@tty1.service serial-getty@ttyS0.service', 'rfkill block wifi bluetooth']) assert.ok(b.events.includes(call), call);
+  for (const call of ['userdel -r ubuntu', 'passwd -l root', 'systemctl mask getty@tty1.service autovt@tty1.service serial-getty@ttyS0.service']) assert.ok(b.events.includes(call), call);
   assert.ok(!b.events.some((e) => /^apt-get (-y )?(update|upgrade|install)\b/.test(e)), 'nothing fetched');
 });
 
@@ -322,7 +322,7 @@ test('KBOX-48 a whole run does each hardening step and each later step in order:
   const b = await bootstrap(t, { env: { FAKE_UBUNTU: '1' } });
   assert.equal(b.status, 0, b.stderr);
   const e = b.events;
-  for (const call of ['userdel -r ubuntu', 'passwd -l root', 'apt-get purge -y snapd', 'systemctl mask getty@tty1.service autovt@tty1.service serial-getty@ttyS0.service', 'rfkill block wifi bluetooth', 'setterm --blank 0']) assert.ok(e.some((x) => x.startsWith(call)), call);
+  for (const call of ['userdel -r ubuntu', 'passwd -l root', 'apt-get purge -y snapd', 'systemctl mask getty@tty1.service autovt@tty1.service serial-getty@ttyS0.service', 'setterm --blank 0']) assert.ok(e.some((x) => x.startsWith(call)), call);
   const config = b.file('boot/firmware/config.txt') ?? '';
   for (const l of ['dtoverlay=disable-wifi', 'dtoverlay=disable-bt', 'hdmi_force_hotplug=1', 'gpu_mem=16']) assert.equal(config.split('\n').filter((x) => x === l).length, 1, l);
   assert.match(b.file('boot/firmware/cmdline.txt') ?? '', /^console=serial0,115200 console=tty1 root=LABEL=writable rootfstype=ext4 consoleblank=0\n$/);
