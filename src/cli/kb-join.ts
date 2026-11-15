@@ -3,16 +3,19 @@
 // the box) and nothing to stdout or stderr. A transient Tailscale state only ever waits; the one terminal state is a wrong name seen on
 // two reads 30 s apart. Every module below is a static import, so reaching `--self-check` loaded them all.
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { uptime } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { connect } from 'node:tls';
 import { DOMAIN_NAME } from '../pure/actions.ts';
 import { sameHostName } from '../pure/host-name.ts';
+import { meminfoKib, overItems } from '../pure/bench.ts';
 import { decodeJsonBody } from '../pure/schemas.ts';
 import { TIME_OK_FILE } from '../pure/time-gate.ts';
 import type { Clock } from '../ports/clock.ts';
 import { systemClock, systemScheduler } from '../shell/clock.ts';
+import { isObject, updateFacts } from '../shell/facts-file.ts';
+import type { Json } from '../shell/facts-file.ts';
 
 const SELF_CHECK = '--self-check';
 const LINE_START = '\r\x1b[2K';
@@ -21,8 +24,6 @@ const WRONG_NAME_RECHECK_MS = 30_000;
 const NO_LOGIN_MS = 60_000;
 const SOURCES = 3;
 const HTTPS_PORT = 8443;
-/** The budgets of design 3.8 that kb-ready judges (availability budgets: a miss is a fact, never a stop). */
-const BUDGET = { copy_ms: 30_000, self_check_ms: 5_000, update_memory_kib: 65_536, core_start_ms: 20_000, relay_start_ms: 10_000 } as const;
 const UP_ARGS = ['up', '--qr', '--hostname=keybox', '--advertise-tags=tag:keybox', '--ssh=false', '--accept-dns=false', '--accept-routes=false'] as const;
 
 const L1 = (name: string): string =>
@@ -136,24 +137,6 @@ function runUp(deps: JoinDeps, screen: Screen): Promise<{ readonly ok: boolean; 
     child.once('error', (e) => resolve({ ok: false, first: e.message }));
     child.once('close', (code) => resolve({ ok: code === 0, first: first() }));
   });
-}
-
-// ------------------------------------------------------------------------------------------------ facts
-
-type Json = Record<string, unknown>;
-const isObject = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v);
-
-/** Reads the facts file (an absent or unreadable one starts empty: facts are names and numbers, never a gate), changes it, and
- * replaces it whole, world-readable. */
-function updateFacts(path: string, change: (facts: Json) => void): void {
-  const decoded = existsSync(path) ? decodeJsonBody(readFileSync(path)) : { ok: false as const };
-  const facts: Json = decoded.ok && isObject(decoded.value) ? decoded.value : {};
-  change(facts);
-  mkdirSync(dirname(path), { recursive: true });
-  const next = `${path}.new`;
-  writeFileSync(next, `${JSON.stringify(facts)}\n`);
-  chmodSync(next, 0o644);
-  renameSync(next, path);
 }
 
 // ------------------------------------------------------------------------------------------------ tailscale's answer
@@ -322,34 +305,9 @@ function startMs(deps: ReadyDeps, unit: string, socket: string): number | null {
   return Math.round(born - (deps.clock.now() - deps.uptimeMs() + activeUs / 1000));
 }
 
-function memAvailableKib(file: string): number | null {
-  const match = existsSync(file) ? /^MemAvailable:\s+(\d+) kB$/m.exec(readFileSync(file, 'utf8')) : null;
-  return match === null ? null : Number(match[1]);
-}
-
-interface OverItem {
-  readonly item: string;
-  readonly measured: number;
-  readonly budget: number;
-  readonly unit: 'ms' | 'KiB';
-}
+const memAvailableKib = (file: string): number | null => (existsSync(file) ? meminfoKib(readFileSync(file, 'utf8'), 'MemAvailable') : null);
 
 const OWN_ITEMS = /^(update\..*|core\.start|relay\.start)$/;
-const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
-
-/** The update.* items of bench.over (the bench's numbers against 3.8's budgets) and the start items. */
-function overItems(update: Json, memKib: number | null, core: number | null, relay: number | null): OverItem[] {
-  const over: OverItem[] = [];
-  const copy = num(update['copy_ms']);
-  const selfCheck = num(update['self_check_ms']);
-  const peak = num(update['peak_rss_kb']);
-  if (copy !== undefined && copy > BUDGET.copy_ms) over.push({ item: 'update.copy', measured: copy, budget: BUDGET.copy_ms, unit: 'ms' });
-  if (selfCheck !== undefined && selfCheck > BUDGET.self_check_ms) over.push({ item: 'update.self_check', measured: selfCheck, budget: BUDGET.self_check_ms, unit: 'ms' });
-  if (memKib !== null && peak !== undefined && memKib - peak < BUDGET.update_memory_kib) over.push({ item: 'update.memory', measured: memKib - peak, budget: BUDGET.update_memory_kib, unit: 'KiB' });
-  if (core !== null && core > BUDGET.core_start_ms) over.push({ item: 'core.start', measured: core, budget: BUDGET.core_start_ms, unit: 'ms' });
-  if (relay !== null && relay > BUDGET.relay_start_ms) over.push({ item: 'relay.start', measured: relay, budget: BUDGET.relay_start_ms, unit: 'ms' });
-  return over;
-}
 
 export async function runReady(deps: ReadyDeps): Promise<number> {
   const screen = new Screen(deps.tty, deps.clock);

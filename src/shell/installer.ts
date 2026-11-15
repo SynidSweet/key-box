@@ -104,7 +104,7 @@ export const RUN_BUDGET_MS = 110_000;
  * no earlier phase is given time that reaches into it. */
 export const RESTART_WITHIN_MS = 15_000;
 /** The new release's kb-install self-check, at most. */
-const SELF_CHECK_WITHIN_MS = 10_000;
+export const SELF_CHECK_WITHIN_MS = 10_000;
 /** The least time worth a health check. */
 const MIN_HEALTH_MS = 10_000;
 /** A copy (its reads, hashes and writes) ends early enough to leave a restart, a self-check, a health check and a rollback
