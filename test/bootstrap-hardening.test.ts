@@ -126,3 +126,9 @@ test('radio-off: with all four lines already present config.txt is byte-identica
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.read('boot/firmware/config.txt'), config);
 });
+
+test('radio-off: a config.txt with no final newline keeps its last line whole when the [all] line is appended', async (t) => {
+  const r = await harden(t, { config: CM4.slice(0, -1) });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.read('boot/firmware/config.txt'), `${CM4}[all]\n${LINES.join('\n')}\n`);
+});

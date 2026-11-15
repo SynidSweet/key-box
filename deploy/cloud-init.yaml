@@ -104,7 +104,10 @@ runcmd:
     ALL=
     for l in dtoverlay=disable-wifi dtoverlay=disable-bt hdmi_force_hotplug=1 gpu_mem=16; do
       if ! grep -qxF "$l" "$K/boot/firmware/config.txt"; then
-        if [ -z "$ALL" ]; then printf '[all]\n' >> "$K/boot/firmware/config.txt"; ALL=1; fi
+        if [ -z "$ALL" ]; then
+          if [ -s "$K/boot/firmware/config.txt" ] && [ -n "$(tail -c 1 "$K/boot/firmware/config.txt")" ]; then printf '\n' >> "$K/boot/firmware/config.txt"; fi
+          printf '[all]\n' >> "$K/boot/firmware/config.txt"; ALL=1
+        fi
         printf '%s\n' "$l" >> "$K/boot/firmware/config.txt"
       fi
     done
