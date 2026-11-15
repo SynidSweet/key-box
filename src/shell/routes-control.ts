@@ -3,7 +3,6 @@ import { readFileSync } from 'node:fs';
 import type { AuditLog } from '../ports/audit.ts';
 import type { EventLog } from '../ports/events.ts';
 import type { MetaStore } from '../ports/meta.ts';
-import { oidcIssuer } from '../pure/box-origins.ts';
 import { ApiError } from '../pure/errors.ts';
 import { int, optional, text } from '../pure/schemas.ts';
 import type { EventPoller } from './events.ts';
@@ -17,8 +16,6 @@ export interface ControlDeps {
   readonly audit: AuditLog;
   readonly events: EventLog;
   readonly poller: EventPoller;
-  /** The box's domain, when configured; the OIDC issuer shown by /api/meta is derived from it, never stored. */
-  readonly domain?: string;
 }
 
 /** The facts file's bytes, once checked to be JSON: a missing file is `not_found`, one that is not JSON is `unavailable`; any other read fault is the frame's 500. */
@@ -48,11 +45,7 @@ export function controlRoutes(deps: ControlDeps): Route[] {
       handle: () => ({ raw: { type: 'application/json; charset=utf-8', bytes: bootstrapFacts(deps.bootstrapFactsPath) } }),
     }),
 
-    route({ method: 'GET', path: '/api/meta', surface: 'api', scope: 'control', handle: () => {
-        const snapshot = deps.meta.controlSnapshot();
-        return { json: { ...snapshot, box: { ...snapshot.box, oidc_issuer: deps.domain === undefined ? null : oidcIssuer(deps.domain) } } };
-      },
-    }),
+    route({ method: 'GET', path: '/api/meta', surface: 'api', scope: 'control', handle: () => ({ json: deps.meta.controlSnapshot() }) }),
 
     route({
       method: 'GET',

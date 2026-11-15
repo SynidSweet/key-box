@@ -3,6 +3,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import { oidcIssuer } from '../pure/box-origins.ts';
 import type { AuditLog } from '../ports/audit.ts';
 import type { Clock, Scheduler } from '../ports/clock.ts';
 import type { EventLog, EventSignal } from '../ports/events.ts';
@@ -73,7 +74,7 @@ export interface CoreDeps {
   readonly random: Random;
   /** Where the schema codes of KBOX-56 go (`schema_newer`, `schema_migration_failed`); a test over a scratch directory may leave it out. */
   readonly journal?: (code: string) => void;
-  /** The box's domain, when configured (KB_DOMAIN); /api/meta derives the OIDC issuer from it. */
+  /** The box's domain, when configured (KB_DOMAIN): core writes the OIDC issuer derived from it at open. */
   readonly domain?: string;
 }
 
@@ -98,9 +99,10 @@ export function openCore(deps: CoreDeps): CoreParts {
   const events = createEventLog(db, deps.clock, hub);
   const poller = createEventPoller(events, hub, deps.scheduler, POLL_HOLD_MS);
   const meta = createMetaStore(db, deps.clock, hub);
+  if (deps.domain !== undefined) meta.setOidcIssuer(oidcIssuer(deps.domain));
   const audit = createAuditLog(db);
   const vaultRoot = join(deps.stateDir, 'vault');
   for (const ref of sweepOrphanTemps(vaultRoot)) audit.append({ action: 'vault.temp_swept', subject: ref, at: deps.clock.now() });
   const vault = createFileVault(vaultRoot);
-  return { db, meta, audit, events, hub, poller, vault, share: { signingKey: shareSigningKeyIn(vault), values: shareValuesIn(vault) }, routes: controlRoutes({ bootstrapFactsPath: join(deps.stateDir, 'bootstrap-facts.json'), meta, audit, events, poller, ...(deps.domain === undefined ? {} : { domain: deps.domain }) }), close: () => db.close() };
+  return { db, meta, audit, events, hub, poller, vault, share: { signingKey: shareSigningKeyIn(vault), values: shareValuesIn(vault) }, routes: controlRoutes({ bootstrapFactsPath: join(deps.stateDir, 'bootstrap-facts.json'), meta, audit, events, poller }), close: () => db.close() };
 }

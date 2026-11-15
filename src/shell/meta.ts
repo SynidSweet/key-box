@@ -129,6 +129,10 @@ export function createMetaStore(db: DatabaseSync, clock: Clock, hub: EventSignal
       db.prepare('UPDATE box_info SET release = ?').run(release);
     },
 
+    setOidcIssuer(issuer) {
+      db.prepare('UPDATE box_info SET oidc_issuer = ?').run(issuer);
+    },
+
     snapshot: () => inReadTransaction(db, () => readSnapshot(db)),
     controlSnapshot: () =>
       inReadTransaction(db, () => {

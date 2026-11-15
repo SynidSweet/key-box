@@ -102,6 +102,8 @@ export interface MetaStore {
   epoch(): string;
   /** Records the running release H (KBOX-6): `/healthz` and `GET /api/meta` show it. Core sets it at every start. */
   setRelease(release: string): void;
+  /** Records the box's OIDC issuer (design 3.3b): core writes it at open when a domain is configured; `GET /api/meta` shows it. */
+  setOidcIssuer(issuer: string): void;
   shareState(): ShareState;
   /** Publishes the share signing key's public half. Setting the same key again is allowed; a different one is refused. */
   setSharePublicKey(keyB64: string): void;
