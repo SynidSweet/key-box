@@ -25,9 +25,9 @@ export interface SystemdDeps {
   readonly healthSockets: readonly string[];
   readonly clock: Clock;
   readonly wait: (ms: number) => Promise<void>;
-  /** The Node that runs a release's kb-install for its self-check: by default the release's own pinned `bin/node`. */
   /** kb-install's own KB_TIME_OK_FILE value, the one variable the self-check spawn gets; unset, it gets none. */
   readonly timeOkFile?: string;
+  /** The Node that runs a release's kb-install for its self-check: by default the release's own pinned `bin/node`. */
   readonly nodeOf?: (releaseDir: string) => string;
 }
 
